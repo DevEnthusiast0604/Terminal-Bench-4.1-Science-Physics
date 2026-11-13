@@ -117,6 +117,24 @@ where the evidence lives. All times are UTC (the platform shows UTC; this PC is 
   changed (0.006%); scan 0 problems. `contract_probes` and `contract_generality` wait for the reviewer's note,
   which names the counterexample and the assumption (gamma's did, 2026-11-10 17:56). Poller restarted 10:35
   (`work/dhva-fermi-surface/v4/poll6.out`).
+- **2026-11-13 15:05**: the 10:35 poller stopped with exit 2 at 14:31: status calls had timed out (170 s) from 11:52,
+  three in a row by 14:31. Not a sign-out and not the platform (curl 401 in 1.7 s; every tab answered a raw CDP
+  evaluate at once). Playwright's `connect_over_cdp` hung after the websocket opened: with DEBUG=pw:protocol,
+  `Runtime.enable` on each platform tab never answered while it replayed leftover Playwright utility worlds, one
+  per earlier connection (`__playwright_utility_world_page@<id>`): 776 in the T-1563 tab and 697 in the #submit tab
+  within 40 s. Long-lived tabs keep them across navigations, so every poll of every session added one to every
+  tab. Fix in `tools/supertasker.py`: each call works in a new tab (`fresh_page`) and leaves it as
+  `about:blank#tb4-keeper` (`retire`); the next call closes the keeper after opening its own tab, so the window
+  keeps one; `task_view` also closes a tab still on the same task's page from an earlier call. Tabs: the T-1383
+  and #submit tabs had already been closed by another session between 14:47 and 14:52 (none had a dialog, a chosen
+  file or a filled field); I closed the T-1563 tab (14:55) and the orphan #submit tab (14:59, the former T-1519
+  tab). Status calls then took 23 s (97 s before the last close). T-1563 unchanged: Waiting for a reviewer, last
+  change 10:13, 0 unseen. Poller restarted 15:00 (`work/dhva-fermi-surface/v4/poll7.out`).
+- **2026-11-13 15:10**: `tools/supertasker.py` again: at 15:01 a leftover `/#submit` tab appeared (history 3, so a
+  call's tab the platform sent from a task page to `#submit`, and the call was killed before it could blank it).
+  `fresh_page` now also closes a platform tab whose page is older than `STALE_SEC` (900 s) with no open dialog and
+  no file chosen; a call lasts under 3 minutes, so no tab in use qualifies. `task_view` leaves this call's own tabs
+  open until it ends (upload-fix reads the status while its upload tab is still open). Status call 19 s.
 
 ## Version history
 

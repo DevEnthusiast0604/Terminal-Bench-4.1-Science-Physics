@@ -381,3 +381,19 @@ Tools for it (run from the folder root):
 - (2026-11-13 01:50) The user confirmed: "pass@8 qualifies at 1-6/8" (solved attempts of 8).
 - (07:32) gamma-decay-scheme v13 (0 of 3 on Sol 6.1): a trap that needs a level difference only works when the upper level is placed early. Sol 6.1 matches level differences to peaks once, before it adds levels from weak lines, and does not repeat it.
 - (07:51) gamma-decay-scheme v14: the share of a weak member under a strong line from a fit of the peak's shape is set by the energy scale more than by the shape (0.05 keV moves it by about 0.06); gate proportions are robust. Size such a trap against the gate method, and expect a shape fit to land anywhere within about 30%.
+- (14:59) If `supertasker.py` calls slow down over days and then time out in `connect_over_cdp` while `http://127.0.0.1:9224/json/version` still answers, look at the open queue tabs: every past Playwright connection left a utility world in each tab it saw, and connecting replays them all (gamma-decay-scheme Pitfalls, 2026-11-13). Since 2026-11-13 14:51 the tool works in a tab of its own per call and the next call closes it, so its own tabs no longer pile them up; any other long-lived tab still does. Close such a tab only when no other session's call is running (`Get-CimInstance Win32_Process` lists them).
+- (2026-11-13 15:05) If `supertasker.py` calls time out while Chrome on 9224 and the platform both answer, count
+  the tabs (`curl -s 127.0.0.1:9224/json/list`): every Playwright connection leaves a utility world in every open
+  tab, a tab keeps them across navigations, and connecting replays them all. After two days the platform tabs held
+  700 to 776 each and every session's status call timed out (dhva's poller exit 2 at 14:31). Since 15:00 each call
+  opens its own tab and leaves it as `about:blank#tb4-keeper`, which the next call closes (`fresh_page`, `retire`).
+  A tab the tool did not leave that way (a manual one, or one from before the change) still collects worlds: close
+  it with `curl -s 127.0.0.1:9224/json/close/<id>` once a raw check shows nothing in progress in it, and never close
+  the last tab. Status took 23 s afterwards.
+- (15:10) Addendum to 15:05: `fresh_page` also closes a platform tab whose page is older than 15 minutes with no
+  open dialog and no file chosen (a call the poller kills at 170 s never blanks its tab). Close tabs by hand only
+  when calls are already too slow for that to happen.
+- (2026-11-13 15:12) User rule: "You don't need to work until re-work. watch the pipeline only okay ?" While a task waits on the platform, only watch it (poller, log the cards); start drafts, fixes or tool work only once the task is sent back for rework.
+- (15:29) The user watches the debug Chrome window and asked to see the task page there, so a call now leaves its tab on the task page (only other pages go blank as about:blank#tb4-keeper); the next call on that task opens a fresh tab and closes the old one, so the page refreshes about every 3 minutes and no tab lives long.
+- (2026-11-13 15:31) The user, completing the 15:12 rule: "if failed, you should work while watching pipeline." So: while the platform is deciding, only watch; as soon as a check fails or the task is sent back, start the fix at once, keep the poller running through the rework, and resubmit (the standing rule in CLAUDE.md).
+- (2026-11-13 15:39) User rule, standing: "From now on, please use the git as well. I just configured git for pushing as well. So after you updated task, please commeit and push as well on the last step always. keep this rule". The folder is now a git repo (remote `origin` = GitHub, branch `main`). The last step of every task update (release, new task, fix, log entries) is `git add -A`, `git commit`, `git push origin main`; check `git status` before staging so nothing under `.supertasker-profile/` or any secret goes in (`.gitignore` covers both), and report a failed push.

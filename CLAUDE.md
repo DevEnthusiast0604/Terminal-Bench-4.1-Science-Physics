@@ -5,8 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this folder is
 
 A workspace for writing Terminal-Bench 4 ("TB4", Tango Bravo IV) benchmark tasks and taking them through the
-Supertasker review platform (`queue.supertasker.ai`). It is not an application: there is nothing to build, no test
-suite and no git repository. History lives in `logs/`, `work/` and `deliveries/archive/`.
+Supertasker review platform (`queue.supertasker.ai`). It is not an application: there is nothing to build and no test
+suite. Since 2026-11-13 it is a git repository pushed to GitHub (see "Git, last step" under Standing rules). History lives in `logs/`, `work/` and `deliveries/archive/`.
 
 A task qualifies when the target model solves 1 or 2 of 3 attempts (pass@3). The platform then issues a P3 ID, which
 goes into the task's DAS record. 3 of 3 means make it genuinely harder. 0 of 3 means first look for an unstated
@@ -170,6 +170,9 @@ From the user. `logs/BRIEFING.md` has the dates and the rest; these are the ones
   passes. A hardening round should take 30 min to at most 2 h of work.
 - **Uploads.** No note, at most five per UTC day, Upload the fix included (`log_release.py` counts them from the logs).
   Never cancel a queued check, even on a version with a known defect: wait for the result, then fix and upload.
+- **Git, last step** (user, 2026-11-13): after every task update (a release, a new task, a fix, its logs), finish with
+  `git add -A`, `git commit` and `git push` to `origin main` (the repo's GitHub remote). Check `git status` first:
+  `.gitignore` keeps `.supertasker-profile/` and `.env*` out, and nothing secret may be staged. Report a failed push.
 - **Withdrawing** has only ever happened at the user's request. Don't do it on your own.
 - **Physics tasks** keep `work/physics-task-state.md` current.
 - **DAS.** The user submits on DAS: "There is no need to submit on DAS automatically. I will do it." (user,
