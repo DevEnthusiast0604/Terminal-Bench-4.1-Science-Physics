@@ -2,6 +2,7 @@
 # One-command release of a new version (Git Bash, from the folder root):
 #   bash tools/release.sh SLUG T-ID N "what changed, one or two sentences"   checks, archive, package, upload, log
 #   bash tools/release.sh --check SLUG                                      only the checks: nothing moved or sent
+# First tools/kit_update.py installs a newer toolkit if the platform offers one (user, 2026-11-13).
 # Checks: no __pycache__, tools/scan_task.py exit 0, the canary line in every shipped text file but *.json,
 # .gitattributes and uv.lock, tb4 lint exit 0. Then the zip now in deliveries/ is archived as v(N-1), tb4 package writes the
 # new zip, tools/supertasker.py uploads it with Upload the fix and no note (user, 2026-11-02), and
@@ -20,6 +21,16 @@ if [ "$check_only" = 0 ]; then
   tid=${2:?T-ID}; n=${3:?version number}; change=${4:?what changed}
   case "$n" in ''|*[!0-9]*) echo "FAIL: N must be a number"; exit 1;; esac
 fi
+
+echo "== toolkit"
+# The newest toolkit, always (user, 2026-11-13): tools/kit_update.py installs a newer one before lint runs.
+kit_rc=0
+py tools/kit_update.py || kit_rc=$?
+case "$kit_rc" in
+  0) ;;
+  1) echo "WARNING: the toolkit could not be checked; going on with the installed one" ;;
+  *) echo "FAIL: the new toolkit's template changed: refresh the task's copies of its files first"; exit 1 ;;
+esac
 
 echo "== checks"
 if find "$T" -name __pycache__ | grep -q .; then echo "FAIL: __pycache__ under $T"; exit 1; fi

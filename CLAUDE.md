@@ -24,8 +24,8 @@ Two things to know up front:
   11-09 as T-0020. Later that day the platform restored T-1383 and folded that upload into it as v3 (T-0020 is gone;
   local and platform versions match again). v3 came back 3 of 3; v4 went up at 18:02 UTC. Check the newest rows of
   `logs/STATUS.md`.
-- TB 4.1 (kit 3.8.2 at `~/tb4/tb4-starter-pack`; 3.7.0 and 3.3.0 kept as `~/tb4/tb4-starter-pack-3.7.0` and
-  `-3.3.0`): every Python dependency comes from a committed uv lock (`environment/locks/pyproject.toml` plus
+- TB 4.1 (kit 3.8.7 at `~/tb4/tb4-starter-pack` since 2026-11-13; 3.8.2, 3.7.0 and 3.3.0 kept as
+  `~/tb4/tb4-starter-pack-3.8.2`, `-3.7.0` and `-3.3.0`; always the newest, see "Toolkit" under Standing rules): every Python dependency comes from a committed uv lock (`environment/locks/pyproject.toml` plus
   `uv.lock`), never a `pip install` in a Dockerfile; since 3.8.2 lint fails a task without one. Make the lock with uv 0.10.8, the version the template's Docker build uses:
   `"$APPDATA/Python/Python312/Scripts/uv.exe" lock --directory tasks/active/<slug>/environment/locks`. Copy
   `tests/locks/judge/`, `tests/test.sh` and `tests/Dockerfile` from the template unchanged.
@@ -173,6 +173,10 @@ From the user. `logs/BRIEFING.md` has the dates and the rest; these are the ones
 - **Git, last step** (user, 2026-11-13): after every task update (a release, a new task, a fix, its logs), finish with
   `git add -A`, `git commit` and `git push` to `origin main` (the repo's GitHub remote). Check `git status` first:
   `.gitignore` keeps `.supertasker-profile/` and `.env*` out, and nothing secret may be staged. Report a failed push.
+- **Toolkit, always the newest** (user, 2026-11-13: "please download up-to-date toolkit always"): run
+  `python -X utf8 -I -B tools/kit_update.py` at the start of a session's work and before `tb4 package` of a new task.
+  `tools/release.sh` runs it before its checks. It installs a newer platform kit and keeps the old one as
+  `~/tb4/tb4-starter-pack-<version>`; exit 3 means the template changed, so refresh the task's copies of its files.
 - **Withdrawing** has only ever happened at the user's request. Don't do it on your own.
 - **Physics tasks** keep `work/physics-task-state.md` current.
 - **DAS.** The user submits on DAS: "There is no need to submit on DAS automatically. I will do it." (user,
