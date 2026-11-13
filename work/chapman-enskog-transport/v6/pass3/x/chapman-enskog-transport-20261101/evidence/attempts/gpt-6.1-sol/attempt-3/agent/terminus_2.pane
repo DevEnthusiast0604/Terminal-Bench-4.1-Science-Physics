@@ -1,0 +1,2128 @@
+[?2004hroot@59537d8bb9aa:/app# asciinema rec --stdin /logs/agent/recording.cast
+[?2004l[0;32masciinema: recording asciicast to /logs/agent/recording.cast[0m
+[0;32masciinema: press <ctrl-d> or type "exit" when you're done[0m
+[?2004hroot@59537d8bb9aa:/app# clear
+[?2004l[H[J[3J[?2004hroot@59537d8bb9aa:/app# mkdir -p /app/output; ls -la /app; python3 - <<'PY'
+[?2004l[?2004h> import numpy, scipy
+[?2004l[?2004h> print(numpy.__version__, scipy.__version__)
+[?2004l[?2004h> PY
+[?2004ltotal 12
+drwxr-xr-x 1 root root 4096 Nov  1 01:52 .
+drwxr-xr-x 1 root root 4096 Nov  1 01:52 ..
+drwxr-xr-x 2 root root 4096 Nov  1 01:52 output
+2.3.3 1.18.1
+[?2004hroot@59537d8bb9aa:/app# cat > /app/scatter_dev.py <<'PY'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from scipy.special import roots_legendre
+[?2004l[?2004h> from scipy.optimize import brentq, minimize_scalar
+[?2004l[?2004h> from scipy.integrate import quad
+[?2004l[?2004h> from functools import lru_cache
+[?2004l[?2004h> 
+[?2004l[?2004h> @lru_cache(None)
+[?2004l[?2004h> def gl(n):
+[?2004l[?2004h>     x,w=roots_legendre(n)
+[?2004l[?2004h>     return (x+1)/2,w/2
+[?2004l[?2004h> 
+[?2004l[?2004h> def potential(r,a):
+[?2004l[?2004h>     z=((1-a)/(r-a))**6
+[?2004l[?2004h>     return 4*z*(z-1)
+[?2004l[?2004h> 
+[?2004l[?2004h> def vp(r,a):
+[?2004l[?2004h>     z=((1-a)/(r-a))**6
+[?2004l[?2004h>     return 24*z*(1-2*z)/(r-a)
+[?2004l[?2004h> 
+[?2004l[?2004h> def F(r,a):
+[?2004l[?2004h>     return potential(r,a)+r*vp(r,a)/2
+[?2004l[?2004h> 
+[?2004l[?2004h> def geom(E,a):
+[?2004l[?2004h>     z=(1+np.sqrt(1+E))/2
+[?2004l[?2004h>     rp=a+(1-a)*z**(-1/6)
+[?2004l[?2004h>     peak=minimize_scalar(lambda r:-F(r,a),bounds=(a+(1-a)*2**(1/6),a+3*(1-a)),method='bounded',options={'xatol':1e-14}).x
+[?2004l[?2004h>     Ec=F(peak,a)
+[?2004l[?2004h>     if E<Ec:
+[?2004l[?2004h>         ro=brentq(lambda r:F(r,a)-E,peak,max(peak*2, (16*(1-a)**6/E)**(1/6)+a),xtol=1e-14)
+[?2004l[?2004h>         bc2=ro*ro*(1-potential(ro,a)/E)
+[?2004l[?2004h>         ri=brentq(lambda r:F(r,a)-E,rp,peak,xtol=1e-14)
+[?2004l[?2004h>         rc=brentq(lambda r:r*r*(1-potential(r,a)/E)-bc2,rp,ri,xtol=1e-14)
+[?2004l[?2004h>         return rp,ro,rc,bc2,Ec
+[?2004l[?2004h>     return rp,None,None,None,Ec
+[?2004l[?2004h> 
+[?2004l[?2004h> def chi_quad(r,E,a):
+[?2004l[?2004h>     z=((1-a)/(r-a))**6
+[?2004l[?2004h>     h=1-4*z*(z-1)/E
+[?2004l[?2004h>     def fun(t):
+[?2004l[?2004h>         t2=t*t
+[?2004l[?2004h>         lh=np.log1p(-t2)-np.log1p(a*t2/(r-a))
+[?2004l[?2004h>         dv=4*(-z*z*np.expm1(12*lh)+z*np.expm1(6*lh))/E
+[?2004l[?2004h>         f=dv+h*t2*(2-t2)
+[?2004l[?2004h>         return 2*t/np.sqrt(max(f,1e-300))
+[?2004l[?2004h>     rp,ro,rc,bc,Ec=geom(E,a)
+[?2004l[?2004h>     points=[]
+[?2004l[?2004h>     if ro is not None and r<rc:
+[?2004l[?2004h>         points=[np.sqrt(1-r/ro)]
+[?2004l[?2004h>     I,err=quad(fun,0,1,points=points,epsabs=2e-10,epsrel=2e-10,limit=200)
+[?2004l[?2004h>     return np.pi-2*np.sqrt(h)*I
+[?2004l[?2004h> 
+[?2004l[?2004h> def chi_batch(r,E,a,n=128,ro=None):
+[?2004l[?2004h>     r=np.asarray(r)
+[?2004l[?2004h>     z=((1-a)/(r-a))**6
+[?2004l[?2004h>     h=1-4*z*(z-1)/E
+[?2004l[?2004h>     t,w=gl(n)
+[?2004l[?2004h>     def part(t,weights):
+[?2004l[?2004h>         t2=t*t
+[?2004l[?2004h>         lh=np.log1p(-t2)-np.log1p(a*t2/(r[:,None]-a))
+[?2004l[?2004h>         dv=4*(-z[:,None]**2*np.expm1(12*lh)+z[:,None]*np.expm1(6*lh))/E
+[?2004l[?2004h>         f=dv+h[:,None]*t2*(2-t2)
+[?2004l[?2004h>         return np.sum(weights*2*t/np.sqrt(np.maximum(f,1e-300)),axis=1)
+[?2004l[?2004h>     if ro is not None:
+[?2004l[?2004h>         # Each segment is clustered near the bottleneck.
+[?2004l[?2004h>         tm=np.sqrt(np.maximum(0,1-r/ro))
+[?2004l[?2004h>         # t = tm(1-s^2) below tm, tm+(1-tm)s^2 above
+[?2004l[?2004h>         s=t[None,:]
+[?2004l[?2004h>         I=part(tm[:,None]*(1-s*s),w[None,:]*2*tm[:,None]*s)
+[?2004l[?2004h>         I+=part(tm[:,None]+(1-tm[:,None])*s*s,w[None,:]*2*(1-tm[:,None])*s)
+[?2004l[?2004h>     else:
+[?2004l[?2004h>         I=part(np.broadcast_to(t,(len(r),n)),w)
+[?2004l[?2004h>     return np.pi-2*np.sqrt(np.maximum(h,0))*I
+[?2004l[?2004h> 
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  import sys
+[?2004l[?2004h>  E,a=map(float,sys.argv[1:3])
+[?2004l[?2004h>  rp,ro,rc,bc,Ec=geom(E,a)
+[?2004l[?2004h>  print('geometry',rp,ro,rc,bc,Ec)
+[?2004l[?2004h>  r=np.linspace(rp*1.001,rc if rc is not None else 2*rp,10)
+[?2004l[?2004h>  r=np.r_[r[:-1],rc*(1-1e-6) if rc is not None else r[-1]]
+[?2004l[?2004h>  for n in [64,128,256,512]:
+[?2004l[?2004h>   print(n,chi_batch(r,E,a,n,ro))
+[?2004l[?2004h>  print('quad',[chi_quad(ri,E,a) for ri in r])
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/scatter_dev.py 0.2 0
+[?2004lgeometry 0.9922603042834013 1.8280634179929012 1.0466578928966224 5.0847032654388435 0.8000000000000002
+64 [  2.55499051   1.56089873   0.93822668   0.40636363  -0.09659494
+  -0.60669017  -1.16172001  -1.82696679  -2.7905753  -12.09574513]
+128 [  2.55499051   1.56089873   0.93822668   0.40636363  -0.09659494
+  -0.60669017  -1.16172001  -1.82696679  -2.7905753  -12.09574514]
+256 [  2.55499051   1.56089873   0.93822668   0.40636363  -0.09659494
+  -0.60669017  -1.16172001  -1.82696679  -2.7905753  -12.09574514]
+512 [  2.55499051   1.56089873   0.93822668   0.40636363  -0.09659494
+  -0.60669017  -1.16172001  -1.82696679  -2.7905753  -12.09574514]
+quad [np.float64(2.5549905118381666), np.float64(1.5608987321541936), np.float64(0.9382266796124803), np.float64(0.4063636318935431), np.float64(-0.09659494394480816), np.float64(-0.6066901745324045), np.float64(-1.1617200110344372), np.float64(-1.8269667859325027), np.float64(-2.790575303635584), np.float64(-12.095745140437462)]
+[?2004hroot@59537d8bb9aa:/app# cat >> /app/scatter_dev.py <<'PY'
+[?2004l[?2004h> 
+[?2004lp[?2004h> def cross_sections(E,a,L=16,n=160,nt=128):
+[?2004l[?2004h>     rp,ro,rc,bc,Ec=geom(E,a)
+[?2004l[?2004h>     t,w=gl(n)
+[?2004l[?2004h>     rr=[];ww=[];inner=[]
+[?2004l[?2004h>     if ro is not None:
+[?2004l[?2004h>         # orbiting endpoint, quartic clustering
+[?2004l[?2004h>         r=rc-(rc-rp)*(1-t)**4
+[?2004l[?2004h>         weights=w*4*(rc-rp)*(1-t)**3
+[?2004l[?2004h>         rr.append(r);ww.append(weights);inner.append(True)
+[?2004l[?2004h>         # outer branch: quadratic at orbit, inverse at infinity
+[?2004lroje[?2004h>         r=ro+(1-a)*t*t/(1-t)
+[?2004l[?2004h>         weights=w*(1-a)*t*(2-t)/(1-t)**2
+[?2004l[?2004h>         rr.append(r);ww.append(weights);inner.append(False)
+[?2004l[?2004h>     else:
+[?2004l[?2004h>         peak=minimize_scalar(lambda r:-F(r,a),bounds=(a+(1-a)*2**(1/6),a+3*(1-a)),method='bounded').x
+[?2004l[?2004h>         # subdivide around the former orbiting region
+[?2004le[?2004h>         bounds=[rp,peak,peak+2*(1-a)]
+[?2004l[?2004h>         for lo,hi in zip(bounds[:-1],bounds[1:]):
+[?2004l[?2004h>             r=lo+(hi-lo)*t
+[?2004l[?2004h>             rr.append(r);ww.append(w*(hi-lo));inner.append(False)
+[?2004l[?2004h>         r=bounds[-1]+(1-a)*t/(1-t)
+[?2004l[?2004h>         rr.append(r);ww.append(w*(1-a)/(1-t)**2);inner.append(False)
+[?2004l[?2004h>     Q=np.zeros(L+1)
+[?2004l[?2004h>     for r,weight,inside in zip(rr,ww,inner):
+[?2004l[?2004h>         c=chi_batch(r,E,a,nt,ro if inside else None)
+[?2004l[?2004h>         z=np.cos(c)
+[?2004l[?2004h>         weight=weight*2*np.pi*r*(1-F(r,a)/E)
+[?2004l[?2004h>         prev=np.ones_like(z);cur=z
+[?2004l[?2004h>         Q[1]+=np.sum(weight*(2*np.sin(c/2)**2))
+[?2004l[?2004h>         for l in range(2,L+1):
+[?2004l[?2004h>             nex=((2*l-1)*z*cur-(l-1)*prev)/l
+[?2004l[?2004h>             Q[l]+=np.sum(weight*(1-nex))
+[?2004l[?2004h>             prev,cur=cur,nex
+[?2004l[?2004h>     return Q
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@59537d8bb9aa:/app# cat > /app/bracket_dev.py <<'PY'
+[?2004l[?2004h> import os
+[?2004ll[?2004h> os.environ['OPENBLAS_NUM_THREADS']='1'
+[?2004l[?2004h> os.environ['OMP_NUM_THREADS']='1'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from scipy.special import roots_legendre, roots_genlaguerre, gammaln
+[?2004l[?2004h> from scipy.sparse import coo_matrix
+[?2004l[?2004h> from math import factorial, comb, sqrt, pi
+[?2004l[?2004h> import time
+[?2004l[?2004h> 
+[?2004lm[?2004h> def indices(d):
+[?2004l[?2004h>  return [(i,j,d-i-j) for i in range(d+1) for j in range(d-i+1)]
+[?2004l[?2004h> 
+[?2004l[?2004h> class Basis:
+[?2004l[?2004h>  def __init__(self,N,l):
+[?2004l[?2004h>   self.N=N;self.l=l;self.dmax=2*N+l
+[?2004l[?2004h>   self.gammas=[g for d in range(self.dmax+1) for g in indices(d)]
+[?2004l[?2004h>   gmap={g:i for i,g in enumerate(self.gammas)}
+[?2004lfor a[?2004h>   self.gammas=np.array(self.gammas)
+[?2004l[?2004h>   nc=3 if l==1 else 6
+[?2004l[?2004h>   self.nc=nc
+[?2004l[?2004h>   rows=[];cols=[];vals=[]
+[?2004l[?2004h>   self.slices=[]
+[?2004l[?2004h>   offset=0
+[?2004l[?2004h>   bmaps=[]
+[?2004l[?2004h>   for k in range(self.dmax+1):
+[?2004l/[?2004h>    bs=indices(k);bmaps.append({b:i for i,b in enumerate(bs)})
+[?2004l[?2004h>    size=(N+1)*nc*len(bs)
+[?2004l[?2004h>    self.slices.append((offset,offset+size,len(bs)))
+[?2004l[?2004h>    offset+=size
+[?2004l[?2004h>   for p in range(N+1):
+[?2004l[?2004h>    d=2*p+l
+[?2004l[?2004h>    norm=(.5 if l==1 else .25)*np.exp(gammaln(p+l+1.5)-gammaln(l+1.5)-gammaln(p+1))
+[?2004l[?2004h>    # tensor order: xx,yy,zz,xy,xz,yz; diagonal trace removed
+[?2004l[?2004h>    coeffs=[{} for _ in range(nc)]
+[?2004l[?2004h>    def add(ci,g,c):coeffs[ci][g]=coeffs[ci].get(g,0)+c
+[?2004l[?2004h>    for ijk in indices(p):
+[?2004l[?2004h>     pre=(-1)**p/(2**d*sqrt(norm)*np.prod([factorial(x) for x in ijk]))
+[?2004l[?2004h>     if l==1:
+[?2004l[?2004h>      for c in range(3):
+[?2004l[?2004h>       g=tuple(2*ijk[j]+(j==c) for j in range(3)); add(c,g,pre)
+[?2004l[?2004h>     else:
+[?2004l[?2004h>      for c,(ii,jj) in enumerate([(0,0),(1,1),(2,2),(0,1),(0,2),(1,2)]):
+[?2004l[?2004h>       if ii!=jj:
+[?2004l[?2004h>        g=tuple(2*ijk[j]+(j==ii)+(j==jj) for j in range(3));add(c,g,pre*sqrt(2))
+[?2004l[?2004h>       else:
+[?2004l[?2004h>        for axis in range(3):
+[?2004l[?2004h>         g=tuple(2*ijk[j]+2*(j==axis) for j in range(3));add(c,g,pre*((1 if axis==ii else 0)-1/3))
+[?2004l[?2004h>    for c,coeff in enumerate(coeffs):
+[?2004l[?2004h>     for alpha,v in coeff.items():
+[?2004l[?2004h>      if not v:continue
+[?2004l[?2004h>      va=v*sqrt(2**d*np.prod([factorial(x) for x in alpha]))
+[?2004l[?2004h>      for bx in range(alpha[0]+1):
+[?2004l[?2004h>       for by in range(alpha[1]+1):
+[?2004l[?2004h>        for bz in range(alpha[2]+1):
+[?2004l[?2004h>         beta=(bx,by,bz);k=sum(beta)
+[?2004l[?2004h>         if k==d:continue
+[?2004l[?2004h>         gamma=tuple(alpha[j]-beta[j] for j in range(3))
+[?2004l[?2004h>         start,end,nb=self.slices[k]
+[?2004l[?2004h>         rows.append(start+(p*nc+c)*nb+bmaps[k][beta]);cols.append(gmap[gamma]);vals.append(va*sqrt(np.prod([comb(alpha[j],beta[j]) for j in range(3)])))
+[?2004l[?2004h>   self.mat=coo_matrix((vals,(rows,cols)),shape=(offset,len(gmap))).tocsr()
+[?2004l[?2004h>   self.mat.eliminate_zeros()
+[?2004l[?2004h>   print('basis',N,l,'shape',self.mat.shape,'nnz',self.mat.nnz,flush=True)
+[?2004l[?2004h>   cc,ww=roots_legendre(self.dmax+1)
+[?2004l[?2004h>   self.cos=np.r_[1.,cc];self.sin=np.sqrt(np.maximum(0,1-self.cos**2))
+[?2004l[?2004h>   from numpy.polynomial.legendre import legvander
+[?2004l[?2004h>   self.project=ww[None,:]/2*(2*np.arange(self.dmax+1)[:,None]+1)*legvander(cc,self.dmax).T
+[?2004l[?2004h>  def amplitudes(self,y):
+[?2004l[?2004h>   xx=np.sqrt(y)*self.sin; zz=np.sqrt(y)*self.cos
+[?2004l[?2004h>   hs=[]
+[?2004l[?2004h>   for x in [xx,np.zeros_like(xx),zz]:
+[?2004l[?2004h>    arr=[np.ones_like(x),sqrt(2)*x]
+[?2004l[?2004h>    for n in range(1,self.dmax):arr.append(sqrt(2/(n+1))*x*arr[-1]-sqrt(n/(n+1))*arr[-2])
+[?2004l[?2004h>    hs.append(np.array(arr))
+[?2004l[?2004h>   g=self.gammas
+[?2004l[?2004h>   H=hs[0][g[:,0]]*hs[1][g[:,1]]*hs[2][g[:,2]]
+[?2004l[?2004h>   return self.mat@H
+[?2004l[?2004h>  def accumulate(self,U,y,weight,Q):
+[?2004l[?2004h>   A=self.amplitudes(y)
+[?2004l[?2004h>   aq=self.project.T@Q[:self.dmax+1]
+[?2004l[?2004h>   for k,(start,end,nb) in enumerate(self.slices[:-1]):
+[?2004l[?2004h>    B=A[start:end].reshape(self.N+1,self.nc*nb,-1)
+[?2004l[?2004h>    B0=B[:,:,0];BQ=B[:,:,1:]@aq
+[?2004l[?2004h>    z=B0@BQ.T
+[?2004l[?2004h>    U[k]+=weight*(z+z.T)/(3 if self.l==1 else 10)
+[?2004l[?2004h> 
+[?2004l[?2004h> def solve(UV,UT,T,R,X,N):
+[?2004l[?2004h>  x=np.array([X,1-X]);m=np.array([1.,R]);sz=N+1
+[?2004l[?2004h>  def matrix(U,l):
+[?2004l[?2004h>   K=np.zeros((2*sz,2*sz));d=2*np.arange(sz)+l
+[?2004l[?2004h>   for i,j in [(0,0),(1,1),(0,1)]:
+[?2004l[?2004h>    mi,mj=m[i],m[j];mu=mi*mj/(mi+mj)
+[?2004l[?2004h>    ai=sqrt(mi/(mi+mj));bi=sqrt(mj/(mi+mj))
+[?2004l[?2004h>    rate=(.25 if i==j else .5)*x[i]*x[j]*sqrt(2*T/mu)
+[?2004l[?2004h>    for k,V in enumerate(U):
+[?2004l[?2004h>     ci=ai**k*bi**(d-k)
+[?2004l[?2004h>     cj=bi**k*(-ai)**(d-k)
+[?2004l[?2004h>     if i==j:
+[?2004l[?2004h>      c=ci+cj;K[i*sz:(i+1)*sz,i*sz:(i+1)*sz]+=rate*V*c[:,None]*c[None,:]
+[?2004l[?2004h>     else:
+[?2004l[?2004h>      for a,ca in [(i,ci),(j,cj)]:
+[?2004l[?2004h>       for b,cb in [(i,ci),(j,cj)]:
+[?2004l[?2004h>        K[a*sz:(a+1)*sz,b*sz:(b+1)*sz]+=rate*V*ca[:,None]*cb[None,:]
+[?2004l[?2004h>   return (K+K.T)/2
+[?2004l[?2004h>  K=matrix(UV,1)
+[?2004l[?2004h>  sd=np.zeros(2*sz);sh=sd.copy();null=sd.copy()
+[?2004l[?2004h>  for i in range(2):
+[?2004l[?2004h>   sd[i*sz]=(1 if i==0 else -1)*sqrt(T/m[i]);sh[i*sz+1]=-x[i]*sqrt(5*T/(2*m[i]));null[i*sz]=sqrt(m[i])
+[?2004l[?2004h>  K+=np.outer(null,null)/np.dot(null,null)*np.max(np.diag(K))
+[?2004l[?2004h>  sol=np.linalg.solve(K,np.array([sd,sh]).T)
+[?2004l[?2004h>  dd,dh=sd@sol;hd,hh=sh@sol
+[?2004l[?2004h>  alpha=dh/(X*(1-X)*dd)
+[?2004l[?2004h>  lam=hh-dh*hd/dd
+[?2004l[?2004h>  Kt=matrix(UT,2);s=np.zeros(2*sz);s[0]=X;s[sz]=1-X
+[?2004l[?2004h>  eta=T*s@np.linalg.solve(Kt,s)
+[?2004l[?2004h>  return eta,lam,X*(1-X)*dd,alpha
+[?2004l[?2004h> 
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  import sys
+[?2004l[?2004h>  N=int(sys.argv[1]) if len(sys.argv)>1 else 4
+[?2004l[?2004h>  t=time.time();bv=Basis(N,1);bt=Basis(N,2)
+[?2004l[?2004h>  UV=np.zeros((bv.dmax,N+1,N+1));UT=np.zeros((bt.dmax,N+1,N+1))
+[?2004l[?2004h>  y,w=roots_genlaguerre(2*N+5,1)
+[?2004l[?2004h>  # hard-sphere Q_l: pi for all l except even l with integral over cos =0? uniform scattering cos, so all Q_l=pi
+[?2004l[?2004h>  Q=np.ones(bt.dmax+1)*pi;Q[0]=0
+[?2004l[?2004h>  for yi,wi in zip(y,w):
+[?2004l[?2004h>   bv.accumulate(UV,yi,wi*2/sqrt(pi),Q)
+[?2004l[?2004h>   bt.accumulate(UT,yi,wi*2/sqrt(pi),Q)
+[?2004l[?2004h>  print('time',time.time()-t)
+[?2004l[?2004h>  print(solve(UV,UT,1,1,.5,N))
+[?2004l[?2004h>  np.savez('/app/hard_brackets.npz',UV=UV,UT=UT)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/bracket_dev.py 4
+[?2004lbasis 4 1 shape (3300, 220) nnz 2331
+basis 4 2 shape (8580, 286) nnz 7371
+time 0.049135684967041016
+(np.float64(0.17913507525073646), np.float64(0.6777775569049795), np.float64(0.21557834230023434), np.float64(-6.294831257749523e-17))
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+[?2004l[?2004h> import sys,time
+[?2004l[?2004h> sys.path.insert(0,'/app')
+[?2004l[?2004h> from scatter_dev import cross_sections
+[?2004l[?2004h> for E,a in [(0.2,0),(1,0),(2,0),(.2,.8),(50,.8),(.799,0),(.801,0)]:
+[?2004l[?2004h>  t=time.time()
+[?2004l[?2004h>  for n in [80,160,320]:
+[?2004l[?2004h>   q=cross_sections(E,a,4,n,192)
+[?2004l[?2004h>   print(E,a,n,q,flush=True)
+[?2004l[?2004h>  print('elapsed',time.time()-t)
+[?2004l[?2004h> PY
+[?2004l0.2 0 80 [ 0.         13.3393906  15.28516675 18.46411093 19.41011883]
+0.2 0 160 [ 0.         13.3393906  15.28516675 18.46411096 19.41011865]
+0.2 0 320 [ 0.         13.3393906  15.28516675 18.46411096 19.41011865]
+elapsed 0.019096851348876953
+1 0 80 [ 0.          7.5377255   8.85666264 10.73747574 11.23445603]
+1 0 160 [ 0.          7.5377255   8.85666264 10.73747574 11.23445603]
+1 0 320 [ 0.          7.5377255   8.85666264 10.73747574 11.23445603]
+elapsed 0.011804342269897461
+2 0 80 [0.         4.6053634  6.72579559 8.34985574 9.2719986 ]
+2 0 160 [0.         4.6053634  6.72579559 8.34985574 9.2719986 ]
+2 0 320 [0.         4.6053634  6.72579559 8.34985574 9.2719986 ]
+elapsed 0.010838508605957031
+0.2 0.8 80 [0.         4.29459774 4.86086878 5.21581299 5.45317281]
+0.2 0.8 160 [0.         4.29459774 4.86086878 5.21581299 5.45317281]
+0.2 0.8 320 [0.         4.29459774 4.86086878 5.21581299 5.45317281]
+elapsed 0.012199640274047852
+50 0.8 80 [0.         2.91656712 3.02053334 3.07816955 3.1177516 ]
+50 0.8 160 [0.         2.91656712 3.02053334 3.07816955 3.1177516 ]
+50 0.8 320 [0.         2.91656712 3.02053334 3.07816955 3.1177516 ]
+elapsed 0.010155439376831055
+0.799 0 80 [ 0.          8.14474992  9.637617   11.501635   12.22542588]
+0.799 0 160 [ 0.          8.14474992  9.63761709 11.50163654 12.22543011]
+0.799 0 320 [ 0.          8.14474992  9.63761709 11.50163654 12.22543008]
+elapsed 0.011716842651367188
+0.801 0 80 [ 0.          8.13696617  9.62950844 11.491776   12.21433964]
+0.801 0 160 [ 0.          8.13696607  9.62954698 11.49155062 12.21516996]
+0.801 0 320 [ 0.          8.13696607  9.62954698 11.49155117 12.21518216]
+elapsed 0.010247230529785156
+[?2004hroot@59537d8bb9aa:/app# cat > /app/run_dev.py <<'PY'
+[?2004l[?2004h> import os
+[?2004l[?2004h> os.environ['OPENBLAS_NUM_THREADS']='1'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> import sys,time
+[?2004l[?2004h> from math import sqrt,pi
+[?2004l[?2004h> from scipy.special import roots_legendre
+[?2004l[?2004h> from scatter_dev import cross_sections, geom
+[?2004l[?2004h> from bracket_dev import Basis,solve
+[?2004l[?2004h> 
+[?2004l[?2004h> def energy_nodes(T,a,n=16):
+[?2004l[?2004h>  Ec=geom(1e6,a)[-1]; yc=Ec/T
+[?2004l[?2004h>  # endpoints include orbiting threshold and a geometric series
+[?2004l[?2004h>  edges=np.r_[0.,np.geomspace(.00001,1,11),np.arange(2,65,2)]
+[?2004l[?2004h>  if yc<64:
+[?2004l[?2004h>   edges=np.r_[edges,yc]
+[?2004l[?2004h>   for delta in [1e-1,1e-2,1e-3,1e-4]:
+[?2004l[?2004h>    edges=np.r_[edges,yc*(1-delta),yc*(1+delta)]
+[?2004l[?2004h>  edges=np.unique(edges);edges=edges[(edges>=0)&(edges<=64)]
+[?2004l[?2004h>  z,w=roots_legendre(n);y=((edges[:-1]+edges[1:])[:,None]+np.diff(edges)[:,None]*z)/2
+[?2004l[?2004h>  weights=np.diff(edges)[:,None]*w/2
+[?2004l[?2004h>  return y.ravel(),weights.ravel()
+[?2004l[?2004h> 
+[?2004l[?2004h> def build(A,T,N=8,n=12,nr=160,nt=128):
+[?2004l[?2004h>  t=time.time();bv=Basis(N,1);bt=Basis(N,2)
+[?2004l[?2004h>  UV=np.zeros((bv.dmax,N+1,N+1));UT=np.zeros((bt.dmax,N+1,N+1))
+[?2004l[?2004h>  y,w=energy_nodes(T,A,n)
+[?2004l[?2004h>  for k,(yi,wi) in enumerate(zip(y,w)):
+[?2004l[?2004h>   Q=cross_sections(T*yi,A,bt.dmax,nr,nt)
+[?2004l[?2004h>   weight=wi*yi*np.exp(-yi)*2/sqrt(pi)
+[?2004l[?2004h>   bv.accumulate(UV,yi,weight,Q)
+[?2004l[?2004h>   bt.accumulate(UT,yi,weight,Q)
+[?2004l[?2004h>   if k%200==0: print(k,len(y),'time',time.time()-t,flush=True)
+[?2004l[?2004h>  print('total time',time.time()-t,flush=True)
+[?2004l[?2004h>  return UV,UT
+[?2004l[?2004h> 
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  A,T=float(sys.argv[1]),float(sys.argv[2]);N=int(sys.argv[3]);n=int(sys.argv[4]) if len(sys.argv)>4 else 12
+[?2004l[?2004h>  UV,UT=build(A,T,N,n)
+[?2004l[?2004h>  np.savez(f'/app/br_{A}_{T}_{N}_{n}.npz',UV=UV,UT=UT)
+[?2004l[?2004h>  for R,X in [(1,.5),(2,.5),(10,.05),(40,.05),(40,.5),(40,.95)]:
+[?2004l[?2004h>   print('mixture',R,X)
+[?2004l[?2004h>   for order in [1,2,3,4,5,6,7,8,10,12,14,16]:
+[?2004l[?2004h>    if order>N:continue
+[?2004l[?2004h>    print(order,solve(UV[:,:order+1,:order+1],UT[:,:order+1,:order+1],T,R,X,order),flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0 0.2 10 12 > /app/log0 2>&1 &
+[?2004l[1] 228
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0.8 50 10 12 > /app/log1 2>&1 &
+[?2004l[2] 229
+[?2004hroot@59537d8bb9aa:/app# tail -10 /app/log0; tail -10 /app/log1
+[?2004l[?2004hroot@59537d8bb9aa:/app# tail -70 /app/log0; tail -70 /app/log1; ps -o pid,etime,rss,cmd -p 228,229
+[?2004l/app/bracket_dev.py:51: RuntimeWarning: overflow encountered in scalar multiply
+  va=v*sqrt(2**d*np.prod([factorial(x) for x in alpha]))
+Traceback (most recent call last):
+  File "/app/run_dev.py", line 38, in <module>
+    UV,UT=build(A,T,N,n)
+          ^^^^^^^^^^^^^^
+  File "/app/run_dev.py", line 24, in build
+    t=time.time();bv=Basis(N,1);bt=Basis(N,2)
+                     ^^^^^^^^^^
+  File "/app/bracket_dev.py", line 51, in __init__
+    va=v*sqrt(2**d*np.prod([factorial(x) for x in alpha]))
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: math domain error
+[1]-  Exit 1                  OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0 0.2 10 12 > /app/log0 2>&1
+[2]+  Exit 1                  OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0.8 50 10 12 > /app/log1 2>&1
+/app/bracket_dev.py:51: RuntimeWarning: overflow encountered in scalar multiply
+  va=v*sqrt(2**d*np.prod([factorial(x) for x in alpha]))
+Traceback (most recent call last):
+  File "/app/run_dev.py", line 38, in <module>
+    UV,UT=build(A,T,N,n)
+          ^^^^^^^^^^^^^^
+  File "/app/run_dev.py", line 24, in build
+    t=time.time();bv=Basis(N,1);bt=Basis(N,2)
+                     ^^^^^^^^^^
+  File "/app/bracket_dev.py", line 51, in __init__
+    va=v*sqrt(2**d*np.prod([factorial(x) for x in alpha]))
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: math domain error
+bash: ps: command not found
+[?2004hroot@59537d8bb9aa:/app# sed -i 's/from math import factorial, comb, sqrt, pi/from math import factorial, comb, sqrt, pi, prod/; s/np.prod(\[factorial(x) for x in ijk\])/prod([factorial(x) for x in ijk])/; s/np.prod(\[factorial(x) for x in alpha\])/prod([factorial(x) for x in alpha])/; s/np.prod(\[comb(alpha\[j\],beta\[j\]) for j in range(3)\])/prod([comb(alpha[j],beta[j]) for j in range(3)])/' /app/bracket_dev.py
+[?2004l[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0 0.2 10 12 > /app/log0 2>&1 &
+[?2004l[1] 278
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0.8 50 10 12 > /app/log1 2>&1 &
+[?2004l[2] 279
+[?2004hroot@59537d8bb9aa:/app# tail -10 /app/log0; tail -10 /app/log1
+[?2004l[?2004hroot@59537d8bb9aa:/app# tail -70 /app/log0; tail -70 /app/log1
+[?2004lbasis 10 1 shape (66792, 2024) nnz 125268
+basis 10 2 shape (151800, 2300) nnz 317460
+0 624 time 0.57893967628479
+200 624 time 2.2650837898254395
+400 624 time 3.953589677810669
+600 624 time 5.706589698791504
+total time 5.910627841949463
+mixture 1 0.5
+1 (np.float64(0.024180868550569234), np.float64(0.09051136389850978), np.float64(0.03024351228122535), np.float64(-6.855246145242273e-19))
+2 (np.float64(0.024182958329258902), np.float64(0.09076970905689502), np.float64(0.030247660241944693), np.float64(1.1858917853015023e-17))
+3 (np.float64(0.024183003931624984), np.float64(0.09078615312801408), np.float64(0.030247924898887307), np.float64(6.98247538005346e-18))
+4 (np.float64(0.024183009070440728), np.float64(0.0907865889527033), np.float64(0.030247943843481874), np.float64(-8.720051804626712e-18))
+5 (np.float64(0.0241830114343321), np.float64(0.09078665310884768), np.float64(0.03024794699416476), np.float64(-1.405674761318541e-17))
+6 (np.float64(0.024183012182827163), np.float64(0.0907866882643673), np.float64(0.030247947900224694), np.float64(1.759646637937207e-17))
+7 (np.float64(0.024183012329128704), np.float64(0.09078670026789923), np.float64(0.030247948166354368), np.float64(1.4380426679581065e-17))
+8 (np.float64(0.02418301234823715), np.float64(0.09078670268245415), np.float64(0.0302479482340324), np.float64(-2.5157077591168378e-17))
+10 (np.float64(0.024183012350279004), np.float64(0.09078670302610661), np.float64(0.030247948252158294), np.float64(-9.143220400549803e-19))
+mixture 2 0.5
+1 (np.float64(0.029617591548254184), np.float64(0.0745075848083397), np.float64(0.026201622402652003), np.float64(-0.06690460188278612))
+2 (np.float64(0.029619730209341336), np.float64(0.07469936063585791), np.float64(0.02620936437547323), np.float64(-0.06901101833694688))
+3 (np.float64(0.029619756803750754), np.float64(0.074714357091126), np.float64(0.02621007465741773), np.float64(-0.0692175784657675))
+4 (np.float64(0.029619762261168876), np.float64(0.07471497598221308), np.float64(0.02621013699087127), np.float64(-0.06923104871506064))
+5 (np.float64(0.02961976893181859), np.float64(0.07471511121908914), np.float64(0.026210152515237187), np.float64(-0.06923437970237117))
+6 (np.float64(0.0296197714631413), np.float64(0.0747151906370144), np.float64(0.02621016054361875), np.float64(-0.069236249011373))
+7 (np.float64(0.029619771784210082), np.float64(0.07471521749478754), np.float64(0.026210164290158024), np.float64(-0.06923699561933828))
+8 (np.float64(0.029619771787785264), np.float64(0.07471522174534696), np.float64(0.026210165574597072), np.float64(-0.06923716909962604))
+10 (np.float64(0.029619771804546047), np.float64(0.07471522195716243), np.float64(0.02621016597144658), np.float64(-0.06923718690871361))
+mixture 10 0.05
+1 (np.float64(0.07519584482663953), np.float64(0.030163890281841514), np.float64(0.022507122150824812), np.float64(-0.11407722755211362))
+2 (np.float64(0.07520184043461765), np.float64(0.030239007776268735), np.float64(0.02255483183086032), np.float64(-0.11739101499546223))
+3 (np.float64(0.07520196390807626), np.float64(0.030249557061326975), np.float64(0.022563069009050484), np.float64(-0.1188573878199298))
+4 (np.float64(0.07520198057197323), np.float64(0.030252207574623102), np.float64(0.02256446320685181), np.float64(-0.1192406779563502))
+5 (np.float64(0.07520201622012508), np.float64(0.030252862463656726), np.float64(0.022565211200452222), np.float64(-0.11938136774853936))
+6 (np.float64(0.07520203305886909), np.float64(0.030253017808865384), np.float64(0.022565931887540382), np.float64(-0.11944749478221381))
+7 (np.float64(0.07520203372871248), np.float64(0.030253058345022885), np.float64(0.022566491479467658), np.float64(-0.11947699306758532))
+8 (np.float64(0.07520203658021576), np.float64(0.03025307308007405), np.float64(0.022566796275444428), np.float64(-0.11949035498921537))
+10 (np.float64(0.07520204272244074), np.float64(0.03025309541645887), np.float64(0.022566951863454386), np.float64(-0.11950172585340428))
+mixture 40 0.05
+1 (np.float64(0.15126126952648655), np.float64(0.01659776514083727), np.float64(0.021740535416610078), np.float64(-0.11777177761592073))
+2 (np.float64(0.15127387489314645), np.float64(0.016638171144304124), np.float64(0.021800906405075482), np.float64(-0.12100059613263305))
+3 (np.float64(0.1512741241590958), np.float64(0.016650313321248354), np.float64(0.021812565293091033), np.float64(-0.12325933713184281))
+4 (np.float64(0.15127416485836642), np.float64(0.016655725910751526), np.float64(0.021814750681330063), np.float64(-0.12397903098576195))
+5 (np.float64(0.1512742385513669), np.float64(0.016657001225058164), np.float64(0.021816168202213902), np.float64(-0.12426092004516241))
+6 (np.float64(0.15127428248954122), np.float64(0.01665720681766712), np.float64(0.021817821563050618), np.float64(-0.12438215372614873))
+7 (np.float64(0.15127428720661806), np.float64(0.016657264203750823), np.float64(0.021819308544626867), np.float64(-0.12444274173237285))
+8 (np.float64(0.1512742897072482), np.float64(0.016657329071328584), np.float64(0.02182021717353252), np.float64(-0.12449367404838665))
+10 (np.float64(0.15127430090139057), np.float64(0.01665756549582406), np.float64(0.02182072387273677), np.float64(-0.12456251288928442))
+mixture 40 0.5
+1 (np.float64(0.12524673156455568), np.float64(0.04255687672946744), np.float64(0.021701240300783107), np.float64(-0.14367710417838472))
+2 (np.float64(0.12525245155463532), np.float64(0.04263010202403694), np.float64(0.02173461985692976), np.float64(-0.14796581281783913))
+3 (np.float64(0.1252524966628998), np.float64(0.04268255111380733), np.float64(0.021740263438983155), np.float64(-0.14954316703618564))
+4 (np.float64(0.12525252200621992), np.float64(0.042704595265628614), np.float64(0.021741059664006458), np.float64(-0.14992854356423885))
+5 (np.float64(0.12525270577955774), np.float64(0.042709631612684866), np.float64(0.021741492105517037), np.float64(-0.15006429444725705))
+6 (np.float64(0.12525281366765495), np.float64(0.04271032795496371), np.float64(0.02174203270884457), np.float64(-0.15012071252717923))
+7 (np.float64(0.12525281696572513), np.float64(0.04271044491307193), np.float64(0.02174254437511838), np.float64(-0.15014319861599185))
+8 (np.float64(0.1252528402319743), np.float64(0.04271056228112498), np.float64(0.021742851409588287), np.float64(-0.15016065857200683))
+10 (np.float64(0.12525290360422991), np.float64(0.042711122015055905), np.float64(0.021742992350395528), np.float64(-0.1501841240849664))
+mixture 40 0.95
+1 (np.float64(0.04325080902196889), np.float64(0.08427571590047707), np.float64(0.021639266000212088), np.float64(-0.18437642291995457))
+2 (np.float64(0.043252699867443), np.float64(0.08450315690131409), np.float64(0.02164282187405469), np.float64(-0.19040540129127864))
+3 (np.float64(0.0432527098079079), np.float64(0.08452517311353602), np.float64(0.021643316955721803), np.float64(-0.191105306216974))
+4 (np.float64(0.04325271360649586), np.float64(0.0845270395312871), np.float64(0.02164336122256965), np.float64(-0.19116624202898166))
+5 (np.float64(0.04325272314718576), np.float64(0.08452739582131526), np.float64(0.021643381063385463), np.float64(-0.1911840662176688))
+6 (np.float64(0.04325272664550808), np.float64(0.0845274799685231), np.float64(0.021643412928430323), np.float64(-0.1911950437193108))
+7 (np.float64(0.04325272664878892), np.float64(0.08452749753690438), np.float64(0.02164344718216568), np.float64(-0.19120024421888018))
+8 (np.float64(0.043252728275123144), np.float64(0.0845275039126087), np.float64(0.021643467877476917), np.float64(-0.19120267937179056))
+10 (np.float64(0.04325273114790573), np.float64(0.08452751777048151), np.float64(0.021643475624761658), np.float64(-0.19120462241860742))
+[1]-  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0 0.2 10 12 > /app/log0 2>&1
+[2]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0.8 50 10 12 > /app/log1 2>&1
+basis 10 1 shape (66792, 2024) nnz 125268
+basis 10 2 shape (151800, 2300) nnz 317460
+0 624 time 0.5817601680755615
+200 624 time 2.2534608840942383
+400 624 time 3.9276649951934814
+600 624 time 5.679518938064575
+total time 5.872291088104248
+mixture 1 0.5
+1 (np.float64(1.3620657768640025), np.float64(5.040741560772151), np.float64(1.6776342424180437), np.float64(-8.895679857297831e-18))
+2 (np.float64(1.3632391437305624), np.float64(5.143359152832892), np.float64(1.6796472075300826), np.float64(1.7775098681252677e-17))
+3 (np.float64(1.3633782306037676), np.float64(5.152341727098641), np.float64(1.6799260050952896), np.float64(-3.825225382460918e-18))
+4 (np.float64(1.3634011851784127), np.float64(5.153645486471449), np.float64(1.6799780869146541), np.float64(9.144946522917635e-18))
+5 (np.float64(1.3634058937890172), np.float64(5.153895453561647), np.float64(1.6799898883124134), np.float64(-9.971293871551979e-18))
+6 (np.float64(1.3634070229901452), np.float64(5.15395299405332), np.float64(1.6799929578146247), np.float64(6.271513906811653e-17))
+7 (np.float64(1.3634073279890186), np.float64(5.153968113081468), np.float64(1.6799938445938731), np.float64(1.6118510752941317e-17))
+8 (np.float64(1.3634074185107443), np.float64(5.15397251115804), np.float64(1.6799941231179063), np.float64(6.783224641081245e-17))
+10 (np.float64(1.3634074574423862), np.float64(5.153974367862743), np.float64(1.6799942502070109), np.float64(1.1825435004677154e-16))
+mixture 2 0.5
+1 (np.float64(1.665470659691458), np.float64(4.06490227291331), np.float64(1.4612135414453358), np.float64(-0.2569141948720027))
+2 (np.float64(1.6667638209759048), np.float64(4.1510824671405215), np.float64(1.4642679555937124), np.float64(-0.2722715812595552))
+3 (np.float64(1.6669235348648772), np.float64(4.1593389917777746), np.float64(1.464801428918142), np.float64(-0.2745535959304633))
+4 (np.float64(1.6669517964319214), np.float64(4.160690635004881), np.float64(1.4649260778099302), np.float64(-0.27503714598982354))
+5 (np.float64(1.666958129312687), np.float64(4.160988072366205), np.float64(1.4649610451803), np.float64(-0.27516329971262515))
+6 (np.float64(1.6669598086540194), np.float64(4.161067381646058), np.float64(1.4649721837203964), np.float64(-0.27520122076150866))
+7 (np.float64(1.6669603141137266), np.float64(4.161091615151301), np.float64(1.4649760835025196), np.float64(-0.27521387720385604))
+8 (np.float64(1.666960482080629), np.float64(4.161099818550963), np.float64(1.4649775533897444), np.float64(-0.2752184597907113))
+10 (np.float64(1.666960565749739), np.float64(4.161104005671165), np.float64(1.4649783886972334), np.float64(-0.2752209552494001))
+mixture 10 0.05
+1 (np.float64(4.23187230749547), np.float64(1.6450149228793123), np.float64(1.3024168104280913), np.float64(-0.37861636983978736))
+2 (np.float64(4.235255556443817), np.float64(1.682222928443854), np.float64(1.319775897673274), np.float64(-0.42348060611549687))
+3 (np.float64(4.235663500545407), np.float64(1.6867512313514967), np.float64(1.3256530548343022), np.float64(-0.43616982439496577))
+4 (np.float64(4.2357362564951355), np.float64(1.687861969372503), np.float64(1.3281087504319238), np.float64(-0.44102971151417036))
+5 (np.float64(4.235753679868931), np.float64(1.6882625004631109), np.float64(1.3292782526082902), np.float64(-0.4432235472157459))
+6 (np.float64(4.235758976744602), np.float64(1.6884416546230911), np.float64(1.3298878078244325), np.float64(-0.44432480775471983))
+7 (np.float64(4.235760925171432), np.float64(1.6885326178313125), np.float64(1.330227359982518), np.float64(-0.44492094050047887))
+8 (np.float64(4.2357617537694585), np.float64(1.6885827224240009), np.float64(1.3304264704896127), np.float64(-0.44526254726894304))
+10 (np.float64(4.235762345523875), np.float64(1.6886297387230316), np.float64(1.3306249669079633), np.float64(-0.4455944971037959))
+mixture 40 0.05
+1 (np.float64(8.51484214678575), np.float64(0.8901872479200387), np.float64(1.2664618533842438), np.float64(-0.3795220257290199))
+2 (np.float64(8.521841839062466), np.float64(0.9152127743392788), np.float64(1.2876886566933718), np.float64(-0.4332677562346748))
+3 (np.float64(8.522694982030323), np.float64(0.9194022629303402), np.float64(1.2957840849936986), np.float64(-0.4507534585846204))
+4 (np.float64(8.5228510555939), np.float64(0.9207900296089059), np.float64(1.2995888294003248), np.float64(-0.45838136477897157))
+5 (np.float64(8.522890717549036), np.float64(0.9214220700412594), np.float64(1.3016223737736197), np.float64(-0.4622850504268119))
+6 (np.float64(8.522904081143372), np.float64(0.9217611661297711), np.float64(1.3028086561298307), np.float64(-0.46449814185946303))
+7 (np.float64(8.522909717262674), np.float64(0.9219615799690991), np.float64(1.3035461002080384), np.float64(-0.46584618987158577))
+8 (np.float64(8.52291250731433), np.float64(0.9220879305778388), np.float64(1.3040272358630038), np.float64(-0.46671234352450763))
+10 (np.float64(8.522914953607325), np.float64(0.9222286275530808), np.float64(1.3045812459074277), np.float64(-0.4676938575023869))
+mixture 40 0.5
+1 (np.float64(6.997575677137308), np.float64(2.0809922260199833), np.float64(1.2400675154257825), np.float64(-0.5012989878955016))
+2 (np.float64(7.000701818041529), np.float64(2.1778965404614197), np.float64(1.2505686936531077), np.float64(-0.5516488305095605))
+3 (np.float64(7.001148892333433), np.float64(2.1969963846852827), np.float64(1.2536373163537062), np.float64(-0.5638332680742201))
+4 (np.float64(7.001255658772229), np.float64(2.202812033807485), np.float64(1.2547853192812735), np.float64(-0.5679497710215101))
+5 (np.float64(7.00128914673185), np.float64(2.2050365215309045), np.float64(1.255287302757204), np.float64(-0.5696332933116979))
+6 (np.float64(7.00130140354685), np.float64(2.2060209591926174), np.float64(1.2555319814615755), np.float64(-0.5704151040675682))
+7 (np.float64(7.001306343377651), np.float64(2.2065038639434085), np.float64(1.2556612410066588), np.float64(-0.5708130559747787))
+8 (np.float64(7.00130846601974), np.float64(2.206759764332384), np.float64(1.2557339198223414), np.float64(-0.5710302663301173))
+10 (np.float64(7.001309856911465), np.float64(2.2069889200290573), np.float64(1.2558033244723208), np.float64(-0.5712311096826181))
+mixture 40 0.95
+1 (np.float64(2.407800245215307), np.float64(4.589661610285865), np.float64(1.191037558072041), np.float64(-0.7404738974516405))
+2 (np.float64(2.4090011687566997), np.float64(4.699517816226354), np.float64(1.1918383193504452), np.float64(-0.7765892027702177))
+3 (np.float64(2.409149859112757), np.float64(4.710684516373997), np.float64(1.1919962734376781), np.float64(-0.781701691297871))
+4 (np.float64(2.409175097101956), np.float64(4.712577244403474), np.float64(1.1920404617264972), np.float64(-0.7828148767662672))
+5 (np.float64(2.4091802958976474), np.float64(4.713007179029834), np.float64(1.192055825446114), np.float64(-0.783127706978085))
+6 (np.float64(2.409181503497084), np.float64(4.713126606329701), np.float64(1.1920620397846875), np.float64(-0.7832325657332342))
+7 (np.float64(2.4091818023438027), np.float64(4.713165253433164), np.float64(1.19206485267572), np.float64(-0.7832726975427949))
+8 (np.float64(2.409181876677305), np.float64(4.7131793961091075), np.float64(1.1920662420882597), np.float64(-0.7832897597203622))
+10 (np.float64(2.4091818968129726), np.float64(4.71318767014684), np.float64(1.1920673907016779), np.float64(-0.7833016071658407))
+[?2004hroot@59537d8bb9aa:/app# cp /app/bracket_dev.py /app/bracket_old.py
+[?2004l[?2004hroot@59537d8bb9aa:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/bracket_dev.py'
+[?2004l[?2004h> s=open(p).read()
+[?2004l[?2004h> s=s.replace('bmaps=[]','bmaps=[]\n  parities=[(1,0),(0,1),(0,0)] if l==1 else [(0,0),(0,0),(0,0),(1,1),(1,0),(0,1)]')
+[?2004l[?2004h> s=s.replace('bs=indices(k);bmaps.append({b:i for i,b in enumerate(bs)})\n   size=(N+1)*nc*len(bs)\n   self.slices.append((offset,offset+size,len(bs)))', 'bs=[(c,b) for c in range(nc) for b in indices(k) if (b[0]%2,b[1]%2)==parities[c]];bmaps.append({b:i for i,b in enumerate(bs)})\n   size=(N+1)*len(bs)\n   self.slices.append((offset,offset+size,len(bs)))')
+[?2004l[?2004h> s=s.replace('gamma=tuple(alpha[j]-beta[j] for j in range(3))\n        start', 'gamma=tuple(alpha[j]-beta[j] for j in range(3))\n        if (c,beta) not in bmaps[k]:continue\n        start')
+[?2004l[?2004h> s=s.replace('(p*nc+c)*nb+bmaps[k][beta]', 'p*nb+bmaps[k][(c,beta)]')
+[?2004l[?2004h> s=s.replace('self.N+1,self.nc*nb,-1','self.N+1,nb,-1')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/bracket_dev.py 4
+[?2004ltail -8 /app/log22; tail -8 /app/log22low
+basis 4 1 shape (900, 220) nnz 903
+basis 4 2 shape (2340, 286) nnz 2877
+time 0.01636052131652832
+(np.float64(0.17913507525073646), np.float64(0.6777775569049795), np.float64(0.21557834230023434), np.float64(-1.1585561703624857e-17))
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0.8 50 22 16 > /app/log22 2>&1 &
+[?2004l[1] 334
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0 0.2 22 16 > /app/log22low 2>&1 &
+[?2004l[2] 335
+[?2004hroot@59537d8bb9aa:/app# tail -8 /app/log22; tail -8 /app/log22low
+[?2004l[?2004hroot@59537d8bb9aa:/app# tail -15 /app/log22; tail -15 /app/log22low; ls -lh /app/br_*.npz
+[?2004lbasis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.514909982681274
+basis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.361992597579956
+-rw-r--r-- 1 root root 42K Nov  1 01:59 /app/br_0.0_0.2_10_12.npz
+-rw-r--r-- 1 root root 42K Nov  1 01:59 /app/br_0.8_50.0_10_12.npz
+[?2004hroot@59537d8bb9aa:/app# tail -10 /app/log22; tail -10 /app/log22low
+[?2004lbasis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.514909982681274
+basis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.361992597579956
+[?2004hroot@59537d8bb9aa:/app# tail -12 /app/log22; tail -12 /app/log22low
+[?2004lbasis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.514909982681274
+200 832 time 88.01928424835205
+basis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.361992597579956
+200 832 time 87.81766629219055
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/hardconv 2>&1 &
+[?2004l[?2004h> import sys,time
+[?2004l[?2004h> sys.path.insert(0,'/app')
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from bracket_dev import Basis,solve
+[?2004l[?2004h> from scipy.special import roots_genlaguerre
+[?2004l[?2004h> from math import pi,sqrt
+[?2004l[?2004h> N=26;t=time.time();bv=Basis(N,1)
+[?2004l[?2004h> UV=np.zeros((bv.dmax,N+1,N+1));Q=np.ones(bv.dmax+1)*pi;Q[0]=0
+[?2004l[?2004h> for y,w in zip(*roots_genlaguerre(2*N+4,1)):
+[?2004l[?2004h>  bv.accumulate(UV,y,w*2/sqrt(pi),Q)
+[?2004l[?2004h> print('time',time.time()-t)
+[?2004l[?2004h> np.save('/app/hardV26.npy',UV)
+[?2004l[?2004h> for R,X in [(40,.05),(40,.5),(10,.05)]:
+[?2004l[?2004h>  for n in range(10,N+1,2):
+[?2004l[?2004h>   # dummy tensor from vector matrix solely to print vector results
+[?2004l[?2004h>   try:r=solve(UV[:,:n+1,:n+1],UV[:,:n+1,:n+1],50,R,X,n)
+[?2004l[?2004h>   except Exception as e: print(e);continue
+[?2004l[?2004h>   print(R,X,n,r[1:],flush=True)
+[?2004l[?2004h> PY
+[?2004l[3] 398
+[?2004hroot@59537d8bb9aa:/app# tail -10 /app/log22; tail -10 /app/log22low; tail -10 /app/hardconv
+[?2004lbasis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.514909982681274
+200 832 time 88.01928424835205
+basis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.361992597579956
+200 832 time 87.81766629219055
+[?2004hroot@59537d8bb9aa:/app# cat > /app/project_dev.py <<'PY'
+[?2004l[?2004h> import os
+[?2004l[?2004h> os.environ['OPENBLAS_NUM_THREADS']='1'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from scipy.special import roots_genlaguerre, eval_genlaguerre, roots_legendre
+[?2004l[?2004h> from scatter_dev import cross_sections,geom
+[?2004l[?2004h> from bracket_dev import Basis,solve
+[?2004l[?2004h> from math import sqrt,pi
+[?2004l[?2004h> import sys,time
+[?2004l[?2004h> 
+[?2004l[?2004h> def nodes(T,a,n=12,ymax=160):
+[?2004l[?2004h>  Ec=geom(1e6,a)[-1];yc=Ec/T
+[?2004l[?2004h>  edges=np.r_[0.,np.geomspace(.00001,1,11),np.arange(2,41,2),np.arange(50,ymax+1,10)]
+[?2004l[?2004h>  if yc<ymax:
+[?2004l[?2004h>   edges=np.r_[edges,yc]
+[?2004l[?2004h>   for delta in [.1,.01,.001,.0001]:edges=np.r_[edges,yc*(1-delta),yc*(1+delta)]
+[?2004l[?2004h>  edges=np.unique(edges);edges=edges[(edges>=0)&(edges<=ymax)]
+[?2004l[?2004h>  z,w=roots_legendre(n)
+[?2004l[?2004h>  return (((edges[:-1]+edges[1:])[:,None]+np.diff(edges)[:,None]*z)/2).ravel(),(np.diff(edges)[:,None]*w/2).ravel()
+[?2004l[?2004h> 
+[?2004l[?2004h> def moments(a,T,N,n=12,nr=200,nt=160):
+[?2004l[?2004h>  t=time.time();y,w=nodes(T,a,n)
+[?2004l[?2004h>  L=2*N+2
+[?2004l[?2004h>  polys=np.array([eval_genlaguerre(j,1,y)/(j+1) for j in range(L+1)])
+[?2004l[?2004h>  weight=w*y*np.exp(-y)
+[?2004l[?2004h>  Q=np.array([cross_sections(T*yi,a,L,nr,nt) for yi in y])
+[?2004l[?2004h>  M=(polys*weight)@Q
+[?2004l[?2004h>  print('moments',time.time()-t,flush=True)
+[?2004l[?2004h>  return M
+[?2004l[?2004h> 
+[?2004l[?2004h> def brackets(M,N,l):
+[?2004l[?2004h>  t=time.time();b=Basis(N,l);U=np.zeros((b.dmax,N+1,N+1))
+[?2004l[?2004h>  y,w=roots_genlaguerre(2*N+3,1)
+[?2004l[?2004h>  polys=np.array([eval_genlaguerre(j,1,y) for j in range(2*N+3)])
+[?2004l[?2004h>  Q=polys.T@M[:2*N+3,:b.dmax+1]
+[?2004l[?2004h>  for yi,wi,qi in zip(y,w,Q):b.accumulate(U,yi,wi*2/sqrt(pi),qi)
+[?2004l[?2004h>  print('brackets',l,time.time()-t,flush=True)
+[?2004l[?2004h>  return U
+[?2004l[?2004h> 
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  a,T=float(sys.argv[1]),float(sys.argv[2]);N=int(sys.argv[3]);n=int(sys.argv[4]) if len(sys.argv)>4 else 12
+[?2004l[?2004h>  M=moments(a,T,N,n)
+[?2004l[?2004h>  np.save(f'/app/mom_{a}_{T}_{N}_{n}.npy',M)
+[?2004l[?2004h>  UV=brackets(M,N,1);NT=min(12,N);UT=brackets(M,NT,2)
+[?2004l[?2004h>  np.savez(f'/app/proj_{a}_{T}_{N}_{n}.npz',UV=UV,UT=UT)
+[?2004l[?2004h>  for R,X in [(1,.5),(2,.5),(10,.05),(40,.05),(40,.5),(40,.95)]:
+[?2004l[?2004h>   print('mixture',R,X)
+[?2004l[?2004h>   for order in range(4,N+1,2):
+[?2004l[?2004h>    # pad tensor for unified solve
+[?2004l[?2004h>    vv=UV[:,:order+1,:order+1]
+[?2004l[?2004h>    tt=np.zeros((2*order+2,order+1,order+1))
+[?2004l[?2004h>    nn=min(order,NT);tt[:UT.shape[0],:nn+1,:nn+1]=UT[:,:nn+1,:nn+1] if order>=NT else UT[:2*order+2,:nn+1,:nn+1]
+[?2004l[?2004h>    # tensor inaccessible high orders get diagonal
+[?2004l[?2004h>    if order>NT:
+[?2004l[?2004h>     for j in range(NT+1,order+1):tt[0,j,j]=1e100
+[?2004l[?2004h>    print(order,solve(vv,tt,T,R,X,order),flush=True)
+[?2004l[?2004h> PY
+[?2004l[3]+  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/hardconv 2>&1
+import sys,time
+sys.path.insert(0,'/app')
+import numpy as np
+from bracket_dev import Basis,solve
+from scipy.special import roots_genlaguerre
+from math import pi,sqrt
+N=26;t=time.time();bv=Basis(N,1)
+UV=np.zeros((bv.dmax,N+1,N+1));Q=np.ones(bv.dmax+1)*pi;Q[0]=0
+for y,w in zip(*roots_genlaguerre(2*N+4,1)):
+ bv.accumulate(UV,y,w*2/sqrt(pi),Q)
+print('time',time.time()-t)
+np.save('/app/hardV26.npy',UV)
+for R,X in [(40,.05),(40,.5),(10,.05)]:
+ for n in range(10,N+1,2):
+  # dummy tensor from vector matrix solely to print vector results
+  try:r=solve(UV[:,:n+1,:n+1],UV[:,:n+1,:n+1],50,R,X,n)
+  except Exception as e: print(e);continue
+  print(R,X,n,r[1:],flush=True)
+PY
+
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/project_dev.py 0 0.2 10 16 > /app/projlog10 2>&1 &
+[?2004l[3] 426
+[?2004hroot@59537d8bb9aa:/app# tail -12 /app/hardconv; tail -10 /app/log22
+[?2004l40 0.5 22 (np.float64(2.016372391117026), np.float64(1.146036515676958), np.float64(-0.6094559861657257))
+40 0.5 24 (np.float64(2.016374634253269), np.float64(1.146037438386339), np.float64(-0.6094584968362253))
+40 0.5 26 (np.float64(2.016376030067082), np.float64(1.1460380259652156), np.float64(-0.6094600772699814))
+10 0.05 10 (np.float64(1.564698944253602), np.float64(1.217572838177877), np.float64(-0.47366533835775565))
+10 0.05 12 (np.float64(1.5647222458544767), np.float64(1.2176820080115036), np.float64(-0.47385517537447214))
+10 0.05 14 (np.float64(1.5647329061806043), np.float64(1.2177343329466346), np.float64(-0.47394413362709703))
+10 0.05 16 (np.float64(1.5647381795337707), np.float64(1.2177612042110242), np.float64(-0.4739889797858237))
+10 0.05 18 (np.float64(1.5647409500881968), np.float64(1.2177757709503214), np.float64(-0.47401291461940026))
+10 0.05 20 (np.float64(1.564742477612821), np.float64(1.2177840198692549), np.float64(-0.47402628880567627))
+10 0.05 22 (np.float64(1.5647433538549667), np.float64(1.2177888625827342), np.float64(-0.4740340500957377))
+10 0.05 24 (np.float64(1.5647438734951804), np.float64(1.2177917931666697), np.float64(-0.47403869960020883))
+10 0.05 26 (np.float64(1.5647441905243658), np.float64(1.2177936131941995), np.float64(-0.4740415615825725))
+basis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.514909982681274
+200 832 time 88.01928424835205
+400 832 time 115.98080086708069
+600 832 time 147.4603567123413
+[?2004hroot@59537d8bb9aa:/app# tail -50 /app/hardconv; tail -12 /app/log22; tail -12 /app/log22low; tail -12 /app/projlog10
+[?2004lbasis 26 1 shape (571536, 27720) nnz 5086368
+time 29.50240206718445
+40 0.05 10 (np.float64(0.8535986710585881), np.float64(1.1960538910884577), np.float64(-0.4963320938079122))
+40 0.05 12 (np.float64(0.8536837726521068), np.float64(1.1964166600217125), np.float64(-0.497005919989319))
+40 0.05 14 (np.float64(0.853731643746084), np.float64(1.1966257061845966), np.float64(-0.4973895136483803))
+40 0.05 16 (np.float64(0.8537604012045653), np.float64(1.1967536410188881), np.float64(-0.4976220739311356))
+40 0.05 18 (np.float64(0.8537785640913468), np.float64(1.1968356642906397), np.float64(-0.4977700503464247))
+40 0.05 20 (np.float64(0.8537904991886552), np.float64(1.19689024161161), np.float64(-0.4978678927201741))
+40 0.05 22 (np.float64(0.8537985986848191), np.float64(1.1969276777086533), np.float64(-0.4979346449672708))
+40 0.05 24 (np.float64(0.8538042443873451), np.float64(1.196954016774999), np.float64(-0.49798139042193024))
+40 0.05 26 (np.float64(0.853808269843287), np.float64(1.1969729525026387), np.float64(-0.498014857716958))
+40 0.5 10 (np.float64(2.0161752701867517), np.float64(1.1459689478666275), np.float64(-0.6092546587466455))
+40 0.5 12 (np.float64(2.0162814220913248), np.float64(1.1460037606266642), np.float64(-0.6093607479316212))
+40 0.5 14 (np.float64(2.016328018063705), np.float64(1.1460199269114943), np.float64(-0.6094086453592807))
+40 0.5 16 (np.float64(2.0163505193496163), np.float64(1.1460280969632355), np.float64(-0.6094323071088057))
+40 0.5 18 (np.float64(2.0163622158238197), np.float64(1.1460325084564575), np.float64(-0.6094448428550227))
+40 0.5 20 (np.float64(2.016368663104765), np.float64(1.146035020803621), np.float64(-0.6094518664210848))
+40 0.5 22 (np.float64(2.016372391117026), np.float64(1.146036515676958), np.float64(-0.6094559861657257))
+40 0.5 24 (np.float64(2.016374634253269), np.float64(1.146037438386339), np.float64(-0.6094584968362253))
+40 0.5 26 (np.float64(2.016376030067082), np.float64(1.1460380259652156), np.float64(-0.6094600772699814))
+10 0.05 10 (np.float64(1.564698944253602), np.float64(1.217572838177877), np.float64(-0.47366533835775565))
+10 0.05 12 (np.float64(1.5647222458544767), np.float64(1.2176820080115036), np.float64(-0.47385517537447214))
+10 0.05 14 (np.float64(1.5647329061806043), np.float64(1.2177343329466346), np.float64(-0.47394413362709703))
+10 0.05 16 (np.float64(1.5647381795337707), np.float64(1.2177612042110242), np.float64(-0.4739889797858237))
+10 0.05 18 (np.float64(1.5647409500881968), np.float64(1.2177757709503214), np.float64(-0.47401291461940026))
+10 0.05 20 (np.float64(1.564742477612821), np.float64(1.2177840198692549), np.float64(-0.47402628880567627))
+10 0.05 22 (np.float64(1.5647433538549667), np.float64(1.2177888625827342), np.float64(-0.4740340500957377))
+10 0.05 24 (np.float64(1.5647438734951804), np.float64(1.2177917931666697), np.float64(-0.47403869960020883))
+10 0.05 26 (np.float64(1.5647441905243658), np.float64(1.2177936131941995), np.float64(-0.4740415615825725))
+basis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.514909982681274
+200 832 time 88.01928424835205
+400 832 time 115.98080086708069
+600 832 time 147.4603567123413
+basis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.361992597579956
+200 832 time 87.81766629219055
+400 832 time 115.47551894187927
+600 832 time 146.9892499446869
+[?2004hroot@59537d8bb9aa:/app# cat > /app/generator_dev.py <<'PY'
+[?2004l[?2004h> import os
+[?2004l[?2004h> os.environ['OPENBLAS_NUM_THREADS']='1'
+[?2004l[?2004h> import numpy as np
+[?2004l/[?2004h> from math import sqrt,pi
+[?2004l[?2004h> from scipy.special import roots_legendre,roots_genlaguerre,eval_genlaguerre,gammaln
+[?2004l[?2004h> from numpy.polynomial.legendre import legvander
+[?2004l[?2004h> import time
+[?2004l[?2004h> 
+[?2004l[?2004h> def kernel(N,y,z,a,b,c,d,r=3.5):
+[?2004l[?2004h>  # arrays y,z broadcast already flattened
+[?2004l[?2004h>  B=b*b;D=d*d;C=1-a*a-c*c;e=a*c*b*d
+[?2004l[?2004h>  H={(0,0):1.,(1,0):-B,(0,1):-D,(1,1):C}
+[?2004l[?2004h>  H2={}
+[?2004l[?2004h>  for (i,j),v in H.items():
+[?2004l[?2004h>   for (k,l),w in H.items():H2[i+k,j+l]=H2.get((i+k,j+l),0)+v*w
+[?2004l[?2004h>  # derivative numerators F_t H^2 and F_s H^2
+[?2004l[?2004h>  nn={(1,0):B,(0,1):D,(1,1):-2*(B*D+e*z)}
+[?2004l[?2004h>  def numerator(axis):
+[?2004l[?2004h>   out={}
+[?2004l[?2004h>   for (i,j),v in H.items():
+[?2004l[?2004h>    deg=(i,j)[axis]
+[?2004l[?2004h>    if not deg:continue
+[?2004l[?2004h>    ij=(i-1,j) if axis==0 else (i,j-1)
+[?2004l[?2004h>    for (k,l),w in H.items():
+[?2004l[?2004h>     key=(ij[0]+k,ij[1]+l);out[key]=out.get(key,0)-r*v*deg*w
+[?2004l[?2004h>    for (k,l),w in nn.items():
+[?2004l[?2004h>     key=(ij[0]+k,ij[1]+l);out[key]=out.get(key,0)+y*v*deg*w
+[?2004l[?2004h>   for (i,j),v in nn.items():
+[?2004l[?2004h>    deg=(i,j)[axis]
+[?2004l[?2004h>    if not deg:continue
+[?2004l[?2004h>    ij=(i-1,j) if axis==0 else (i,j-1)
+[?2004l[?2004h>    for (k,l),w in H.items():
+[?2004l[?2004h>     key=(ij[0]+k,ij[1]+l);out[key]=out.get(key,0)-y*v*deg*w
+[?2004l[?2004h>   return out
+[?2004l[?2004h>  nt=numerator(0);ns=numerator(1)
+[?2004l[?2004h>  F=np.empty((N+1,N+1,len(y)))
+[?2004l[?2004h>  F[0,0]=1.
+[?2004l[?2004h>  # first row with s-derivative
+[?2004l[?2004h>  for q in range(N):
+[?2004l[?2004h>   value=np.zeros(len(y))
+[?2004l[?2004h>   for (i,j),v in ns.items():
+[?2004l[?2004h>    if i==0 and j<=q:value+=v*F[0,q-j]
+[?2004l[?2004h>   for (i,j),v in H2.items():
+[?2004l[?2004h>    if i==0 and j>0 and j<=q:value-=v*(q-j+1)*F[0,q-j+1]
+[?2004l[?2004h>   F[0,q+1]=value/(q+1)
+[?2004l[?2004h>  for p in range(N):
+[?2004l[?2004h>   for q in range(N+1):
+[?2004l[?2004h>    value=np.zeros(len(y))
+[?2004l[?2004h>    for (i,j),v in nt.items():
+[?2004l[?2004h>     if i<=p and j<=q:value+=v*F[p-i,q-j]
+[?2004l[?2004h>    for (i,j),v in H2.items():
+[?2004l[?2004h>     if (i,j)!=(0,0) and i<=p and j<=q:value-=v*(p-i+1)*F[p-i+1,q-j]
+[?2004l[?2004h>    F[p+1,q]=value/(p+1)
+[?2004l[?2004h>  return F,H
+[?2004l[?2004h> 
+[?2004l[?2004h> def vector_bracket(N,y,z,w,a,b,c,d):
+[?2004l[?2004h>  t=__import__('time').time();F,H=kernel(N,y,z,a,b,c,d)
+[?2004l[?2004h>  B=b*b;D=d*d;ac=a*c;bd=b*d
+[?2004l[?2004h>  M={(0,0):bd*z,(1,0):-bd*z*B-ac*B,(0,1):-bd*z*D-ac*D,(1,1):bd*z*(B*D+a*a*c*c)+2*ac*B*D}
+[?2004l[?2004h>  U=np.zeros((N+1,N+1))
+[?2004l[?2004h>  norm=.5*np.exp(gammaln(np.arange(N+1)+2.5)-gammaln(2.5)-gammaln(np.arange(N+1)+1))
+[?2004l[?2004h>  for p in range(N+1):
+[?2004l[?2004h>   for q in range(N+1):
+[?2004l[?2004h>    value=np.zeros(len(y))
+[?2004l[?2004h>    for (i,j),h in H.items():
+[?2004l[?2004h>     if i<=p and j<=q:value+=1.5*ac*h*F[p-i,q-j]
+[?2004l[?2004h>    for (i,j),v in M.items():
+[?2004l[?2004h>     if i<=p and j<=q:value+=y*v*F[p-i,q-j]
+[?2004l[?2004h>    U[p,q]=value@w*2/(3*sqrt(norm[p]*norm[q]))
+[?2004l[?2004h>  print('vector bracket',N,a,c,d,'time',__import__('time').time()-t,flush=True)
+[?2004l[?2004h>  return U
+[?2004l[?2004h> 
+[?2004l[?2004h> def quad_inputs(M,N):
+[?2004l[?2004h>  y,wy=roots_genlaguerre(2*N+4,1)
+[?2004l[?2004h>  Q=np.array([eval_genlaguerre(j,1,y) for j in range(2*N+3)]).T@M[:2*N+3,:N+3]
+[?2004l[?2004h>  z,wz=roots_legendre(N+3)
+[?2004l[?2004h>  proj=wz[None,:]/2*(2*np.arange(N+3)[:,None]+1)*legvander(z,N+2).T
+[?2004l[?2004h>  aq=Q@proj
+[?2004l[?2004h>  w=wy[:,None]*2/sqrt(pi)*aq
+[?2004l[?2004h>  return np.repeat(y,len(z)),np.tile(z,len(y)),w.ravel()
+[?2004l[?2004h> 
+[?2004l[?2004h> def vector_matrix(M,N,T,R,X):
+[?2004l[?2004h>  y,z,w=quad_inputs(M,N);sz=N+1;x=np.array([X,1-X]);m=np.array([1.,R])
+[?2004l[?2004h>  K=np.zeros((2*sz,2*sz))
+[?2004l[?2004h>  for i,j in [(0,0),(1,1),(0,1)]:
+[?2004l[?2004h>   mi,mj=m[i],m[j];mu=mi*mj/(mi+mj);a=sqrt(mi/(mi+mj));b=sqrt(mj/(mi+mj))
+[?2004l[?2004h>   rate=(.25 if i==j else .5)*x[i]*x[j]*sqrt(2*T/mu)
+[?2004l[?2004h>   if i==j:
+[?2004l[?2004h>    same=vector_bracket(N,y,z,w,a,b,a,b);cross=vector_bracket(N,y,z,w,a,b,b,-a)
+[?2004l[?2004h>    K[i*sz:(i+1)*sz,i*sz:(i+1)*sz]+=rate*(2*same+cross+cross.T)
+[?2004l[?2004h>   else:
+[?2004l[?2004h>    same1=vector_bracket(N,y,z,w,a,b,a,b);same2=vector_bracket(N,y,z,w,b,a,b,a);cross=vector_bracket(N,y,z,w,a,b,b,-a)
+[?2004l[?2004h>    K[:sz,:sz]+=rate*same1;K[sz:,sz:]+=rate*same2;K[:sz,sz:]+=rate*cross;K[sz:,:sz]+=rate*cross.T
+[?2004l[?2004h>  return (K+K.T)/2
+[?2004l[?2004h> 
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  import sys
+[?2004l[?2004h>  from bracket_dev import solve
+[?2004l[?2004h>  N=int(sys.argv[1]);R=float(sys.argv[2]);X=float(sys.argv[3]);T=float(sys.argv[4])
+[?2004l[?2004h>  M=np.load(sys.argv[5]);K=vector_matrix(M,N,T,R,X)
+[?2004l[?2004h>  np.save('/app/genK.npy',K)
+[?2004l[?2004h>  def result(n):
+[?2004l[?2004h>   ix=np.r_[np.arange(n+1),np.arange(N+1,N+n+2)];KK=K[np.ix_(ix,ix)].copy();sz=n+1
+[?2004l[?2004h>   sd=np.zeros(2*sz);sh=sd.copy();null=sd.copy()
+[?2004l[?2004h>   for i in range(2):
+[?2004l[?2004h>    sd[i*sz]=(1 if i==0 else -1)*sqrt(T/[1,R][i]);sh[i*sz+1]=-[X,1-X][i]*sqrt(5*T/(2*[1,R][i]));null[i*sz]=sqrt([1,R][i])
+[?2004l[?2004h>   KK+=np.outer(null,null)/np.dot(null,null)*np.max(np.diag(KK))
+[?2004l[?2004h>   v=np.linalg.solve(KK,np.array([sd,sh]).T);dd,dh=sd@v;hd,hh=sh@v
+[?2004l[?2004h>   return hh-dh*hd/dd,X*(1-X)*dd,dh/(X*(1-X)*dd)
+[?2004l[?2004h>  for n in range(2,N+1,2):print(n,result(n),flush=True)
+[?2004l[?2004h> PY
+[?2004l[1]   Done                    OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0.8 50 22 16 > /app/log22 2>&1
+[2]-  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0 0.2 22 16 > /app/log22low 2>&1
+[3]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/project_dev.py 0 0.2 10 16 > /app/projlog10 2>&1
+[?2004hroot@59537d8bb9aa:/app# tail -12 /app/projlog10; tail -12 /app/log22
+[?2004l8 (np.float64(0.15127428968402779), np.float64(0.016657329069244456), np.float64(0.021820217173619382), np.float64(-0.12449367403843653))
+10 (np.float64(0.15127430087815047), np.float64(0.01665756549342447), np.float64(0.021820723872625524), np.float64(-0.12456251282658402))
+mixture 40 0.5
+4 (np.float64(0.1252525219905996), np.float64(0.042704595262835286), np.float64(0.021741059664114347), np.float64(-0.14992854354647994))
+6 (np.float64(0.1252528136520231), np.float64(0.04271032795214711), np.float64(0.02174203270894839), np.float64(-0.1501207125085574))
+8 (np.float64(0.12525284021634178), np.float64(0.04271056227829468), np.float64(0.021742851409664248), np.float64(-0.1501606585515091))
+10 (np.float64(0.12525290358854646), np.float64(0.04271112201188095), np.float64(0.021742992350444777), np.float64(-0.15018412405663514))
+mixture 40 0.95
+4 (np.float64(0.043252713602303094), np.float64(0.08452703951940609), np.float64(0.02164336122269305), np.float64(-0.1911662419910836))
+6 (np.float64(0.04325272664131468), np.float64(0.08452747995663921), np.float64(0.021643412928553346), np.float64(-0.19119504368118553))
+8 (np.float64(0.04325272827092977), np.float64(0.08452750390072256), np.float64(0.0216434678775972), np.float64(-0.19120267933311558))
+10 (np.float64(0.04325273114371188), np.float64(0.08452751775859364), np.float64(0.021643475624880653), np.float64(-0.19120462237964359))
+1 (np.float64(2.407800245214623), np.float64(4.5896616102978625), np.float64(1.1910375580743005), np.float64(-0.7404738974546904))
+2 (np.float64(2.409001168756004), np.float64(4.699517816238612), np.float64(1.191838319352724), np.float64(-0.7765892027736775))
+3 (np.float64(2.409149859112057), np.float64(4.7106845163862925), np.float64(1.1919962734399654), np.float64(-0.7817016913014689))
+4 (np.float64(2.409175097101254), np.float64(4.712577244415783), np.float64(1.1920404617287907), np.float64(-0.7828148767699263))
+5 (np.float64(2.4091802958969444), np.float64(4.713007179042152), np.float64(1.1920558254484097), np.float64(-0.7831277069817763))
+6 (np.float64(2.40918150349638), np.float64(4.713126606342022), np.float64(1.1920620397869854), np.float64(-0.7832325657369432))
+7 (np.float64(2.409181802343099), np.float64(4.713165253445488), np.float64(1.19206485267802), np.float64(-0.7832726975465142))
+8 (np.float64(2.4091818766766018), np.float64(4.713179396121434), np.float64(1.1920662420905592), np.float64(-0.783289759724089))
+10 (np.float64(2.4091818968122682), np.float64(4.713187670159166), np.float64(1.1920673907039796), np.float64(-0.783301607169575))
+12 (np.float64(2.409181897076735), np.float64(4.71318950103486), np.float64(1.192067781949417), np.float64(-0.7833048617237481))
+14 (np.float64(2.4091818980849364), np.float64(4.713190025171171), np.float64(1.1920679374837273), np.float64(-0.7833059600797758))
+16 (np.float64(2.409181899623678), np.float64(4.713190207634605), np.float64(1.192068006822126), np.float64(-0.7833063928780295))
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/generator_dev.py 10 40 0.05 0.2 /app/mom_0.0_0.2_10_16.npy
+[?2004lvector bracket 10 0.7071067811865476 0.7071067811865476 0.7071067811865476 time 0.0028824806213378906
+vector bracket 10 0.7071067811865476 0.7071067811865476 -0.7071067811865476 time 0.00279998779296875
+vector bracket 10 0.7071067811865476 0.7071067811865476 0.7071067811865476 time 0.0026929378509521484
+vector bracket 10 0.7071067811865476 0.7071067811865476 -0.7071067811865476 time 0.0026290416717529297
+vector bracket 10 0.15617376188860607 0.15617376188860607 0.9877295966495896 time 0.002638578414916992
+vector bracket 10 0.9877295966495896 0.9877295966495896 0.15617376188860607 time 0.0026540756225585938
+vector bracket 10 0.15617376188860607 0.9877295966495896 -0.15617376188860607 time 0.0026352405548095703
+2 (np.float64(0.01663817114220735), np.float64(0.021800906405179062), np.float64(-0.12100059612335617))
+4 (np.float64(0.016655725908671818), np.float64(0.02181475068143582), np.float64(-0.1239790309771949))
+6 (np.float64(0.01665720681558577), np.float64(0.021817821563156266), np.float64(-0.12438215371732085))
+8 (np.float64(0.016657329069245556), np.float64(0.021820217173620645), np.float64(-0.12449367403842956))
+10 (np.float64(0.016657565493424096), np.float64(0.021820723872625996), np.float64(-0.1245625128263431))
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> M=np.zeros((123,63));M[0,1:]=np.pi
+[?2004l[?2004h> np.save('/app/hardM60.npy',M)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/generator_dev.py 60 40 0.05 50 /app/hardM60.npy > /app/genhard60 2>&1 &
+[?2004l[1] 480
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/momlog60hi 2>&1 &
+[?2004l[?2004h> import sys
+[?2004l[?2004h> sys.path.insert(0,'/app')
+[?2004l[?2004h> from project_dev import moments
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> M=moments(.8,50,60,20,240,192)
+[?2004l[?2004h> np.save('/app/momhi60.npy',M)
+[?2004l[?2004h> PY
+[?2004l[2] 481
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/momlog60low 2>&1 &
+[?2004l[?2004h> import sys
+[?2004l[?2004h> sys.path.insert(0,'/app')
+[?2004l[?2004h> from project_dev import moments
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> M=moments(0,.2,60,20,240,192)
+[?2004l[?2004h> np.save('/app/momlow60.npy',M)
+[?2004l[?2004h> PY
+[?2004l[3] 482
+[?2004hroot@59537d8bb9aa:/app# tail -20 /app/genhard60; cat /app/momlog60hi /app/momlog60low
+[?2004l[?2004hroot@59537d8bb9aa:/app# tail -40 /app/genhard60; cat /app/momlog60hi /app/momlog60low; ls -lh /app/mom*60.npy
+[?2004lvector bracket 60 0.7071067811865476 0.7071067811865476 0.7071067811865476 time 0.738269567489624
+vector bracket 60 0.7071067811865476 0.7071067811865476 -0.7071067811865476 time 0.7726757526397705
+vector bracket 60 0.7071067811865476 0.7071067811865476 0.7071067811865476 time 0.7784197330474854
+vector bracket 60 0.7071067811865476 0.7071067811865476 -0.7071067811865476 time 0.7243900299072266
+vector bracket 60 0.15617376188860607 0.15617376188860607 0.9877295966495896 time 0.775799036026001
+vector bracket 60 0.9877295966495896 0.9877295966495896 0.15617376188860607 time 0.7352910041809082
+vector bracket 60 0.15617376188860607 0.9877295966495896 -0.15617376188860607 time 0.8147509098052979
+2 (np.float64(0.846183531005889), np.float64(1.177335905123209), np.float64(-0.4557942668541413))
+4 (np.float64(0.8520070900532126), np.float64(1.1902656258277622), np.float64(-0.4848315363622076))
+6 (np.float64(0.8530631095294414), np.float64(1.1939273712199316), np.float64(-0.4922456161326006))
+8 (np.float64(0.8534329935429933), np.float64(1.1953710859741973), np.float64(-0.49504237380833976))
+10 (np.float64(0.8535986710494495), np.float64(1.1960538910825207), np.float64(-0.49633209380684845))
+12 (np.float64(0.8536837726429682), np.float64(1.1964166600157737), np.float64(-0.49700591998825516))
+14 (np.float64(0.8537316437369451), np.float64(1.1966257061786563), np.float64(-0.4973895136473163))
+16 (np.float64(0.8537604011954263), np.float64(1.1967536410129465), np.float64(-0.4976220739300719))
+18 (np.float64(0.8537785640822076), np.float64(1.1968356642846991), np.float64(-0.49777005034536054))
+20 (np.float64(0.853790499179516), np.float64(1.1968902416056681), np.float64(-0.4978678927191102))
+22 (np.float64(0.85379859867568), np.float64(1.1969276777027111), np.float64(-0.4979346449662074))
+24 (np.float64(0.8538042443782057), np.float64(1.1969540167690564), np.float64(-0.49798139042086587))
+26 (np.float64(0.8538082698341477), np.float64(1.1969729524966966), np.float64(-0.49801485771589393))
+28 (np.float64(0.8538111963931265), np.float64(1.1969868212306065), np.float64(-0.49803927870330733))
+30 (np.float64(0.8538133603046495), np.float64(1.1969971447597787), np.float64(-0.4980573960943917))
+32 (np.float64(0.8538149842389235), np.float64(1.197004939727272), np.float64(-0.4980710340706174))
+34 (np.float64(0.8538162190791757), np.float64(1.197010900483578), np.float64(-0.4980814335630934))
+36 (np.float64(0.8538171691506523), np.float64(1.1970155105809706), np.float64(-0.49808945564993024))
+38 (np.float64(0.8538179078899191), np.float64(1.1970191126444003), np.float64(-0.49809570844161594))
+40 (np.float64(0.8538184878236915), np.float64(1.1970219532301998), np.float64(-0.49810062821032824))
+42 (np.float64(0.8538189470667831), np.float64(1.1970242122535133), np.float64(-0.4981045324123801))
+44 (np.float64(0.8538193136385256), np.float64(1.1970260226691938), np.float64(-0.49810765502797155))
+46 (np.float64(0.8538196083819467), np.float64(1.197027483865525), np.float64(-0.4981101705356029))
+48 (np.float64(0.853819846970337), np.float64(1.197028670924434), np.float64(-0.4981122104390223))
+50 (np.float64(0.8538200413070623), np.float64(1.197029641116694), np.float64(-0.4981138748277762))
+52 (np.float64(0.853820200515397), np.float64(1.1970304385182104), np.float64(-0.4981152405725267))
+54 (np.float64(0.8538203316471957), np.float64(1.1970310973309248), np.float64(-0.49811636720650965))
+56 (np.float64(0.8538204401961239), np.float64(1.1970316442987334), np.float64(-0.4981173011944907))
+58 (np.float64(0.8538205304732964), np.float64(1.197032100483307), np.float64(-0.49811807906396094))
+60 (np.float64(0.8538206058849352), np.float64(1.1970324825820615), np.float64(-0.498118729724256))
+[1]   Done                    OPENBLAS_NUM_THREADS=1 python3 /app/generator_dev.py 60 40 0.05 50 /app/hardM60.npy > /app/genhard60 2>&1
+[2]-  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/momlog60hi 2>&1
+import sys
+sys.path.insert(0,'/app')
+from project_dev import moments
+import numpy as np
+M=moments(.8,50,60,20,240,192)
+np.save('/app/momhi60.npy',M)
+PY
+
+[3]+  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/momlog60low 2>&1
+import sys
+sys.path.insert(0,'/app')
+from project_dev import moments
+import numpy as np
+M=moments(0,.2,60,20,240,192)
+np.save('/app/momlow60.npy',M)
+PY
+
+moments 8.988681316375732
+moments 9.067110538482666
+-rw-r--r-- 1 root root 119K Nov  1 02:05 /app/momhi60.npy
+-rw-r--r-- 1 root root 119K Nov  1 02:05 /app/momlow60.npy
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/generator_dev.py 60 40 0.05 50 /app/momhi60.npy > /app/genhi60 2>&1 &
+[?2004l[1] 529
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/generator_dev.py 60 40 0.05 0.2 /app/momlow60.npy > /app/genlow60 2>&1 &
+[?2004l[2] 530
+[?2004hroot@59537d8bb9aa:/app# tail -18 /app/genhi60; tail -18 /app/genlow60
+[?2004l[?2004hroot@59537d8bb9aa:/app# tail -30 /app/genhi60; tail -30 /app/genlow60
+[?2004l2 (np.float64(0.9152127743327511), np.float64(1.2876886566914065), np.float64(-0.43326775623592184))
+4 (np.float64(0.920790029602542), np.float64(1.2995888293992326), np.float64(-0.4583813647816869))
+6 (np.float64(0.9217611661235401), np.float64(1.302808656129411), np.float64(-0.464498141863259))
+8 (np.float64(0.9220879305701215), np.float64(1.3040272358569962), np.float64(-0.4667123435181647))
+10 (np.float64(0.9222286273595826), np.float64(1.304581245157082), np.float64(-0.46769385618816856))
+12 (np.float64(0.9222981365026187), np.float64(1.304864353494563), np.float64(-0.4681871072102857))
+14 (np.float64(0.9223357586246433), np.float64(1.3050213407385312), np.float64(-0.4684573155141117))
+16 (np.float64(0.9223575169375838), np.float64(1.305113851858919), np.float64(-0.4686150492811653))
+18 (np.float64(0.9223707241393404), np.float64(1.3051708732094334), np.float64(-0.4687115249073196))
+20 (np.float64(0.9223776237351647), np.float64(1.3052010194396648), np.float64(-0.46876222496202297))
+22 (np.float64(0.9223829043524915), np.float64(1.3052243140389364), np.float64(-0.468801213900033))
+24 (np.float64(0.9223828529512489), np.float64(1.3052240554688899), np.float64(-0.4688008078439744))
+26 (np.float64(0.9223922634694148), np.float64(1.3052659875174988), np.float64(-0.46887063770742476))
+28 (np.float64(0.9223845381583134), np.float64(1.305231555063615), np.float64(-0.4688133054187799))
+30 (np.float64(0.9223845989705901), np.float64(1.3052318261027724), np.float64(-0.46881375650854623))
+32 (np.float64(0.9223848907234466), np.float64(1.305232675252847), np.float64(-0.4688159123658363))
+34 (np.float64(0.9223848987657645), np.float64(1.3048474069744664), np.float64(-0.4688159746295503))
+36 (np.float64(0.9223852153711722), np.float64(1.3432397283903672), np.float64(-0.46881832197693))
+38 (np.float64(0.9223850684227131), np.float64(-11543.492017545525), np.float64(-0.46881723079963994))
+40 (np.float64(0.922385126112841), np.float64(0.030822837080799866), np.float64(-0.4688176616841041))
+42 (np.float64(0.9223851648747113), np.float64(-0.001926421414270074), np.float64(-0.468817949774746))
+44 (np.float64(0.9223850684293269), np.float64(-0.001926421527711473), np.float64(-0.46881723419814925))
+46 (np.float64(0.9223851067958025), np.float64(-0.0019264214156314052), np.float64(-0.46881751530233295))
+48 (np.float64(0.9223850907441863), np.float64(-0.001926421381169281), np.float64(-0.46881740213323314))
+50 (np.float64(0.9223851062864692), np.float64(-0.001926421411122212), np.float64(-0.46881787379241086))
+52 (np.float64(0.9223826451337854), np.float64(-0.0019264212700699187), np.float64(-0.4688047415014364))
+54 (np.float64(0.9223882389993157), np.float64(-0.0019264213198449827), np.float64(-0.4688774967969707))
+56 (np.float64(0.922339312426098), np.float64(-0.00192642093485134), np.float64(-0.46905954622865564))
+58 (np.float64(0.8374119913198648), np.float64(1108.7602945395597), np.float64(-0.46580752634618455))
+60 (np.float64(0.9219158211757507), np.float64(-6.6836184354347734e-21), np.float64(-0.46761968442493207))
+[1]-  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/generator_dev.py 60 40 0.05 50 /app/momhi60.npy > /app/genhi60 2>&1
+[2]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/generator_dev.py 60 40 0.05 0.2 /app/momlow60.npy > /app/genlow60 2>&1
+2 (np.float64(0.016638171141586847), np.float64(0.021800906405046616), np.float64(-0.1210005961201524))
+4 (np.float64(0.016655725908054215), np.float64(0.021814750681303955), np.float64(-0.12397903097415199))
+6 (np.float64(0.01665720681496797), np.float64(0.02181782156302484), np.float64(-0.12438215371427903))
+8 (np.float64(0.01665732906862765), np.float64(0.021820217173488452), np.float64(-0.12449367403532656))
+10 (np.float64(0.016657565492803356), np.float64(0.021820723872491857), np.float64(-0.12456251282275337))
+12 (np.float64(0.016657766403082832), np.float64(0.02182077751214954), np.float64(-0.12458430274149129))
+14 (np.float64(0.016657827131795932), np.float64(0.02182084984079588), np.float64(-0.12459733384950573))
+16 (np.float64(0.01665783371221613), np.float64(0.02182100139073962), np.float64(-0.12460353125613026))
+18 (np.float64(0.016657834689182523), np.float64(0.021821131794713188), np.float64(-0.12460588687985936))
+20 (np.float64(0.016657837624233104), np.float64(0.021821185401633855), np.float64(-0.12460843041826937))
+22 (np.float64(0.01665784504726191), np.float64(0.021821207099642706), np.float64(-0.12461105026355578))
+24 (np.float64(0.0166578395602269), np.float64(0.02182118890783641), np.float64(-0.12460891351286459))
+26 (np.float64(0.01665784065643225), np.float64(0.021821191892128368), np.float64(-0.12460929247751129))
+28 (np.float64(0.01665784325624335), np.float64(0.02182120842030823), np.float64(-0.12461067235386956))
+30 (np.float64(0.016657841821734378), np.float64(0.021821206062988138), np.float64(-0.12461098089222072))
+32 (np.float64(0.01665784741716112), np.float64(0.021821210873953733), np.float64(-0.1246113186556418))
+34 (np.float64(0.016657838165285443), np.float64(0.02181604655316078), np.float64(-0.12460943271328437))
+36 (np.float64(0.016657918682195093), np.float64(0.021956960818271302), np.float64(-0.1246295167451611))
+38 (np.float64(0.016657841836576384), np.float64(0.01578142811893327), np.float64(-0.12461041383802003))
+40 (np.float64(0.016657842586414784), np.float64(-1365.1942260646783), np.float64(-0.1246106347886931))
+42 (np.float64(0.016657842236728504), np.float64(-1179.5369884363918), np.float64(-0.12461102266152037))
+44 (np.float64(0.016657841711115395), np.float64(-1201.3233905702912), np.float64(-0.1246099599056642))
+46 (np.float64(0.016657842037607343), np.float64(7.525085373874966e-09), np.float64(-0.12461052911766739))
+48 (np.float64(0.01665784325995967), np.float64(-1161.6116591841123), np.float64(-0.12461053551643428))
+50 (np.float64(0.01665784196332841), np.float64(-5.741184519827007e-14), np.float64(-0.1246105570918746))
+52 (np.float64(0.016657833233229828), np.float64(-4.485300406114849e-16), np.float64(-0.12460986526263328))
+54 (np.float64(0.016607410904052933), np.float64(-1181.3625359792775), np.float64(-0.12461166345757521))
+56 (np.float64(0.016656770655280498), np.float64(-5.475220222308167e-20), np.float64(-0.12455102164822018))
+58 (np.float64(0.01665305550181964), np.float64(-4.2775157986782555e-22), np.float64(-0.12416385876215415))
+60 (np.float64(0.016658134726739358), np.float64(-6.683618435434773e-24), np.float64(-0.1236841177200016))
+[?2004hroot@59537d8bb9aa:/app# cp /app/generator_dev.py /app/generator_before.py
+[?2004l[?2004hroot@59537d8bb9aa:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/generator_dev.py';s=open(p).read();s=s.replace('B=b*b;D=d*d;C=1-a*a-c*c;e=a*c*b*d','y=y.astype(np.longdouble);z=z.astype(np.longdouble)\n a,b,c,d=map(np.longdouble,(a,b,c,d))\n B=b*b;D=d*d;C=1-a*a-c*c;e=a*c*b*d')
+[?2004l[?2004h> s=s.replace('np.empty((N+1,N+1,len(y)))','np.empty((N+1,N+1,len(y)),dtype=np.longdouble)').replace('np.zeros(len(y))','np.zeros(len(y),dtype=np.longdouble)')
+[?2004l[?2004h> s=s.replace(" print('vector bracket',N,a,c,d,'time',__import__('time').time()-t,flush=True)", " # no diagnostic output")
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@59537d8bb9aa:/app# cat > /app/direct_dev.py <<'PY'
+[?2004l[?2004h> import os
+[?2004l[?2004h> os.environ['OPENBLAS_NUM_THREADS']='1'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from math import pi,sqrt
+[?2004l[?2004h> from scipy.special import roots_legendre
+[?2004l[?2004h> from numpy.polynomial.legendre import legvander
+[?2004l[?2004h> from generator_dev import vector_bracket
+[?2004l[?2004h> from project_dev import nodes
+[?2004l[?2004h> from scatter_dev import cross_sections
+[?2004l[?2004h> import sys,time
+[?2004l[?2004h> 
+[?2004l[?2004h> def direct(A,T,N,R,X,n=16,nr=240,nt=192):
+[?2004l[?2004h>  t=time.time();yy,wy=nodes(T,A,n,ymax=240)
+[?2004l[?2004h>  z,wz=roots_legendre(N+3)
+[?2004l[?2004h>  proj=wz[None,:]/2*(2*np.arange(N+3)[:,None]+1)*legvander(z,N+2).T
+[?2004l[?2004h>  Q=np.array([cross_sections(T*y,A,N+2,nr,nt) for y in yy])
+[?2004l[?2004h>  print('scattering time',time.time()-t,flush=True)
+[?2004l[?2004h>  np.savez(f'/app/directQ_{A}_{T}_{N}_{n}.npz',yy=yy,wy=wy,Q=Q)
+[?2004l[?2004h>  matrices=[]
+[?2004l[?2004h>  a=sqrt(1/(1+R));b=sqrt(R/(1+R));s=sqrt(.5)
+[?2004l[?2004h>  for aa,bb,cc,dd in [(s,s,s,s),(s,s,s,-s),(a,b,a,b),(b,a,b,a),(a,b,b,-a)]:
+[?2004l[?2004h>   V=np.zeros((N+1,N+1))
+[?2004l[?2004h>   for j in range(0,len(yy),12):
+[?2004l[?2004h>    y=yy[j:j+12];w=wy[j:j+12]*y*np.exp(-y)*2/sqrt(pi)
+[?2004l[?2004h>    ww=w[:,None]*(Q[j:j+12]@proj)
+[?2004l[?2004h>    V+=vector_bracket(N,np.repeat(y,len(z)),np.tile(z,len(y)),ww.ravel(),aa,bb,cc,dd)
+[?2004l[?2004h>   matrices.append(V)
+[?2004l[?2004h>   print('pair',aa,cc,'time',time.time()-t,flush=True)
+[?2004l[?2004h>  V,C,L,H,B=matrices;sz=N+1;K=np.zeros((2*sz,2*sz))
+[?2004l[?2004h>  K[:sz,:sz]+=.25*X*X*sqrt(4*T)*(2*V+C+C.T)
+[?2004l[?2004h>  K[sz:,sz:]+=.25*(1-X)**2*sqrt(4*T/R)*(2*V+C+C.T)
+[?2004l[?2004h>  rate=.5*X*(1-X)*sqrt(2*T*(1+R)/R)
+[?2004l[?2004h>  K[:sz,:sz]+=rate*L;K[sz:,sz:]+=rate*H;K[:sz,sz:]+=rate*B;K[sz:,:sz]+=rate*B.T
+[?2004l[?2004h>  return (K+K.T)/2
+[?2004l[?2004h> 
+[?2004l[?2004h> def results(K,T,R,X):
+[?2004l[?2004h>  N=len(K)//2-1
+[?2004l[?2004h>  for n in range(4,N+1,2):
+[?2004l[?2004h>   ix=np.r_[np.arange(n+1),np.arange(N+1,N+n+2)];KK=K[np.ix_(ix,ix)].copy();sz=n+1
+[?2004l[?2004h>   sd=np.zeros(2*sz);sh=sd.copy();null=sd.copy()
+[?2004l[?2004h>   for i in range(2):
+[?2004l[?2004h>    sd[i*sz]=(1 if i==0 else -1)*sqrt(T/[1,R][i]);sh[i*sz+1]=-[X,1-X][i]*sqrt(5*T/(2*[1,R][i]));null[i*sz]=sqrt([1,R][i])
+[?2004l[?2004h>   KK+=np.outer(null,null)/np.dot(null,null)*np.max(np.diag(KK))
+[?2004l[?2004h>   v=np.linalg.solve(KK,np.array([sd,sh]).T);dd,dh=sd@v;hd,hh=sh@v
+[?2004l[?2004h>   print(n,hh-dh*hd/dd,X*(1-X)*dd,dh/(X*(1-X)*dd),flush=True)
+[?2004l[?2004h> 
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  A,T=float(sys.argv[1]),float(sys.argv[2]);N=int(sys.argv[3]);R=float(sys.argv[4]);X=float(sys.argv[5]);n=int(sys.argv[6]) if len(sys.argv)>6 else 16
+[?2004l[?2004h>  K=direct(A,T,N,R,X,n)
+[?2004l[?2004h>  np.save(f'/app/directK_{A}_{T}_{N}_{R}_{X}_{n}.npy',K)
+[?2004l[?2004h>  results(K,T,R,X)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/direct_dev.py 0.8 50 50 40 0.05 16 > /app/directhi50 2>&1 &
+[?2004l[1] 579
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/direct_dev.py 0 0.2 40 40 0.05 16 > /app/directlow40 2>&1 &
+[?2004l[2] 580
+[?2004hroot@59537d8bb9aa:/app# tail -10 /app/directhi50; tail -10 /app/directlow40
+[?2004l[?2004hroot@59537d8bb9aa:/app# tail -8 /app/directhi50; tail -8 /app/directlow40
+[?2004lscattering time 5.474945306777954
+scattering time 5.32930588722229
+pair 0.7071067811865476 0.7071067811865476 time 17.921480417251587
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/visccheck 2>&1 &
+[?2004l[?2004h> import sys,time,numpy as np
+[?2004l[?2004h> sys.path.insert(0,'/app')
+[?2004l[?2004h> from project_dev import brackets
+[?2004l[?2004h> from bracket_dev import solve
+[?2004l[?2004h> for A,T,path in [(0,.2,'/app/momlow60.npy'),(.8,50,'/app/momhi60.npy')]:
+[?2004l[?2004h>  M=np.load(path);UT=brackets(M,14,2)
+[?2004l[?2004h>  np.save(f'/app/tensor14_{A}_{T}.npy',UT)
+[?2004l[?2004h>  # obtain vector lower-order from existing direct brackets
+[?2004l[?2004h>  UV=np.load(f'/app/br_{A:.1f}_{T:.1f}_22_16.npz')['UV']
+[?2004l[?2004h>  for R,X in [(40,.05),(40,.5),(40,.95),(1,.5)]:
+[?2004l[?2004h>   print(A,T,R,X)
+[?2004l[?2004h>   for n in [6,8,10,12,14]:
+[?2004l[?2004h>    print(n,solve(UV[:,:n+1,:n+1],UT[:,:n+1,:n+1],T,R,X,n)[0],flush=True)
+[?2004l[?2004h> PY
+[?2004l[3] 614
+[?2004hroot@59537d8bb9aa:/app# tail -30 /app/directhi50; tail -30 /app/directlow40; cat /app/visccheck
+[?2004lscattering time 5.474945306777954
+pair 0.7071067811865476 0.7071067811865476 time 28.378148794174194
+pair 0.7071067811865476 0.7071067811865476 time 53.32101845741272
+[3]+  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/visccheck 2>&1
+import sys,time,numpy as np
+sys.path.insert(0,'/app')
+from project_dev import brackets
+from bracket_dev import solve
+for A,T,path in [(0,.2,'/app/momlow60.npy'),(.8,50,'/app/momhi60.npy')]:
+ M=np.load(path);UT=brackets(M,14,2)
+ np.save(f'/app/tensor14_{A}_{T}.npy',UT)
+ # obtain vector lower-order from existing direct brackets
+ UV=np.load(f'/app/br_{A:.1f}_{T:.1f}_22_16.npz')['UV']
+ for R,X in [(40,.05),(40,.5),(40,.95),(1,.5)]:
+  print(A,T,R,X)
+  for n in [6,8,10,12,14]:
+   print(n,solve(UV[:,:n+1,:n+1],UT[:,:n+1,:n+1],T,R,X,n)[0],flush=True)
+PY
+
+scattering time 5.32930588722229
+pair 0.7071067811865476 0.7071067811865476 time 17.921480417251587
+pair 0.7071067811865476 0.7071067811865476 time 30.5687735080719
+pair 0.15617376188860607 0.15617376188860607 time 43.29495716094971
+pair 0.9877295966495896 0.9877295966495896 time 57.77678465843201
+basis 14 2 shape (126720, 5456) nnz 495516
+brackets 2 2.2842516899108887
+0 0.2 40 0.05
+6 0.15127428246215602
+8 0.15127428967986242
+10 0.15127430087398486
+12 0.15127430272038722
+14 0.15127431086870097
+0 0.2 40 0.5
+6 0.12525281364918253
+8 0.12525284021350114
+10 0.1252529035857051
+12 0.12525290961445118
+14 0.12525293419639813
+0 0.2 40 0.95
+6 0.043252726640537434
+8 0.04325272827015252
+10 0.043252731142934625
+12 0.043252731335191086
+14 0.04325273192267069
+0 0.2 1 0.5
+6 0.02418301217838706
+8 0.024183012343797015
+10 0.024183012345838865
+12 0.024183012345927804
+14 0.024183012345959508
+basis 14 2 shape (126720, 5456) nnz 495516
+brackets 2 2.3080012798309326
+0.8 50 40 0.05
+6 8.522904081132802
+8 8.522912507303642
+10 8.522914953588451
+12 8.522915882066517
+14 8.522916285529686
+0.8 50 40 0.5
+6 7.001301403539248
+8 7.0013084660120795
+10 7.001309856901794
+12 7.001310156949561
+14 7.001310219508563
+0.8 50 40 0.95
+6 2.409181503494806
+8 2.4091818766750275
+10 2.4091818968106935
+12 2.4091818970751553
+14 2.4091818980829216
+0.8 50 1 0.5
+6 1.3634070229884392
+8 1.3634074185090386
+10 1.3634074574406805
+12 1.3634074623753545
+14 1.3634074631280664
+[?2004hroot@59537d8bb9aa:/app# tail -30 /app/directhi50; tail -28 /app/directlow40
+[?2004lscattering time 5.474945306777954
+pair 0.7071067811865476 0.7071067811865476 time 28.378148794174194
+pair 0.7071067811865476 0.7071067811865476 time 53.32101845741272
+pair 0.15617376188860607 0.15617376188860607 time 76.31038808822632
+[2]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/direct_dev.py 0 0.2 40 40 0.05 16 > /app/directlow40 2>&1
+scattering time 5.32930588722229
+pair 0.7071067811865476 0.7071067811865476 time 17.921480417251587
+pair 0.7071067811865476 0.7071067811865476 time 30.5687735080719
+pair 0.15617376188860607 0.15617376188860607 time 43.29495716094971
+pair 0.9877295966495896 0.9877295966495896 time 57.77678465843201
+pair 0.15617376188860607 0.9877295966495896 time 70.39750242233276
+4 0.01665572590830672 0.021814750681474877 -0.12397903097488228
+6 0.016657206815220447 0.021817821563195762 -0.1243821537150012
+8 0.016657329068880164 0.021820217173659673 -0.12449367403606354
+10 0.016657565493057486 0.021820723872664254 -0.12456251282377744
+12 0.01665776640339759 0.02182077751233589 -0.1245843027486557
+14 0.01665782713264191 0.021820849843473693 -0.12459733410650001
+16 0.016657833713931276 0.021821001578815214 -0.12460353484757618
+18 0.016657834748339463 0.021821136438280053 -0.12460599682065156
+20 0.016657839190963315 0.021821189719269052 -0.12460902654191416
+22 0.016657850689019798 0.021821198631154764 -0.12461102631026473
+24 0.016657863901601448 0.02182119945956184 -0.12461171443328997
+26 0.0166578715855916 0.02182120103713894 -0.12461240567524098
+28 0.016657873672871967 0.021821207507045116 -0.12461312812634838
+30 0.016657873810821233 0.021821219633313658 -0.12461335087734259
+32 0.016657873832874575 0.021821231887237613 -0.12461324442173066
+34 0.016657873841886803 0.021821239244342 -0.12461324235386877
+36 0.016657874090275738 0.021821241812032217 -0.12461339417693365
+38 0.016657874991959722 0.021821242247896177 -0.12461351641365362
+40 0.01665787636150463 0.02182124227205012 -0.12461355159626576
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/refinehi 2>&1 &
+[?2004l[?2004h> import sys,numpy as np
+[?2004l[?2004h> sys.path.insert(0,'/app')
+[?2004l[?2004h> from direct_dev import direct,results
+[?2004l[?2004h> K=direct(.8,50,50,40,.05,24,360,256)
+[?2004l[?2004h> np.save('/app/refinehi.npy',K)
+[?2004l[?2004h> results(K,50,40,.05)
+[?2004l[?2004h> PY
+[?2004l[2] 659
+[?2004hroot@59537d8bb9aa:/app# tail -28 /app/directhi50; tail -5 /app/refinehi
+[?2004lscattering time 5.474945306777954
+pair 0.7071067811865476 0.7071067811865476 time 28.378148794174194
+pair 0.7071067811865476 0.7071067811865476 time 53.32101845741272
+pair 0.15617376188860607 0.15617376188860607 time 76.31038808822632
+pair 0.9877295966495896 0.9877295966495896 time 99.24460649490356
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/direct_dev.py 0.4 0.2 50 40 0.05 20 > /app/directmid50 2>&1 &
+[?2004l[3] 680
+[?2004hroot@59537d8bb9aa:/app# tail -8 /app/refinehi; tail -8 /app/directmid50
+[?2004l[?2004hroot@59537d8bb9aa:/app# tail -30 /app/directhi50; tail -8 /app/refinehi; tail -8 /app/directmid50
+[?2004lscattering time 5.474945306777954
+pair 0.7071067811865476 0.7071067811865476 time 28.378148794174194
+pair 0.7071067811865476 0.7071067811865476 time 53.32101845741272
+pair 0.15617376188860607 0.15617376188860607 time 76.31038808822632
+pair 0.9877295966495896 0.9877295966495896 time 99.24460649490356
+pair 0.15617376188860607 0.9877295966495896 time 127.12998533248901
+4 0.9207900296214366 1.2995888294111337 -0.4583813647847317
+6 0.921761166142443 1.3028086561413532 -0.46449814186631466
+8 0.9220879305890214 1.3040272358689293 -0.46671234352118185
+10 0.9222286273784183 1.3045812451687564 -0.4676938561907211
+12 0.9222981365231896 1.3048643535133762 -0.46818710722521123
+14 0.9223357586662696 1.3050213408462996 -0.4684573156811952
+16 0.9223575154619494 1.305113845471794 -0.4686150384120044
+18 0.9223707523207574 1.3051709952447148 -0.46871173099380303
+20 0.9223791383741929 1.3052076774690036 -0.4687733884301827
+22 0.9223846312301228 1.3052319814154718 -0.4688140053071565
+24 0.9223883315770025 1.3052485243784042 -0.4688415089511678
+26 0.922390885401677 1.305260051004447 -0.46886058131009084
+28 0.9223926856554355 1.305268249398556 -0.4688740860363584
+30 0.9223939787644135 1.3052741885734247 -0.4688838276930028
+32 0.9223949233888521 1.3052785628590717 -0.46889097321000767
+34 0.9223956240638738 1.3052818333859917 -0.4688962944937846
+36 0.9223961510853389 1.3052843125390197 -0.46890031253242903
+38 0.9223965525974313 1.305286215741923 -0.46890338536875115
+40 0.9223968621229681 1.3052876939732994 -0.46890576312023613
+42 0.9223971033583773 1.3052888546206045 -0.46890762313862333
+44 0.9223972932874119 1.305289775112063 -0.4689090929168067
+46 0.9223974442392767 1.3052905119827363 -0.46891026527640195
+48 0.9223975652711472 1.3052911069996858 -0.4689112085991098
+50 0.9223976631106862 1.3052915913604213 -0.4689119738207409
+[1]   Done                    OPENBLAS_NUM_THREADS=1 python3 /app/direct_dev.py 0.8 50 50 40 0.05 16 > /app/directhi50 2>&1
+scattering time 20.792476415634155
+scattering time 10.404817342758179
+[?2004hroot@59537d8bb9aa:/app# tail -30 /app/refinehi; tail -30 /app/directmid50
+[?2004lscattering time 20.792476415634155
+pair 0.7071067811865476 0.7071067811865476 time 55.62608885765076
+scattering time 10.404817342758179
+pair 0.7071067811865476 0.7071067811865476 time 40.57522940635681
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+[?2004l[?2004h> import sys,numpy as np
+[?2004l[?2004h> sys.path.insert(0,'/app')
+[?2004l[?2004h> from scatter_dev import cross_sections
+[?2004l[?2004h> from scipy.special import roots_genlaguerre
+[?2004l[?2004h> from math import pi
+[?2004l[?2004h> for T in [.2,.5,1,2,10,50]:
+[?2004l[?2004h>  y,w=roots_genlaguerre(80,2)
+[?2004l[?2004h>  q=np.array([cross_sections(T*v,0,2,160,128) for v in y])[:,1]
+[?2004l[?2004h>  ratio=np.sum(w*y*q)/np.sum(w*q)/3
+[?2004l[?2004h>  print(T,ratio)
+[?2004l[?2004h> PY
+[?2004l0.2 0.8722589634405895
+0.5 0.826095502608111
+1 0.8360321022122134
+2 0.8851398332676381
+10 0.9442058346157234
+50 0.9481654047396745
+[?2004hroot@59537d8bb9aa:/app# tail -30 /app/refinehi; tail -30 /app/directmid50
+[?2004lscattering time 20.792476415634155
+pair 0.7071067811865476 0.7071067811865476 time 55.62608885765076
+pair 0.7071067811865476 0.7071067811865476 time 90.42390131950378
+scattering time 10.404817342758179
+pair 0.7071067811865476 0.7071067811865476 time 40.57522940635681
+pair 0.7071067811865476 0.7071067811865476 time 69.41896224021912
+pair 0.15617376188860607 0.15617376188860607 time 98.97611808776855
+[?2004hroot@59537d8bb9aa:/app# cat > /app/assemble.py <<'PY'
+[?2004l[?2004h> from pathlib import Path
+[?2004l[?2004h> scatter=Path('/app/scatter_dev.py').read_text()
+[?2004l[?2004h> scatter=scatter[:scatter.index("if __name__=='__main__':")]+scatter[scatter.index('def cross_sections'):]
+[?2004l[?2004h> # Remove the adaptive reference routine, not used in production.
+[?2004l[?2004h> start=scatter.index('def chi_quad');end=scatter.index('def chi_batch')
+[?2004l[?2004h> scatter=scatter[:start]+scatter[end:]
+[?2004l[?2004h> basis=Path('/app/bracket_dev.py').read_text()
+[?2004l[?2004h> basis=basis[basis.index('def indices'):basis.index('def solve')]
+[?2004l[?2004h> basis='\n'.join(line for line in basis.splitlines() if "print('basis'" not in line)+'\n'
+[?2004l[?2004h> gen=Path('/app/generator_dev.py').read_text()
+[?2004l[?2004h> gen=gen[gen.index('def kernel'):gen.index('def quad_inputs')]
+[?2004l[?2004h> node=Path('/app/project_dev.py').read_text()
+[?2004l[?2004h> node=node[node.index('def nodes'):node.index('def moments')]
+[?2004l[?2004h> node=node.replace('ymax=160','ymax=260')
+[?2004l[?2004h> header='''#!/usr/bin/env python3
+[?2004l))@[?2004h> """Classical binary-mixture transport for a common spherical-core potential.
+[?2004l[?2004h> 
+[?2004l [?2004h> Units are sigma = epsilon = k_B = m_1 = n = 1. The collision operator
+[?2004l[?2004h> is assembled from Maxwellian collision brackets in orthonormal Sonine
+[?2004l  [?2004h> bases. Vector and traceless-tensor sectors are solved separately. The
+[?2004l[?2004h> vector sources are diffusion and enthalpy transport; eliminating the
+[?2004l[?2004h> relative particle current gives the zero-diffusion heat conductivity.
+[?2004l[?2004h> 
+[?2004ls[?2004h> The centre-of-mass Gaussian integration is analytic. For the vector
+[?2004l[?2004h> sector it is evaluated by a bivariate Sonine generating function. The
+[?2004l[?2004h> tensor sector uses the equivalent Cartesian Hermite expansion. Physical
+[?2004l[?2004h> scattering cross sections are integrated over turning radius, splitting
+[?2004l[?2004h> at orbiting trajectories, then over Maxwellian collision energy.
+[?2004l[?2004h> """
+[?2004l[?2004h> import os
+[?2004l[?2004h> os.environ['OPENBLAS_NUM_THREADS'] = '1'
+[?2004l[?2004h> os.environ['OMP_NUM_THREADS'] = '1'
+[?2004l[?2004h> import sys, json, warnings
+[?2004l[?2004h> warnings.filterwarnings('ignore', category=RuntimeWarning)
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from scipy.special import roots_legendre, roots_genlaguerre, eval_genlaguerre, gammaln
+[?2004l[?2004h> from scipy.optimize import brentq, minimize_scalar
+[?2004l[?2004h> from scipy.sparse import coo_matrix
+[?2004l[?2004h> from numpy.polynomial.legendre import legvander
+[?2004l[?2004h> from functools import lru_cache
+[?2004l[?2004h> from math import factorial, comb, sqrt, pi, prod
+[?2004l[?2004h> '''
+[?2004l[?2004h> # imports in scattering are harmless; trim duplicate scipy adaptive integration import.
+[?2004l[?2004h> scatter=scatter.replace('from scipy.integrate import quad\n','')
+[?2004l[?2004h> footer='''
+[?2004l[?2004h> def tensor_matrix(U,T,R,X,N):
+[?2004l[?2004h>     sz=N+1
+[?2004l[?2004h>     K=np.zeros((2*sz,2*sz))
+[?2004l[?2004h>     masses=[1.,R]; fractions=[X,1-X]
+[?2004l[?2004h>     degree=2*np.arange(sz)+2
+[?2004l[?2004h>     for i,j in [(0,0),(1,1),(0,1)]:
+[?2004l[?2004h>         mi,mj=masses[i],masses[j]
+[?2004l[?2004h>         mu=mi*mj/(mi+mj)
+[?2004l[?2004h>         ai=sqrt(mi/(mi+mj)); bi=sqrt(mj/(mi+mj))
+[?2004l[?2004h>         rate=(.25 if i==j else .5)*fractions[i]*fractions[j]*sqrt(2*T/mu)
+[?2004l[?2004h>         for k,V in enumerate(U):
+[?2004l[?2004h>             ci=ai**k*bi**(degree-k)
+[?2004l[?2004h>             cj=bi**k*(-ai)**(degree-k)
+[?2004l[?2004h>             if i==j:
+[?2004l[?2004h>                 c=ci+cj
+[?2004l[?2004h>                 K[i*sz:(i+1)*sz,i*sz:(i+1)*sz]+=rate*V*c[:,None]*c[None,:]
+[?2004l[?2004h>             else:
+[?2004l[?2004h>                 for a,ca in [(i,ci),(j,cj)]:
+[?2004l[?2004h>                     for b,cb in [(i,ci),(j,cj)]:
+[?2004l[?2004h>                         K[a*sz:(a+1)*sz,b*sz:(b+1)*sz]+=rate*V*ca[:,None]*cb[None,:]
+[?2004l[?2004h>     return (K+K.T)/2
+[?2004l[?2004h> 
+[?2004l[?2004h> def compute(A,R,X,T):
+[?2004l[?2004h>     N=64; NT=16
+[?2004l[?2004h>     yy,wy=nodes(T,A,24)
+[?2004l[?2004h>     zz,wz=roots_legendre(N+3)
+[?2004l[?2004h>     projection=wz[None,:]/2*(2*np.arange(N+3)[:,None]+1)*legvander(zz,N+2).T
+[?2004l[?2004h>     Q=np.array([cross_sections(T*y,A,N+2,320,256) for y in yy])
+[?2004l[?2004h>     weights=wy*yy*np.exp(-yy)*2/sqrt(pi)
+[?2004l[?2004h>     angular=Q@projection
+[?2004l[?2004h>     pair_matrices=[]
+[?2004l[?2004h>     a=sqrt(1/(1+R)); b=sqrt(R/(1+R)); s=sqrt(.5)
+[?2004l[?2004h>     for aa,bb,cc,dd in [(s,s,s,s),(s,s,s,-s),(a,b,a,b),(b,a,b,a),(a,b,b,-a)]:
+[?2004l[?2004h>         V=np.zeros((N+1,N+1),dtype=np.longdouble)
+[?2004l[?2004h>         for j in range(0,len(yy),12):
+[?2004l[?2004h>             y=yy[j:j+12]
+[?2004l[?2004h>             w=weights[j:j+12,None]*angular[j:j+12]
+[?2004l[?2004h>             V+=vector_bracket(N,np.repeat(y,len(zz)),np.tile(zz,len(y)),w.ravel(),aa,bb,cc,dd)
+[?2004l[?2004h>         pair_matrices.append(np.asarray(V,dtype=float))
+[?2004l[?2004h>     V,C,L,H,B=pair_matrices
+[?2004l[?2004h>     sz=N+1; K=np.zeros((2*sz,2*sz))
+[?2004l[?2004h>     K[:sz,:sz]+=.25*X*X*sqrt(4*T)*(2*V+C+C.T)
+[?2004l[?2004h>     K[sz:,sz:]+=.25*(1-X)**2*sqrt(4*T/R)*(2*V+C+C.T)
+[?2004l[?2004h>     rate=.5*X*(1-X)*sqrt(2*T*(1+R)/R)
+[?2004l[?2004h>     K[:sz,:sz]+=rate*L; K[sz:,sz:]+=rate*H
+[?2004l[?2004h>     K[:sz,sz:]+=rate*B; K[sz:,:sz]+=rate*B.T
+[?2004l[?2004h>     K=(K+K.T)/2
+[?2004l[?2004h>     sd=np.zeros(2*sz); sh=sd.copy(); null=sd.copy()
+[?2004l[?2004h>     for i in range(2):
+[?2004l[?2004h>         mi=[1.,R][i]; xi=[X,1-X][i]
+[?2004l[?2004h>         sd[i*sz]=(1 if i==0 else -1)*sqrt(T/mi)
+[?2004l[?2004h>         sh[i*sz+1]=-xi*sqrt(5*T/(2*mi))
+[?2004l[?2004h>         null[i*sz]=sqrt(mi)
+[?2004l[?2004h>     # Lift only the conserved total-momentum null direction.
+[?2004l[?2004h>     K+=np.outer(null,null)/np.dot(null,null)*np.max(np.diag(K))
+[?2004l[?2004h>     sol=np.linalg.solve(K,np.array([sd,sh]).T)
+[?2004l[?2004h>     dd,dh=sd@sol; hd,hh=sh@sol
+[?2004l[?2004h>     conductivity=hh-dh*hd/dd
+[?2004l[?2004h>     diffusion=X*(1-X)*dd
+[?2004l[?2004h>     alpha=dh/(X*(1-X)*dd)
+[?2004l[?2004h>     if R==1.: alpha=0.
+[?2004l[?2004h>     # The finite tensor kernels are energy polynomials, so this projection
+[?2004l[?2004h>     # followed by Gaussian integration is exactly their moment contraction.
+[?2004l[?2004h>     M=np.array([eval_genlaguerre(j,1,yy)/(j+1) for j in range(2*NT+3)])
+[?2004l[?2004h>     M=(M*(wy*yy*np.exp(-yy)))@Q[:,:2*NT+3]
+[?2004l[?2004h>     basis=Basis(NT,2)
+[?2004l[?2004h>     UT=np.zeros((basis.dmax,NT+1,NT+1))
+[?2004l[?2004h>     y,w=roots_genlaguerre(2*NT+3,1)
+[?2004l[?2004h>     QQ=np.array([eval_genlaguerre(j,1,y) for j in range(2*NT+3)]).T@M
+[?2004l[?2004h>     for yi,wi,qi in zip(y,w,QQ):
+[?2004l[?2004h>         basis.accumulate(UT,yi,wi*2/sqrt(pi),qi)
+[?2004l[?2004h>     KT=tensor_matrix(UT,T,R,X,NT)
+[?2004l[?2004h>     source=np.zeros(2*(NT+1));source[0]=X;source[NT+1]=1-X
+[?2004l[?2004h>     viscosity=T*source@np.linalg.solve(KT,source)
+[?2004l[?2004h>     return dict(viscosity=float(viscosity),thermal_conductivity=float(conductivity),
+[?2004l[?2004h>                 binary_diffusion=float(diffusion),thermal_diffusion_factor=float(alpha))
+[?2004l[?2004h> 
+[?2004l[?2004h> if __name__ == '__main__':
+[?2004l[?2004h>     A,R,X,T=map(float,sys.argv[1:5])
+[?2004l[?2004h>     print(json.dumps(compute(A,R,X,T),allow_nan=False,separators=(',',':')))
+[?2004l[?2004h> '''
+[?2004l[?2004h> Path('/app/output/transport.py').write_text(header+'\n'+scatter+'\n'+basis+'\n'+gen+'\n'+node+'\n'+footer)
+[?2004l[?2004h> PY
+[?2004l[3]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/direct_dev.py 0.4 0.2 50 40 0.05 20 > /app/directmid50 2>&1
+[?2004hroot@59537d8bb9aa:/app# python3 /app/assemble.py
+[?2004l[?2004hroot@59537d8bb9aa:/app# python3 -m py_compile /app/output/transport.py
+[?2004l[?2004hroot@59537d8bb9aa:/app# mkdir -p /app/isolated; cp /app/output/transport.py /app/isolated/
+[?2004l[?2004hroot@59537d8bb9aa:/app# cd /app/isolated; python3 transport.py 0.8 40 0.05 50 > /app/finaltesthi 2>/app/finalerrhi &
+[?2004l[3] 786
+[?2004hroot@59537d8bb9aa:/app/isolated# cd /app
+[?2004l[?2004hroot@59537d8bb9aa:/app# tail -28 /app/refinehi; tail -28 /app/directmid50; wc -c /app/output/transport.py; cat /app/finalerrhi
+[?2004lscattering time 20.792476415634155
+pair 0.7071067811865476 0.7071067811865476 time 55.62608885765076
+pair 0.7071067811865476 0.7071067811865476 time 90.42390131950378
+pair 0.15617376188860607 0.15617376188860607 time 125.84645223617554
+pair 0.9877295966495896 0.9877295966495896 time 160.54380202293396
+pair 0.7071067811865476 0.7071067811865476 time 69.41896224021912
+pair 0.15617376188860607 0.15617376188860607 time 98.97611808776855
+pair 0.9877295966495896 0.9877295966495896 time 127.94697594642639
+pair 0.15617376188860607 0.9877295966495896 time 156.7554430961609
+4 0.024516712003065034 0.03428677387374622 -0.2557027353188286
+6 0.02452158764276219 0.03430072836072091 -0.2567925886821874
+8 0.024523304505879244 0.0343052228744729 -0.2571636793423935
+10 0.02452386383522205 0.03430724745177917 -0.25730584881186985
+12 0.024524127267371968 0.0343082362897929 -0.257374058826476
+14 0.02452429719458969 0.034308726624696695 -0.25741265945199604
+16 0.024524384228623138 0.03430901809328818 -0.2574339346218963
+18 0.02452442417503653 0.034309211854710184 -0.25744569549361895
+20 0.024524450156496683 0.03430933317328386 -0.2574531980772066
+22 0.02452447226662221 0.03430940542503643 -0.25745853904798155
+24 0.024524488514393386 0.0343094524234106 -0.2574622342201843
+26 0.024524497625529308 0.03430948762032232 -0.2574646254779474
+28 0.02452450234395594 0.034309514941464336 -0.25746614290138436
+30 0.0245245055789684 0.03430953469138647 -0.25746721148691465
+32 0.024524508662327485 0.03430954792710006 -0.25746806455162746
+34 0.024524511624462543 0.03430955686966022 -0.2574687525754975
+36 0.024524513919124274 0.034309563544197064 -0.25746927583475177
+38 0.024524515310764074 0.0343095690670262 -0.2574696460225065
+40 0.024524516062630446 0.03430957374173479 -0.25746989642442153
+42 0.024524516541042807 0.03430957748841338 -0.2574700754693858
+44 0.024524516976070977 0.03430958026982251 -0.25747022240295286
+46 0.024524517454290073 0.03430958225054549 -0.25747035236642857
+48 0.024524517941968426 0.034309583700232384 -0.2574704647758198
+50 0.02452451834715714 0.03430958485419324 -0.2574705562098465
+13639 /app/output/transport.py
+[?2004hroot@59537d8bb9aa:/app# tail -26 /app/refinehi; cat /app/finaltesthi /app/finalerrhi
+[?2004lpair 0.9877295966495896 0.9877295966495896 time 160.54380202293396
+pair 0.15617376188860607 0.9877295966495896 time 195.13760447502136
+4 0.9207900296214165 1.2995888294106321 -0.45838136478485786
+6 0.9217611661424245 1.3028086561408605 -0.46449814186645794
+8 0.9220879305890043 1.3040272358684433 -0.4667123435213365
+10 0.9222286273784013 1.3045812451682757 -0.46769385619088444
+12 0.9222981365231745 1.3048643535128999 -0.46818710722538076
+14 0.9223357586662548 1.3050213408458267 -0.46845731568136967
+16 0.9223575154619349 1.305113845471323 -0.46861503841218166
+18 0.9223707523207428 1.3051709952442447 -0.4687117309939829
+20 0.9223791383741786 1.3052076774685348 -0.4687733884303642
+22 0.9223846312301089 1.3052319814150037 -0.46881400530733985
+24 0.9223883315769886 1.3052485243779373 -0.4688415089513518
+26 0.9223908854016633 1.3052600510039798 -0.4688605813102761
+28 0.9223926856554219 1.3052682493980898 -0.46887408603654385
+30 0.9223939787643997 1.3052741885729586 -0.4688838276931881
+32 0.9223949233888384 1.3052785628586052 -0.468890973210193
+34 0.9223956240638594 1.305281833385528 -0.4688962944939701
+36 0.9223961510853252 1.3052843125385531 -0.46890031253261455
+38 0.9223965525974176 1.3052862157414566 -0.4689033853689367
+40 0.9223968621229542 1.3052876939728335 -0.46890576312042126
+42 0.9223971033583634 1.305288854620139 -0.4689076231388083
+44 0.9223972932873981 1.3052897751115966 -0.46890909291699273
+46 0.9223974442392631 1.305290511982271 -0.468910265276588
+48 0.9223975652711335 1.3052911069992197 -0.4689112085992958
+50 0.9223976631106723 1.305291591359955 -0.46891197382092636
+[2]-  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/refinehi 2>&1
+import sys,numpy as np
+sys.path.insert(0,'/app')
+from direct_dev import direct,results
+K=direct(.8,50,50,40,.05,24,360,256)
+np.save('/app/refinehi.npy',K)
+results(K,50,40,.05)
+PY
+
+[?2004hroot@59537d8bb9aa:/app# cd /app/isolated; (date +%s; python3 transport.py 0 1 0.5 0.2; date +%s) > /app/testequal 2>/app/errequal &
+[?2004l[4] 816
+[?2004hroot@59537d8bb9aa:/app/isolated# cd /app
+[?2004l[?2004hroot@59537d8bb9aa:/app# tail -10 /app/refinehi; cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal
+[?2004l32 0.9223949233888384 1.3052785628586052 -0.468890973210193
+34 0.9223956240638594 1.305281833385528 -0.4688962944939701
+36 0.9223961510853252 1.3052843125385531 -0.46890031253261455
+38 0.9223965525974176 1.3052862157414566 -0.4689033853689367
+40 0.9223968621229542 1.3052876939728335 -0.46890576312042126
+42 0.9223971033583634 1.305288854620139 -0.4689076231388083
+44 0.9223972932873981 1.3052897751115966 -0.46890909291699273
+46 0.9223974442392631 1.305290511982271 -0.468910265276588
+48 0.9223975652711335 1.3052911069992197 -0.4689112085992958
+50 0.9223976631106723 1.305291591359955 -0.46891197382092636
+1793499133
+[?2004hroot@59537d8bb9aa:/app# cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s; jobs -l; ls -la /app/output
+[?2004l1793499133
+1793499167
+[3]-   786 Running                 python3 transport.py 0.8 40 0.05 50 > /app/finaltesthi 2> /app/finalerrhi &  (wd: /app/isolated)
+[4]+   816 Running                 ( date +%s; python3 transport.py 0 1 0.5 0.2; date +%s ) > /app/testequal 2> /app/errequal &  (wd: /app/isolated)
+total 32
+drwxr-xr-x 1 root root  4096 Nov  1 02:11 .
+drwxr-xr-x 1 root root  4096 Nov  1 02:12 ..
+drwxr-xr-x 2 root root  4096 Nov  1 02:11 __pycache__
+-rw-r--r-- 1 root root 13639 Nov  1 02:11 transport.py
+[?2004hroot@59537d8bb9aa:/app# rm -rf /app/output/__pycache__; python3 - <<'PY'
+[?2004l[?2004h> from pathlib import Path
+[?2004l[?2004h> for p in [786,816]:
+[?2004l[?2004h>  f=Path(f'/proc/{p}/status')
+[?2004l[?2004h>  if f.exists():
+[?2004l[?2004h>   print(p, '\n'.join(x for x in f.read_text().splitlines() if x.startswith(('Name:','VmRSS:','VmPeak:','Threads:'))))
+[?2004l[?2004h> PY
+[?2004l786 Name:	python3
+VmPeak:	  317428 kB
+VmRSS:	  132104 kB
+Threads:	1
+816 Name:	bash
+VmPeak:	    5272 kB
+VmRSS:	    2044 kB
+Threads:	1
+[?2004hroot@59537d8bb9aa:/app# cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s
+[?2004l1793499133
+1793499197
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/orbitcheck 2>&1 &
+[?2004l[?2004h> import sys,numpy as np
+[?2004l[?2004h> sys.path.insert(0,'/app')
+[?2004l[?2004h> from scatter_dev import cross_sections,geom
+[?2004l[?2004h> for A in [0,.4,.8]:
+[?2004l[?2004h>  ec=geom(10000,A)[-1]
+[?2004l[?2004h>  for delta in [-.001,-.00001,.00001,.001]:
+[?2004l[?2004h>   E=ec*(1+delta)
+[?2004l[?2004h>   q=cross_sections(E,A,10,320,256)
+[?2004l[?2004h>   qr=cross_sections(E,A,10,640,512)
+[?2004l[?2004h>   print(A,delta,'relative errors',np.max(np.abs(q[1:3]/qr[1:3]-1)),np.max(np.abs(q[1:]/qr[1:]-1)),flush=True)
+[?2004l[?2004h> PY
+[?2004l[5] 887
+[?2004hroot@59537d8bb9aa:/app# cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s
+[?2004l1793499133
+1793499251
+[?2004hroot@59537d8bb9aa:/app# cat /app/orbitcheck; cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s
+[?2004l0 -0.001 relative errors 6.210587599753126e-13 5.288945503778564e-09
+0 -1e-05 relative errors 5.201861164039201e-11 4.635202300873331e-07
+0 1e-05 relative errors 2.6597667446282003e-07 6.126074716727992e-06
+0 0.001 relative errors 1.4721557306529576e-13 3.7271457544729714e-06
+0.4 -0.001 relative errors 7.189804307472514e-13 1.619475664682568e-10
+0.4 -1e-05 relative errors 3.7267966490617255e-12 8.643255533513639e-08
+0.4 1e-05 relative errors 2.6077687897974045e-08 3.262857566577182e-06
+0.4 0.001 relative errors 1.680877659282487e-13 4.608039992914925e-07
+0.8 -0.001 relative errors 7.491784970170556e-13 1.5177858969650515e-12
+0.8 -1e-05 relative errors 7.704947790898586e-13 1.042785302551863e-09
+0.8 1e-05 relative errors 6.678884112432115e-10 2.4031238643473785e-07
+0.8 0.001 relative errors 1.8052226380405045e-13 1.9628743075372768e-13
+[5]+  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/orbitcheck 2>&1
+import sys,numpy as np
+sys.path.insert(0,'/app')
+from scatter_dev import cross_sections,geom
+for A in [0,.4,.8]:
+ ec=geom(10000,A)[-1]
+ for delta in [-.001,-.00001,.00001,.001]:
+  E=ec*(1+delta)
+  q=cross_sections(E,A,10,320,256)
+  qr=cross_sections(E,A,10,640,512)
+  print(A,delta,'relative errors',np.max(np.abs(q[1:3]/qr[1:3]-1)),np.max(np.abs(q[1:]/qr[1:]-1)),flush=True)
+PY
+
+1793499133
+1793499285
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/tensorsweep 2>&1 &
+[?2004l[?2004h> import sys,numpy as np
+[?2004l[?2004h> sys.path.insert(0,'/app')
+[?2004l[?2004h> from project_dev import moments,brackets
+[?2004l[?2004h> from bracket_dev import solve
+[?2004l[?2004h> for A,T in [(.8,.2),(.4,.2),(0,1),(.4,1),(.8,1),(0,50)]:
+[?2004l[?2004h>  M=moments(A,T,16,16,240,192);UT=brackets(M,16,2);UV=brackets(M,10,1)
+[?2004l[?2004h>  for R,X in [(40,.05),(40,.5),(40,.95),(1,.5)]:
+[?2004l[?2004h>   values=[]
+[?2004l[?2004h>   for n in [6,8,10,12,14,16]:
+[?2004l[?2004h>    uv=np.zeros((2*n+1,n+1,n+1));nn=min(n,10);uv[:2*nn+1,:nn+1,:nn+1]=UV[:,:nn+1,:nn+1]
+[?2004l[?2004h>    for j in range(11,n+1):uv[0,j,j]=1e100
+[?2004l[?2004h>    values.append(solve(uv,UT[:,:n+1,:n+1],T,R,X,n)[0])
+[?2004l[?2004h>   print(A,T,R,X,values,flush=True)
+[?2004l[?2004h> PY
+[?2004l[5] 909
+[?2004hroot@59537d8bb9aa:/app# cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; tail -5 /app/tensorsweep; date +%s
+[?2004l1793499133
+1793499285
+[?2004hroot@59537d8bb9aa:/app# python3 - <<'PY'
+[?2004l[?2004h> from pathlib import Path
+[?2004l[?2004h> for p in Path('/proc').iterdir():
+[?2004l[?2004h>  if not p.name.isdigit():continue
+[?2004l[?2004h>  try:
+[?2004l[?2004h>   cmd=(p/'cmdline').read_bytes().replace(b'\0',b' ').decode()
+[?2004l[?2004h>   if 'python3 transport.py' in cmd and 'bash' not in cmd:
+[?2004l[?2004h>    s=(p/'stat').read_text().split();print(p.name,cmd,'CPU seconds',(int(s[13])+int(s[14]))/100)
+[?2004l[?2004h>  except (OSError,UnicodeError):pass
+[?2004l[?2004h> PY
+[?2004l786 python3 transport.py 0.8 40 0.05 50  CPU seconds 204.52
+818 python3 transport.py 0 1 0.5 0.2  CPU seconds 180.62
+[5]+  Exit 1                  OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/tensorsweep 2>&1
+import sys,numpy as np
+sys.path.insert(0,'/app')
+from project_dev import moments,brackets
+from bracket_dev import solve
+for A,T in [(.8,.2),(.4,.2),(0,1),(.4,1),(.8,1),(0,50)]:
+ M=moments(A,T,16,16,240,192);UT=brackets(M,16,2);UV=brackets(M,10,1)
+ for R,X in [(40,.05),(40,.5),(40,.95),(1,.5)]:
+  values=[]
+  for n in [6,8,10,12,14,16]:
+   uv=np.zeros((2*n+1,n+1,n+1));nn=min(n,10);uv[:2*nn+1,:nn+1,:nn+1]=UV[:,:nn+1,:nn+1]
+   for j in range(11,n+1):uv[0,j,j]=1e100
+   values.append(solve(uv,UT[:,:n+1,:n+1],T,R,X,n)[0])
+  print(A,T,R,X,values,flush=True)
+PY
+
+[?2004hroot@59537d8bb9aa:/app# cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; tail -10 /app/tensorsweep; date +%s
+[?2004l1793499133
+moments 6.966816186904907
+basis 16 2 shape (203796, 7770) nnz 947682
+brackets 2 4.428384065628052
+basis 10 1 shape (17424, 2024) nnz 41184
+brackets 1 0.1926136016845703
+Traceback (most recent call last):
+  File "<stdin>", line 10, in <module>
+ValueError: could not broadcast input array from shape (21,7,7) into shape (13,7,7)
+1793499319
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/tensorsweep 2>&1 &
+[?2004l[?2004h> import sys,numpy as np
+[?2004l[?2004h> sys.path.insert(0,'/app')
+[?2004l[?2004h> from project_dev import moments,brackets
+[?2004l[?2004h> from bracket_dev import solve
+[?2004l[?2004h> for A,T in [(.8,.2),(.4,.2),(0,1),(.4,1),(.8,1),(0,50)]:
+[?2004l[?2004h>  M=moments(A,T,16,16,240,192);UT=brackets(M,16,2);UV=brackets(M,10,1)
+[?2004l[?2004h>  for R,X in [(40,.05),(40,.5),(40,.95),(1,.5)]:
+[?2004l[?2004h>   values=[]
+[?2004l[?2004h>   for n in [6,8,10,12,14,16]:
+[?2004l[?2004h>    uv=np.zeros((2*n+1,n+1,n+1));nn=min(n,10);uv[:2*nn+1,:nn+1,:nn+1]=UV[:2*nn+1,:nn+1,:nn+1]
+[?2004l[?2004h>    for j in range(11,n+1):uv[0,j,j]=1e100
+[?2004l[?2004h>    values.append(solve(uv,UT[:,:n+1,:n+1],T,R,X,n)[0])
+[?2004l[?2004h>   print(A,T,R,X,values,flush=True)
+[?2004l[?2004h> PY
+[?2004l[5] 958
+[?2004hroot@59537d8bb9aa:/app# cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s
+[?2004l1793499133
+1793499363
+[?2004hroot@59537d8bb9aa:/app# cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; tail -15 /app/tensorsweep; date +%s; jobs -l
+[?2004l1793499133
+[5]+  Exit 1                  OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/tensorsweep 2>&1
+import sys,numpy as np
+sys.path.insert(0,'/app')
+from project_dev import moments,brackets
+from bracket_dev import solve
+for A,T in [(.8,.2),(.4,.2),(0,1),(.4,1),(.8,1),(0,50)]:
+ M=moments(A,T,16,16,240,192);UT=brackets(M,16,2);UV=brackets(M,10,1)
+ for R,X in [(40,.05),(40,.5),(40,.95),(1,.5)]:
+  values=[]
+  for n in [6,8,10,12,14,16]:
+   uv=np.zeros((2*n+1,n+1,n+1));nn=min(n,10);uv[:2*nn+1,:nn+1,:nn+1]=UV[:2*nn+1,:nn+1,:nn+1]
+   for j in range(11,n+1):uv[0,j,j]=1e100
+   values.append(solve(uv,UT[:,:n+1,:n+1],T,R,X,n)[0])
+  print(A,T,R,X,values,flush=True)
+PY
+
+basis 16 2 shape (203796, 7770) nnz 947682
+brackets 2 4.46896505355835
+basis 10 1 shape (17424, 2024) nnz 41184
+brackets 1 0.19286108016967773
+Traceback (most recent call last):
+  File "<stdin>", line 12, in <module>
+  File "/app/bracket_dev.py", line 111, in solve
+    sol=np.linalg.solve(K,np.array([sd,sh]).T)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/numpy/linalg/_linalg.py", line 471, in solve
+    r = gufunc(a, b, signature=signature)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/numpy/linalg/_linalg.py", line 163, in _raise_linalgerror_singular
+    raise LinAlgError("Singular matrix")
+numpy.linalg.LinAlgError: Singular matrix
+1793499392
+[3]-   786 Running                 python3 transport.py 0.8 40 0.05 50 > /app/finaltesthi 2> /app/finalerrhi &  (wd: /app/isolated)
+[4]+   816 Running                 ( date +%s; python3 transport.py 0 1 0.5 0.2; date +%s ) > /app/testequal 2> /app/errequal &  (wd: /app/isolated)
+[?2004hroot@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/tensorsweep 2>&1 &
+[?2004l[?2004h> import sys,numpy as np
+[?2004l[?2004h> sys.path.insert(0,'/app');sys.path.insert(0,'/app/output')
+[?2004l[?2004h> from project_dev import moments,brackets
+[?2004l[?2004h> from transport import tensor_matrix
+[?2004l[?2004h> for A,T in [(.8,.2),(.4,.2),(0,1),(.4,1),(.8,1),(0,50)]:
+[?2004l[?2004h>  M=moments(A,T,16,16,240,192);UT=brackets(M,16,2)
+[?2004l[?2004h>  for R,X in [(40,.05),(40,.5),(40,.95),(1,.5)]:
+[?2004l[?2004h>   values=[]
+[?2004l[?2004h>   for n in [6,8,10,12,14,16]:
+[?2004l[?2004h>    K=tensor_matrix(UT[:,:n+1,:n+1],T,R,X,n);s=np.zeros(2*(n+1));s[0]=X;s[n+1]=1-X
+[?2004l[?2004h>    values.append(T*s@np.linalg.solve(K,s))
+[?2004l[?2004h>   print(A,T,R,X,values,flush=True)
+[?2004l[?2004h> PY
+[?2004l[5] 999
+[?2004hroot@59537d8bb9aa:/app# cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s
+[?2004l1793499133
+1793499422
+[?2004hroot@59537d8bb9aa:/app# cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; tail -15 /app/tensorsweep; date +%s
+[?2004l1793499133
+moments 3.824489116668701
+basis 16 2 shape (203796, 7770) nnz 947682
+brackets 2 4.404266595840454
+0.4 0.2 40 0.05 [np.float64(0.223898511323709), np.float64(0.22389852825561443), np.float64(0.2238985338916293), np.float64(0.22389853430282494), np.float64(0.22389853450755412), np.float64(0.22389853485240227)]
+0.4 0.2 40 0.5 [np.float64(0.18662573140442498), np.float64(0.18662574233101342), np.float64(0.18662574527215534), np.float64(0.18662574623608102), np.float64(0.18662574663496123), np.float64(0.1866257466395955)]
+0.4 0.2 40 0.95 [np.float64(0.06492431760631884), np.float64(0.06492431765896109), np.float64(0.06492431771824003), np.float64(0.0649243179949783), np.float64(0.06492431810670768), np.float64(0.06492431813593871)]
+0.4 0.2 1 0.5 [np.float64(0.03577508918557627), np.float64(0.03577508966977845), np.float64(0.03577508970451554), np.float64(0.035775089707406435), np.float64(0.035775089707706584), np.float64(0.03577508970774623)]
+moments 3.903917074203491
+basis 16 2 shape (203796, 7770) nnz 947682
+brackets 2 4.429228067398071
+0 1 40 0.05 [np.float64(0.6928669489100663), np.float64(0.6928672822643601), np.float64(0.6928672948512237), np.float64(0.6928673848531858), np.float64(0.6928674869949106), np.float64(0.6928675384363905)]
+0 1 40 0.5 [np.float64(0.5800006820034623), np.float64(0.5800011692937953), np.float64(0.5800013261265808), np.float64(0.580001826132106), np.float64(0.5800022416259865), np.float64(0.5800024086885355)]
+0 1 40 0.95 [np.float64(0.20243423103573668), np.float64(0.20243423510575595), np.float64(0.20243426187784294), np.float64(0.20243429139763455), np.float64(0.2024343064734686), np.float64(0.2024343099305358)]
+0 1 1 0.5 [np.float64(0.1106707118932322), np.float64(0.11067071251098173), np.float64(0.1106707125311581), np.float64(0.11067071253556907), np.float64(0.11067071253628694), np.float64(0.11067071253635224)]
+moments 3.8875269889831543
+1793499457
+[?2004hroot@59537d8bb9aa:/app# cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; tail -14 /app/tensorsweep; date +%s; python3 - <<'PY'
+[?2004l[?2004h> from pathlib import Path
+[?2004l[?2004h> for pid in [786,818]:
+[?2004l[?2004h>  try:
+[?2004l[?2004h>   s=Path(f'/proc/{pid}/stat').read_text().split();print(pid,'cpu',(int(s[13])+int(s[14]))/100)
+[?2004l[?2004h>  except OSError: pass
+[?2004l[?2004h> PY
+[?2004l1793499133
+[5]+  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/tensorsweep 2>&1
+import sys,numpy as np
+sys.path.insert(0,'/app');sys.path.insert(0,'/app/output')
+from project_dev import moments,brackets
+from transport import tensor_matrix
+for A,T in [(.8,.2),(.4,.2),(0,1),(.4,1),(.8,1),(0,50)]:
+ M=moments(A,T,16,16,240,192);UT=brackets(M,16,2)
+ for R,X in [(40,.05),(40,.5),(40,.95),(1,.5)]:
+  values=[]
+  for n in [6,8,10,12,14,16]:
+   K=tensor_matrix(UT[:,:n+1,:n+1],T,R,X,n);s=np.zeros(2*(n+1));s[0]=X;s[n+1]=1-X
+   values.append(T*s@np.linalg.solve(K,s))
+  print(A,T,R,X,values,flush=True)
+PY
+
+moments 3.878833055496216
+basis 16 2 shape (203796, 7770) nnz 947682
+brackets 2 4.483625650405884
+0.8 1 40 0.05 [np.float64(0.9563816221300914), np.float64(0.9563821603808556), np.float64(0.9563823027716141), np.float64(0.9563823518397436), np.float64(0.9563823754681395), np.float64(0.9563823876140842)]
+0.8 1 40 0.5 [np.float64(0.7914440093988323), np.float64(0.7914444624292944), np.float64(0.7914445304982526), np.float64(0.7914445407671136), np.float64(0.7914445438185392), np.float64(0.7914445444610768)]
+0.8 1 40 0.95 [np.float64(0.2739136806912224), np.float64(0.2739136977480179), np.float64(0.27391369806819404), np.float64(0.2739136981774534), np.float64(0.27391369834698004), np.float64(0.27391369856702663)]
+0.8 1 1 0.5 [np.float64(0.1529017373514363), np.float64(0.15290175855638438), np.float64(0.1529017604416899), np.float64(0.1529017606557117), np.float64(0.15290176068541314), np.float64(0.15290176069024647)]
+moments 3.9129319190979004
+basis 16 2 shape (203796, 7770) nnz 947682
+brackets 2 4.553147554397583
+0 50 40 0.05 [np.float64(12.106051385935768), np.float64(12.106055633572602), np.float64(12.106056786732708), np.float64(12.1060571866083), np.float64(12.10605734388578), np.float64(12.106057410951003)]
+0 50 40 0.5 [np.float64(10.140480534307025), np.float64(10.14048410445866), np.float64(10.1404846945443), np.float64(10.140484793652366), np.float64(10.140484807234692), np.float64(10.140484808051344)]
+0 50 40 0.95 [np.float64(3.5499613714831706), np.float64(3.549961467035651), np.float64(3.5499614680373517), np.float64(3.549961470154876), np.float64(3.549961472929162), np.float64(3.5499614750539106)]
+0 50 1 0.5 [np.float64(1.9336283065180944), np.float64(1.9336284507787833), np.float64(1.9336284626309854), np.float64(1.933628463905459), np.float64(1.9336284640724193), np.float64(1.9336284640978865)]
+1793499494
+786 cpu 358.18
+818 cpu 334.28
+[?2004hroot@59537d8bb9aa:/app# cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s; jobs -l
+[?2004l{"viscosity":8.522916476159427,"thermal_conductivity":0.92239800267648,"binary_diffusion":1.305293309190165,"thermal_diffusion_factor":-0.4689146585432783}
+1793499133
+[3]-  Done                    python3 transport.py 0.8 40 0.05 50 > /app/finaltesthi 2> /app/finalerrhi  (wd: /app/isolated)
+(wd now: /app)
+1793499528
+[4]+   816 Running                 ( date +%s; python3 transport.py 0 1 0.5 0.2; date +%s ) > /app/testequal 2> /app/errequal &  (wd: /app/isolated)
+[?2004hroot@59537d8bb9aa:/app# cat /app/testequal /app/errequal; date +%s; rm -rf /app/output/__pycache__
+[?2004l1793499133
+{"viscosity":0.024183012345626587,"thermal_conductivity":0.09078670301388517,"binary_diffusion":0.030247948253147368,"thermal_diffusion_factor":0.0}
+1793499539
+[4]+  Done                    ( date +%s; python3 transport.py 0 1 0.5 0.2; date +%s ) > /app/testequal 2> /app/errequal  (wd: /app/isolated)
+(wd now: /app)
+1793499569
+[?2004hroot@59537d8bb9aa:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py'
+[?2004l[?2004h> s=open(p).read()
+[?2004l[?2004h> s=s.replace('for aa,bb,cc,dd in [(s,s,s,s),(s,s,s,-s),(a,b,a,b),(b,a,b,a),(a,b,b,-a)]:', 'pairs=[(s,s,s,s),(s,s,s,-s)]\n    if R!=1.: pairs += [(a,b,a,b),(b,a,b,a),(a,b,b,-a)]\n    for aa,bb,cc,dd in pairs:')
+[?2004l[?2004h> s=s.replace('V,C,L,H,B=pair_matrices', 'if R==1.:\n        pair_matrices += [pair_matrices[0],pair_matrices[0],pair_matrices[1]]\n    V,C,L,H,B=pair_matrices')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@59537d8bb9aa:/app# cp /app/output/transport.py /app/isolated/transport.py
+[?2004l[?2004hroot@59537d8bb9aa:/app# cd /app/isolated; (date +%s; python3 transport.py 0 40 0.5 1; date +%s) > /app/testlj1 2>/app/errlj1 &
+[?2004l[1] 1105
+[?2004hroot@59537d8bb9aa:/app/isolated# (date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s) > /app/testnear1 2>/app/errnear1 &
+[?2004l[2] 1106
+[?2004hroot@59537d8bb9aa:/app/isolated# cd /app
+[?2004l[?2004hroot@59537d8bb9aa:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read()
+[?2004l[?2004h> s=s.replace('N=64; NT=16', '# Mass contrast controls the slow velocity-space convergence.\n    N=32 if R<=3. else (48 if R<=15. or X>=.25 else 64)\n    NT=16')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@59537d8bb9aa:/app# cp /app/output/transport.py /app/isolated/transport.py
+[?2004l[?2004hroot@59537d8bb9aa:/app# cd /app/isolated; (date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s) > /app/testnear1fast 2>/app/errnear1fast &
+[?2004l[3] 1130
+[?2004hroot@59537d8bb9aa:/app/isolated# cd /app; cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1
+[?2004l1793499611
+1793499611
+[?2004hroot@59537d8bb9aa:/app# cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testnear1fast /app/errnear1fast; date +%s
+[?2004l1793499611
+1793499611
+1793499630
+1793499630
+[?2004hroot@59537d8bb9aa:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read()
+[?2004l[?2004h> s=s.replace('from math import factorial, comb, sqrt, pi, prod','from math import factorial, comb, sqrt, pi, prod\nfrom concurrent.futures import ProcessPoolExecutor')
+[?2004l[?2004h> s=s.replace('ymax=260','ymax=360')
+[?2004l[?2004h> start=s.index('    for aa,bb,cc,dd in pairs:')
+[?2004l[?2004h> end=s.index('    if R==1.:\n        pair_matrices',start)
+[?2004l[?2004h> s=s[:start]+'''    with ProcessPoolExecutor(max_workers=2) as pool:
+[?2004l[?2004h>         futures=[pool.submit(integrated_pair,N,yy,zz,weights,angular,pair) for pair in pairs]
+[?2004l[?2004h>         pair_matrices=[future.result() for future in futures]
+[?2004l[?2004h> '''+s[end:]
+[?2004l[?2004h> where=s.index('def compute(')
+[?2004l[?2004h> s=s[:where]+'''def integrated_pair(N,yy,zz,weights,angular,pair):
+[?2004l[?2004h>     aa,bb,cc,dd=pair
+[?2004l[?2004h>     V=np.zeros((N+1,N+1),dtype=np.longdouble)
+[?2004l[?2004h>     for j in range(0,len(yy),12):
+[?2004l[?2004h>         y=yy[j:j+12]
+[?2004l[?2004h>         w=weights[j:j+12,None]*angular[j:j+12]
+[?2004l[?2004h>         V+=vector_bracket(N,np.repeat(y,len(zz)),np.tile(zz,len(y)),w.ravel(),aa,bb,cc,dd)
+[?2004l[?2004h>     return np.asarray(V,dtype=float)
+[?2004l[?2004h> 
+[?2004l[?2004h> '''+s[where:]
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@59537d8bb9aa:/app# cp /app/output/transport.py /app/isolated/transport.py
+[?2004l[?2004hroot@59537d8bb9aa:/app# cd /app/isolated; (date +%s; python3 transport.py 0 40 0.05 0.2; date +%s) > /app/testlowparallel 2>/app/errlowparallel &
+[?2004l[4] 1162
+[?2004hroot@59537d8bb9aa:/app/isolated# cd /app; cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testnear1fast /app/errnear1fast
+[?2004l1793499611
+1793499611
+1793499630
+[?2004hroot@59537d8bb9aa:/app# cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testnear1fast /app/errnear1fast /app/testlowparallel /app/errlowparallel; date +%s
+[?2004l1793499611
+1793499611
+1793499630
+1793499690
+1793499690
+[?2004hroot@59537d8bb9aa:/app# cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testnear1fast /app/errnear1fast /app/testlowparallel /app/errlowparallel; date +%s; jobs -l; grep -nE 'print|save|open|N=|ymax=' /app/output/transport.py
+[?2004l1793499611
+1793499611
+1793499630
+1793499690
+1793499728
+[1]   1105 Running                 ( date +%s; python3 transport.py 0 40 0.5 1; date +%s ) > /app/testlj1 2> /app/errlj1 &  (wd: /app/isolated)
+[2]   1106 Running                 ( date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s ) > /app/testnear1 2> /app/errnear1 &  (wd: /app/isolated)
+[3]-  1130 Running                 ( date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s ) > /app/testnear1fast 2> /app/errnear1fast &  (wd: /app/isolated)
+[4]+  1162 Running                 ( date +%s; python3 transport.py 0 40 0.05 0.2; date +%s ) > /app/testlowparallel 2> /app/errlowparallel &  (wd: /app/isolated)
+126:  self.N=N;self.l=l;self.dmax=2*N+l
+266:def nodes(T,a,n=12,ymax=360):
+311:    N=32 if R<=3. else (48 if R<=15. or X>=.25 else 64)
+368:    print(json.dumps(compute(A,R,X,T),allow_nan=False,separators=(',',':')))
+[?2004hroot@59537d8bb9aa:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read();s=s.replace('N=32 if R<=3. else (48 if R<=15. or X>=.25 else 64)','N=32 if R<=3. else 64');open(p,'w').write(s)
+[?2004l[?2004h> from pathlib import Path
+[?2004l[?2004h> for p in Path('/proc').iterdir():
+[?2004l[?2004h>  if not p.name.isdigit():continue
+[?2004l[?2004h>  try:
+[?2004l[?2004h>   cmd=(p/'cmdline').read_bytes().replace(b'\0',b' ').decode()
+[?2004l[?2004h>   if cmd.startswith('python3 transport.py'):
+[?2004l[?2004h>    st=(p/'stat').read_text().split();status=(p/'status').read_text().splitlines()
+[?2004l[?2004h>    print(p.name,cmd,'CPU',(int(st[13])+int(st[14]))/100,next(x for x in status if x.startswith('VmRSS')))
+[?2004l[?2004h>  except OSError: pass
+[?2004l[?2004h> PY
+[?2004l1109 python3 transport.py 0 40 0.5 1  CPU 98.5 VmRSS:	  131864 kB
+1110 python3 transport.py 0.35 1.001 0.37 1.7  CPU 98.38 VmRSS:	  132232 kB
+1165 python3 transport.py 0 40 0.05 0.2  CPU 17.33 VmRSS:	   81976 kB
+1186 python3 transport.py 0 40 0.05 0.2  CPU 22.11 VmRSS:	  107076 kB
+1187 python3 transport.py 0 40 0.05 0.2  CPU 22.08 VmRSS:	  107076 kB
+[3]-  Done                    ( date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s ) > /app/testnear1fast 2> /app/errnear1fast  (wd: /app/isolated)
+(wd now: /app)
+[?2004hroot@59537d8bb9aa:/app# cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testnear1fast /app/errnear1fast /app/testlowparallel /app/errlowparallel; date +%s
+[?2004l1793499611
+1793499611
+1793499630
+{"viscosity":0.19016464905125574,"thermal_conductivity":0.7136409114310975,"binary_diffusion":0.24577801544152356,"thermal_diffusion_factor":-0.0001956536938119825}
+1793499762
+1793499690
+1793499777
+[?2004hroot@59537d8bb9aa:/app# cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testnear1fast /app/errnear1fast /app/testlowparallel /app/errlowparallel; date +%s; jobs -l
+[?2004l1793499611
+1793499611
+1793499630
+{"viscosity":0.19016464905125574,"thermal_conductivity":0.7136409114310975,"binary_diffusion":0.24577801544152356,"thermal_diffusion_factor":-0.0001956536938119825}
+1793499762
+1793499690
+1793499827
+[1]   1105 Running                 ( date +%s; python3 transport.py 0 40 0.5 1; date +%s ) > /app/testlj1 2> /app/errlj1 &  (wd: /app/isolated)
+[2]-  1106 Running                 ( date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s ) > /app/testnear1 2> /app/errnear1 &  (wd: /app/isolated)
+[4]+  1162 Running                 ( date +%s; python3 transport.py 0 40 0.05 0.2; date +%s ) > /app/testlowparallel 2> /app/errlowparallel &  (wd: /app/isolated)
+[?2004hroot@59537d8bb9aa:/app# python3 - <<'PY'
+[?2004l[?2004h> import ast,json
+[?2004l[?2004h> from pathlib import Path
+[?2004l[?2004h> p=Path('/app/output/transport.py');ast.parse(p.read_text())
+[?2004l[?2004h> for f in ['/app/finaltesthi','/app/testequal','/app/testnear1fast']:
+[?2004l[?2004h>  for line in Path(f).read_text().splitlines():
+[?2004l[?2004h>   if line.startswith('{'):
+[?2004l[?2004h>    obj=json.loads(line);assert set(obj)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+[?2004l[?2004h>    assert all(isinstance(x,(int,float)) for x in obj.values())
+[?2004l[?2004h>    print(f,obj)
+[?2004l[?2004h> print('program bytes',p.stat().st_size,'regular file',p.is_file(),'symlink',p.is_symlink())
+[?2004l[?2004h> PY
+[?2004l/app/finaltesthi {'viscosity': 8.522916476159427, 'thermal_conductivity': 0.92239800267648, 'binary_diffusion': 1.305293309190165, 'thermal_diffusion_factor': -0.4689146585432783}
+/app/testequal {'viscosity': 0.024183012345626587, 'thermal_conductivity': 0.09078670301388517, 'binary_diffusion': 0.030247948253147368, 'thermal_diffusion_factor': 0.0}
+/app/testnear1fast {'viscosity': 0.19016464905125574, 'thermal_conductivity': 0.7136409114310975, 'binary_diffusion': 0.24577801544152356, 'thermal_diffusion_factor': -0.0001956536938119825}
+program bytes 14122 regular file True symlink False
+[?2004hroot@59537d8bb9aa:/app# cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testlowparallel /app/errlowparallel; date +%s
+[?2004l1793499611
+1793499611
+1793499690
+1793499876
+[?2004hroot@59537d8bb9aa:/app# cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testlowparallel /app/errlowparallel; date +%s; jobs -l
+[?2004l1793499611
+1793499611
+1793499690
+1793499953
+[1]   1105 Running                 ( date +%s; python3 transport.py 0 40 0.5 1; date +%s ) > /app/testlj1 2> /app/errlj1 &  (wd: /app/isolated)
+[2]-  1106 Running                 ( date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s ) > /app/testnear1 2> /app/errnear1 &  (wd: /app/isolated)
+[4]+  1162 Running                 ( date +%s; python3 transport.py 0 40 0.05 0.2; date +%s ) > /app/testlowparallel 2> /app/errlowparallel &  (wd: /app/isolated)
+[?2004hroot@59537d8bb9aa:/app# python3 - <<'PY'
+[?2004l[?2004h> from pathlib import Path
+[?2004l[?2004h> for p in Path('/proc').iterdir():
+[?2004l[?2004h>  if not p.name.isdigit():continue
+[?2004l[?2004h>  try:
+[?2004l[?2004h>   cmd=(p/'cmdline').read_bytes().replace(b'\0',b' ').decode()
+[?2004l[?2004h>   if cmd.startswith('python3 transport.py'):
+[?2004l[?2004h>    s=(p/'stat').read_text().split();print(p.name,cmd,'CPU seconds',(int(s[13])+int(s[14]))/100)
+[?2004l[?2004h>  except OSError:pass
+[?2004l[?2004h> PY
+[?2004l1109 python3 transport.py 0 40 0.5 1  CPU seconds 225.45
+1110 python3 transport.py 0.35 1.001 0.37 1.7  CPU seconds 225.3
+1165 python3 transport.py 0 40 0.05 0.2  CPU seconds 17.34
+1186 python3 transport.py 0 40 0.05 0.2  CPU seconds 149.0
+1187 python3 transport.py 0 40 0.05 0.2  CPU seconds 148.44
+[?2004hroot@59537d8bb9aa:/app# cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testlowparallel /app/errlowparallel; date +%s
+[?2004l1793499611
+1793499611
+1793499690
+1793500031
+[?2004hroot@59537d8bb9aa:/app# cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testlowparallel /app/errlowparallel; date +%s; jobs -l
+[?2004l1793499611
+1793499611
+1793499690
+1793500114
+[1]   1105 Running                 ( date +%s; python3 transport.py 0 40 0.5 1; date +%s ) > /app/testlj1 2> /app/errlj1 &  (wd: /app/isolated)
+[2]-  1106 Running                 ( date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s ) > /app/testnear1 2> /app/errnear1 &  (wd: /app/isolated)
+[4]+  1162 Running                 ( date +%s; python3 transport.py 0 40 0.05 0.2; date +%s ) > /app/testlowparallel 2> /app/errlowparallel &  (wd: /app/isolated)
+[?2004hroot@59537d8bb9aa:/app# cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testlowparallel /app/errlowparallel; date +%s; jobs -l
+[?2004l1793499611
+1793499611
+1793499690
+1793500194
+[1]   1105 Running                 ( date +%s; python3 transport.py 0 40 0.5 1; date +%s ) > /app/testlj1 2> /app/errlj1 &  (wd: /app/isolated)
+[2]-  1106 Running                 ( date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s ) > /app/testnear1 2> /app/errnear1 &  (wd: /app/isolated)
+[4]+  1162 Running                 ( date +%s; python3 transport.py 0 40 0.05 0.2; date +%s ) > /app/testlowparallel 2> /app/errlowparallel &  (wd: /app/isolated)
+[?2004hroot@59537d8bb9aa:/app# python3 - <<'PY'
+[?2004l[?2004h> from pathlib import Path
+[?2004l[?2004h> for p in Path('/proc').iterdir():
+[?2004l[?2004h>  if not p.name.isdigit():continue
+[?2004l[?2004h>  try:
+[?2004l[?2004h>   cmd=(p/'cmdline').read_bytes().replace(b'\0',b' ').decode()
+[?2004l[?2004h>   if cmd.startswith('python3 transport.py'):
+[?2004l[?2004h>    s=(p/'stat').read_text().split();print(p.name,cmd,'state',s[2],'CPU seconds',(int(s[13])+int(s[14]))/100)
+[?2004l[?2004h>  except OSError:pass
+[?2004l[?2004h> PY
+[?2004l[1]   Done                    ( date +%s; python3 transport.py 0 40 0.5 1; date +%s ) > /app/testlj1 2> /app/errlj1  (wd: /app/isolated)
+(wd now: /app)
+[2]-  Done                    ( date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s ) > /app/testnear1 2> /app/errnear1  (wd: /app/isolated)
+(wd now: /app)
+[4]+  Done                    ( date +%s; python3 transport.py 0 40 0.05 0.2; date +%s ) > /app/testlowparallel 2> /app/errlowparallel  (wd: /app/isolated)
+(wd now: /app)
+[?2004hroot@59537d8bb9aa:/app# cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testlowparallel /app/errlowparallel; date +%s
+[?2004l1793499611
+{"viscosity":0.5800024086031127,"thermal_conductivity":0.19594850202397693,"binary_diffusion":0.10531612228406,"thermal_diffusion_factor":-0.009500485554602946}
+1793500248
+1793499611
+{"viscosity":0.19016464905125574,"thermal_conductivity":0.7136409114258864,"binary_diffusion":0.2457780154399929,"thermal_diffusion_factor":-0.0001956536931403885}
+1793500250
+1793499690
+{"viscosity":0.1512743122272747,"thermal_conductivity":0.01665787896255707,"binary_diffusion":0.021821247385063233,"thermal_diffusion_factor":-0.12461366059186363}
+1793500201
+1793500275
+[?2004hroot@59537d8bb9aa:/app# cp /app/output/transport.py /app/isolated/transport.py; rm -rf /app/isolated/__pycache__; mkdir -p /app/testhome /app/testtmp
+[?2004l[?2004hroot@59537d8bb9aa:/app# python3 - <<'PY' > /app/minenvlog 2>&1 &
+[?2004l[?2004h> import subprocess,time,json
+[?2004l[?2004h> start=time.monotonic()
+[?2004l[?2004h> p=subprocess.run(['python3','transport.py','0.8','40','0.05','50'],cwd='/app/isolated',env={'HOME':'/app/testhome','TMPDIR':'/app/testtmp','PATH':'/usr/local/bin:/usr/bin:/bin','LANG':'C.UTF-8'},stdin=subprocess.DEVNULL,capture_output=True,timeout=600)
+[?2004l[?2004h> print('elapsed',time.monotonic()-start,'exit status',p.returncode,flush=True)
+[?2004l[?2004h> print(p.stdout.decode(),end='',flush=True)
+[?2004l[?2004h> print('stderr',p.stderr.decode(),flush=True)
+[?2004l[?2004h> obj=json.loads(p.stdout);assert p.returncode==0 and len(obj)==4
+[?2004l[?2004h> assert set(obj)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+[?2004l[?2004h> assert all(isinstance(v,(int,float)) for v in obj.values())
+[?2004l[?2004h> PY
+[?2004l[1] 1387
+[?2004hroot@59537d8bb9aa:/app# rm -rf /app/output/__pycache__; ls -la /app/output
+[?2004ltotal 28
+drwxr-xr-x 1 root root  4096 Nov  1 02:19 .
+drwxr-xr-x 1 root root  4096 Nov  1 02:32 ..
+-rw-r--r-- 1 root root 14122 Nov  1 02:22 transport.py
+[?2004hroot@59537d8bb9aa:/app# cat /app/minenvlog
+[?2004l[?2004hroot@59537d8bb9aa:/app# cat /app/minenvlog; date +%s
+[?2004l1793500408
+[?2004hroot@59537d8bb9aa:/app# cat /app/minenvlog; jobs -l
+[?2004l[1]+  1387 Running                 python3 - <<'PY' > /app/minenvlog 2>&1
+import subprocess,time,json
+start=time.monotonic()
+p=subprocess.run(['python3','transport.py','0.8','40','0.05','50'],cwd='/app/isolated',env={'HOME':'/app/testhome','TMPDIR':'/app/testtmp','PATH':'/usr/local/bin:/usr/bin:/bin','LANG':'C.UTF-8'},stdin=subprocess.DEVNULL,capture_output=True,timeout=600)
+print('elapsed',time.monotonic()-start,'exit status',p.returncode,flush=True)
+print(p.stdout.decode(),end='',flush=True)
+print('stderr',p.stderr.decode(),flush=True)
+obj=json.loads(p.stdout);assert p.returncode==0 and len(obj)==4
+assert set(obj)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+assert all(isinstance(v,(int,float)) for v in obj.values())
+PY
+ &
+[?2004hroot@59537d8bb9aa:/app# python3 - <<'PY'
+[?2004l[?2004h> from pathlib import Path
+[?2004l[?2004h> for p in Path('/proc').iterdir():
+[?2004l[?2004h>  if not p.name.isdigit():continue
+[?2004l[?2004h>  try:
+[?2004l[?2004h>   cmd=(p/'cmdline').read_bytes().replace(b'\0',b' ').decode()
+[?2004l[?2004h>   if cmd.startswith('python3 transport.py'):
+[?2004l[?2004h>    s=(p/'stat').read_text().split();st=(p/'status').read_text().splitlines()
+[?2004l[?2004h>    print(p.name,cmd,'cpu',(int(s[13])+int(s[14]))/100,next(x for x in st if x.startswith('VmRSS')))
+[?2004l[?2004h>  except OSError:pass
+[?2004l[?2004h> PY
+[?2004l1390 python3 transport.py 0.8 40 0.05 50  cpu 17.85 VmRSS:	   81976 kB
+1398 python3 transport.py 0.8 40 0.05 50  cpu 176.73 VmRSS:	   74140 kB
+1399 python3 transport.py 0.8 40 0.05 50  cpu 169.24 VmRSS:	   53828 kB
+[?2004hroot@59537d8bb9aa:/app# cat /app/minenvlog
+[?2004l[?2004hroot@59537d8bb9aa:/app# cat /app/minenvlog; ls -l /app/output/transport.py
+[?2004l-rw-r--r-- 1 root root 14122 Nov  1 02:22 /app/output/transport.py
+[?2004hroot@59537d8bb9aa:/app# cat /app/minenvlog; jobs -l; date +%s
+[?2004lelapsed 274.6373266230803 exit status 0
+{"viscosity":8.522916476159427,"thermal_conductivity":0.9223980026209725,"binary_diffusion":1.3052933089021594,"thermal_diffusion_factor":-0.46891465809883076}
+stderr 
+[1]+  Done                    python3 - <<'PY' > /app/minenvlog 2>&1
+import subprocess,time,json
+start=time.monotonic()
+p=subprocess.run(['python3','transport.py','0.8','40','0.05','50'],cwd='/app/isolated',env={'HOME':'/app/testhome','TMPDIR':'/app/testtmp','PATH':'/usr/local/bin:/usr/bin:/bin','LANG':'C.UTF-8'},stdin=subprocess.DEVNULL,capture_output=True,timeout=600)
+print('elapsed',time.monotonic()-start,'exit status',p.returncode,flush=True)
+print(p.stdout.decode(),end='',flush=True)
+print('stderr',p.stderr.decode(),flush=True)
+obj=json.loads(p.stdout);assert p.returncode==0 and len(obj)==4
+assert set(obj)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+assert all(isinstance(v,(int,float)) for v in obj.values())
+PY
+
+1793500689
+[?2004hroot@59537d8bb9aa:/app# rm -rf /app/output/__pycache__; ls -la /app/output; test -f /app/output/transport.py && test ! -L /app/output/transport.py
+[?2004ltotal 28
+drwxr-xr-x 1 root root  4096 Nov  1 02:19 .
+drwxr-xr-x 1 root root  4096 Nov  1 02:32 ..
+-rw-r--r-- 1 root root 14122 Nov  1 02:22 transport.py
+[?2004hroot@59537d8bb9aa:/app# 

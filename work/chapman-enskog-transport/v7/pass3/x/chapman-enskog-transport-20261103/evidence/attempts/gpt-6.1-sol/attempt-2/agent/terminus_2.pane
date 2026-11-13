@@ -1,0 +1,2546 @@
+[?2004hroot@6d9ebe23d9ab:/app# asciinema rec --stdin /logs/agent/recording.cast
+[?2004l[0;32masciinema: recording asciicast to /logs/agent/recording.cast[0m
+[0;32masciinema: press <ctrl-d> or type "exit" when you're done[0m
+[?2004hroot@6d9ebe23d9ab:/app# clear
+[?2004l[H[J[3J[?2004hroot@6d9ebe23d9ab:/app# mkdir -p /app/output; ls -la /app; python3 - <<'PY'
+[?2004l[?2004h> import numpy, scipy, sys
+[?2004l[?2004h> print(sys.version)
+[?2004l[?2004h> print(numpy.__version__, scipy.__version__)
+[?2004l[?2004h> PY
+[?2004ltotal 12
+drwxr-xr-x 1 root root 4096 Nov  3 00:51 .
+drwxr-xr-x 1 root root 4096 Nov  3 00:51 ..
+drwxr-xr-x 2 root root 4096 Nov  3 00:51 output
+3.12.14 (main, Sep  1 2026, 00:10:15) [GCC 12.2.0]
+2.3.3 1.18.1
+[?2004hroot@6d9ebe23d9ab:/app# cat > /app/build_weights.py <<'PY'
+[?2004l[?2004h> import numpy as np, math, functools, scipy.sparse as sp, time
+[?2004l[?2004h> from math import factorial as fac, comb
+[?2004l[?2004h> @functools.lru_cache(None)
+[?2004l[?2004h> def indices(d):
+[?2004l[?2004h>  return [(i,j,d-i-j) for i in range(d+1) for j in range(d-i+1)]
+[?2004l[?2004h> @functools.lru_cache(None)
+[?2004l[?2004h> def multinom(n):
+[?2004l[?2004h>  return [(a,fac(n)//(fac(a[0])*fac(a[1])*fac(a[2]))) for a in indices(n)]
+[?2004l[?2004h> def polymul_r2(poly,n):
+[?2004l[?2004h>  out={}
+[?2004l[?2004h>  for a,v in poly.items():
+[?2004l[?2004h>   for b,w in multinom(n):
+[?2004l[?2004h>    c=tuple(a[i]+2*b[i] for i in range(3))
+[?2004l[?2004h>    out[c]=out.get(c,0)+v*w
+[?2004l[?2004h>  return out
+[?2004l[?2004h> @functools.lru_cache(None)
+[?2004l[?2004h> def solid(L,m):
+[?2004l[?2004h>  out={}
+[?2004l[?2004h>  for k in range((L-m)//2+1):
+[?2004l[?2004h>   v=(-1)**(k+m)*fac(2*L-2*k)//(fac(k)*fac(L-k)*fac(L-m-2*k))
+[?2004l[?2004h>   for j in range(m+1):
+[?2004l[?2004h>    a=(m-j,j,L-m-2*k)
+[?2004l[?2004h>    # integer real and imaginary parts separate
+[?2004l[?2004h>    phase=(1,1j,-1,-1j)[j%4]
+[?2004l[?2004h>    pol=polymul_r2({a:1},k)
+[?2004l[?2004h>    for b,w in pol.items():
+[?2004l[?2004h>     out[b]=out.get(b,0)+v*comb(m,j)*phase*w
+[?2004l[?2004h>  return out
+[?2004l[?2004h> @functools.lru_cache(None)
+[?2004l[?2004h> def spherical(d):
+[?2004l[?2004h>  ix=indices(d); lookup={a:i for i,a in enumerate(ix)}
+[?2004l[?2004h>  U=np.zeros((len(ix),len(ix))); labels=[]; col=0
+[?2004l[?2004h>  for L in range(d%2,d+1,2):
+[?2004l[?2004h>   nr=(d-L)//2
+[?2004l[?2004h>   norm=math.sqrt(2*math.pi**1.5*fac(nr)/math.gamma(nr+L+1.5))
+[?2004l[?2004h>   for m in range(L+1):
+[?2004l[?2004h>    poly=polymul_r2(solid(L,m),nr)
+[?2004l[?2004h>    scale=norm*(-1)**nr/fac(nr)*math.sqrt((2*L+1)/(4*math.pi)*fac(L-m)/fac(L+m))/2**L
+[?2004l[?2004h>    vec=np.zeros(len(ix),complex)
+[?2004l[?2004h>    for a,v in poly.items():
+[?2004l[?2004h>     vec[lookup[a]]=v*scale*math.sqrt(fac(a[0])*fac(a[1])*fac(a[2]))/2**(d/2)
+[?2004l[?2004h>    if m==0:
+[?2004l[?2004h>     U[:,col]=vec.real; labels.append((L,0)); col+=1
+[?2004l[?2004h>    else:
+[?2004l[?2004h>     U[:,col]=vec.real*math.sqrt(2); labels.append((L,m)); col+=1
+[?2004l[?2004h>     U[:,col]=vec.imag*math.sqrt(2); labels.append((L,-m)); col+=1
+[?2004l[?2004h>  return U,labels
+[?2004l[?2004h> 
+[?2004l[?2004h> def split(n,l,h):
+[?2004l[?2004h>  d=2*n+l; k=d-h
+[?2004l[?2004h>  bi=indices(h); ki=indices(k); bd={a:i for i,a in enumerate(bi)}; kd={a:i for i,a in enumerate(ki)}
+[?2004l[?2004h>  rows=[]; cols=[]; vals=[]
+[?2004l[?2004h>  for aa,multi in multinom(n):
+[?2004l[?2004h>   a=(2*aa[0],2*aa[1],2*aa[2]+1) if l==1 else (2*aa[0]+1,2*aa[1]+1,2*aa[2])
+[?2004l[?2004h>   coef=(-1)**n*multi/fac(n)*math.sqrt(fac(a[0])*fac(a[1])*fac(a[2]))/2**d
+[?2004l[?2004h>   for bx in range(max(0,h-a[1]-a[2]),min(a[0],h)+1):
+[?2004l[?2004h>    for by in range(max(0,h-bx-a[2]),min(a[1],h-bx)+1):
+[?2004l[?2004h>     bz=h-bx-by; b=(bx,by,bz); c=tuple(a[i]-b[i] for i in range(3))
+[?2004l[?2004h>     rows.append(bd[b]); cols.append(kd[c]); vals.append(coef*math.sqrt(comb(a[0],bx)*comb(a[1],by)*comb(a[2],bz)))
+[?2004l[?2004h>  F=sp.csr_matrix((vals,(rows,cols)),shape=(len(bi),len(ki)))
+[?2004l[?2004h>  U,labels=spherical(k)
+[?2004l[?2004h>  return F@U,labels
+[?2004l[?2004h> 
+[?2004l[?2004h> def build(N,l):
+[?2004l[?2004h>  weights=[]
+[?2004l[?2004h>  for h in range(2*(N-1)+l+1):
+[?2004l[?2004h>   items={}
+[?2004l[?2004h>   for n in range(N):
+[?2004l[?2004h>    d=2*n+l
+[?2004l[?2004h>    if d<h: continue
+[?2004l[?2004h>    F,labels=split(n,l,h)
+[?2004l[?2004h>    for L in range(1,d-h+1):
+[?2004l[?2004h>     cols=[i for i,(ll,m) in enumerate(labels) if ll==L]
+[?2004l[?2004h>     if cols: items[n,L]=F[:,cols].ravel()
+[?2004l[?2004h>   for L in range(1,2*(N-1)+l-h+1):
+[?2004l[?2004h>    ns=[n for n in range(N) if (n,L) in items]
+[?2004l[?2004h>    if not ns: continue
+[?2004l[?2004h>    F=np.array([items[n,L] for n in ns])
+[?2004l[?2004h>    W=F@F.T*(3 if l==1 else 10)
+[?2004l[?2004h>    for a,n in enumerate(ns):
+[?2004l[?2004h>     for b,m in enumerate(ns[:a+1]):
+[?2004l[?2004h>      val=W[a,b]
+[?2004l[?2004h>      if abs(val)>1e-28: weights.append((n,m,h,L,val))
+[?2004l[?2004h>   print('weights',l,h,len(weights),flush=True)
+[?2004l[?2004h>  return np.array(weights)
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  import sys
+[?2004l[?2004h>  N=int(sys.argv[1]) if len(sys.argv)>1 else 12
+[?2004l[?2004h>  for d in range(2*N+1):
+[?2004l[?2004h>   U,_=spherical(d)
+[?2004l[?2004h>   print('orthogonal',d,np.max(abs(U.T@U-np.eye(len(U)))),flush=True)
+[?2004l[?2004h>  w1=build(N,1); w2=build(N,2)
+[?2004l[?2004h>  np.savez_compressed('/app/weights%d.npz'%N,w1=w1,w2=w2)
+[?2004l[?2004h>  print('saved',w1.shape,w2.shape)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=2 python3 /app/build_weights.py 12 > /app/weights.log 2>&1
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# sed -i 's@/2\*\*d@/2**(d/2)@' /app/build_weights.py; tail -8 /app/weights.log; head -26 /app/weights.log; OPENBLAS_NUM_THREADS=2 python3 /app/build_weights.py 12 > /app/weights.log 2>&1
+[?2004lweights 2 18 1709
+weights 2 19 1719
+weights 2 20 1723
+weights 2 21 1727
+weights 2 22 1728
+weights 2 23 1729
+weights 2 24 1729
+saved (1365, 5) (1729, 5)
+orthogonal 0 2.220446049250313e-16
+orthogonal 1 2.220446049250313e-16
+orthogonal 2 8.881784197001252e-16
+orthogonal 3 6.661338147750939e-16
+orthogonal 4 6.661338147750939e-16
+orthogonal 5 4.440892098500626e-16
+orthogonal 6 4.440892098500626e-16
+orthogonal 7 4.440892098500626e-16
+orthogonal 8 6.661338147750939e-16
+orthogonal 9 5.551115123125783e-16
+orthogonal 10 6.661338147750939e-16
+orthogonal 11 8.881784197001252e-16
+orthogonal 12 1.1102230246251565e-15
+orthogonal 13 6.661338147750939e-16
+orthogonal 14 8.881784197001252e-16
+orthogonal 15 6.661338147750939e-16
+orthogonal 16 1.1102230246251565e-15
+orthogonal 17 6.661338147750939e-16
+orthogonal 18 1.1102230246251565e-15
+orthogonal 19 7.771561172376096e-16
+orthogonal 20 1.1102230246251565e-15
+orthogonal 21 1.311216599714437e-15
+orthogonal 22 4.0542873085302665e-15
+orthogonal 23 1.660410222169324e-14
+orthogonal 24 7.702562092822492e-14
+weights 1 0 78
+[?2004hroot@6d9ebe23d9ab:/app# cat > /app/solver.py <<'PY'
+[?2004l[?2004h> import numpy as np, math
+[?2004l[?2004h> from scipy.special import roots_genlaguerre, eval_genlaguerre, gammaln
+[?2004l[?2004h> from scipy.linalg import solve
+[?2004l[?2004h> 
+[?2004l[?2004h> def radial(t,Q,N,l):
+[?2004l[?2004h>  # t,w is ordinary generalized Laguerre alpha=1/2
+[?2004l[?2004h>  t,w=t
+[?2004l[?2004h>  J={}
+[?2004l[?2004h>  for L in range(1,2*N+l):
+[?2004l[?2004h>   K=(2*(N-1)+l-L)//2
+[?2004l[?2004h>   if K<0: continue
+[?2004l[?2004h>   F=np.array([eval_genlaguerre(q,L+.5,t)*np.exp(.5*(gammaln(q+1)-gammaln(q+L+1.5))) for q in range(K+1)])
+[?2004l[?2004h>   J[L]=(F*(w*t**(L+.5)*Q[L])[None,:] if False else (F*(w*t**(L+.5)*Q[L]))@F.T
+[?2004l[?2004h>  return J
+[?2004l[?2004h> 
+[?2004l[?2004h> def matrix(W,J,N,l,R,X,T):
+[?2004l[?2004h>  B=np.zeros((2*N,2*N))
+[?2004l[?2004h>  for ii,jj in [(0,0),(0,1),(1,1)]:
+[?2004l[?2004h>   mi=[1,R][ii]; mj=[1,R][jj]; xi=[X,1-X][ii]; xj=[X,1-X][jj]
+[?2004l[?2004h>   c=math.sqrt(mi/(mi+mj)); s=math.sqrt(mj/(mi+mj)); mu=mi*mj/(mi+mj)
+[?2004l[?2004h>   scale=xi*xj*math.sqrt(2*T/mu)*(0.5 if ii==jj else 1)
+[?2004l[?2004h>   for n,m,h,L,v in W:
+[?2004l[?2004h>    n,m,h,L=map(int,(n,m,h,L))
+[?2004l[?2004h>    if max(n,m)>=N: continue
+[?2004l[?2004h>    kn=2*n+l-h; km=2*m+l-h
+[?2004l[?2004h>    qn=(kn-L)//2; qm=(km-L)//2
+[?2004l[?2004h>    v*=J[L][qn,qm]*scale
+[?2004l[?2004h>    if ii==jj:
+[?2004l[?2004h>     fn=c**h*s**kn+s**h*(-c)**kn; fm=c**h*s**km+s**h*(-c)**km
+[?2004l[?2004h>     a=ii*N+n; b=ii*N+m
+[?2004l[?2004h>     B[a,b]+=v*fn*fm
+[?2004l[?2004h>     if n!=m: B[b,a]+=v*fn*fm
+[?2004l[?2004h>    else:
+[?2004l[?2004h>     a=n; b=m; an=N+n; bn=N+m
+[?2004l[?2004h>     fin=c**h*s**kn; fim=c**h*s**km
+[?2004l[?2004h>     fjn=s**h*(-c)**kn; fjm=s**h*(-c)**km
+[?2004l[?2004h>     B[a,b]+=v*fin*fim; B[an,bn]+=v*fjn*fjm
+[?2004l[?2004h>     B[a,bn]+=v*fin*fjm; B[bn,a]+=v*fin*fjm
+[?2004l[?2004h>     if n!=m:
+[?2004l[?2004h>      B[b,a]+=v*fin*fim; B[bn,an]+=v*fjn*fjm
+[?2004l[?2004h>      B[b,an]+=v*fim*fjn; B[an,b]+=v*fim*fjn
+[?2004l[?2004h>  return B
+[?2004l[?2004h> 
+[?2004l[?2004h> def calculate(W1,W2,J1,J2,N,R,X,T):
+[?2004l[?2004h>  B=matrix(W2,J2,N,2,R,X,T)
+[?2004l[?2004h>  S=np.zeros(2*N); S[0]=2.5*X; S[N]=2.5*(1-X)
+[?2004l[?2004h>  visc=2*T/5*(S@solve(B,S,assume_a='pos'))
+[?2004l[?2004h>  B=matrix(W1,J1,N,1,R,X,T)
+[?2004l[?2004h>  SD=np.zeros(2*N); SD[0]=1.5*math.sqrt(2*T); SD[N]=-1.5*math.sqrt(2*T/R)
+[?2004l[?2004h>  ST=np.zeros(2*N); ST[1]=-3.75*X*math.sqrt(2*T); ST[N+1]=-3.75*(1-X)*math.sqrt(2*T/R)
+[?2004l[?2004h>  keep=np.arange(1,2*N)
+[?2004l[?2004h>  b=B[np.ix_(keep,keep)]; sd=SD[keep]; st=ST[keep]
+[?2004l[?2004h>  sol=solve(b,np.stack([sd,st],axis=1),assume_a='pos')
+[?2004l[?2004h>  DD=sd@sol[:,0]; DT=sd@sol[:,1]; TT=st@sol[:,1]
+[?2004l[?2004h>  return np.array([visc,(TT-DT**2/DD)/3,X*(1-X)*DD/3,DT/(DD*X*(1-X))])
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  W=np.load('/app/weights12.npz'); Nmax=12
+[?2004l[?2004h>  t,w=roots_genlaguerre(96,.5); Q=np.full((26,len(t)),np.pi)
+[?2004l[?2004h>  J1=radial((t,w),Q,Nmax,1); J2=radial((t,w),Q,Nmax,2)
+[?2004l[?2004h>  for R,X in [(1,.5),(4,.3),(100,.001),(100,.95)]:
+[?2004l[?2004h>   for N in [2,3,4,6,8,10,12]:
+[?2004l[?2004h>    print(R,X,N,calculate(W['w1'],W['w2'],J1,J2,N,R,X,1))
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=2 python3 /app/solver.py
+[?2004l  File "/app/solver.py", line 13
+    J[L]=(F*(w*t**(L+.5)*Q[L])[None,:] if False else (F*(w*t**(L+.5)*Q[L]))@F.T
+         ^
+SyntaxError: '(' was never closed
+[?2004hroot@6d9ebe23d9ab:/app# sed -i '13c\  J[L]=(F*(w*t**(L+.5)*Q[L]))@F.T' /app/solver.py; OPENBLAS_NUM_THREADS=2 python3 /app/solver.py
+[?2004l1 0.5 2 [ 1.78927699e-01  6.61159668e-01  2.15218889e-01 -6.88758300e-17]
+1 0.5 3 [ 1.79108844e-01  6.76186024e-01  2.15525331e-01 -9.94563438e-17]
+1 0.5 4 [ 1.79131236e-01  6.77568675e-01  2.15569728e-01 -1.03190561e-16]
+1 0.5 6 [ 1.79135891e-01  6.77819094e-01  2.15580392e-01 -8.42642387e-17]
+1 0.5 8 [1.79136151e-01 6.77831684e-01 2.15581103e-01 6.87908862e-17]
+1 0.5 10 [ 1.79136174e-01  6.77832756e-01  2.15581174e-01 -9.80719448e-17]
+1 0.5 12 [ 1.79136176e-01  6.77832881e-01  2.15581184e-01 -9.32635614e-18]
+4 0.3 2 [ 0.31557806  0.36560966  0.17483066 -0.39884045]
+4 0.3 3 [ 0.31582083  0.37519632  0.17603788 -0.4324714 ]
+4 0.3 4 [ 0.31585363  0.37643667  0.17633935 -0.4393062 ]
+4 0.3 6 [ 0.3158622   0.37680744  0.1764711  -0.44192554]
+4 0.3 8 [ 0.315863    0.37685189  0.17649263 -0.44230386]
+4 0.3 10 [ 0.31586312  0.37686032  0.17649746 -0.44238255]
+4 0.3 12 [ 0.31586315  0.37686238  0.17649879 -0.44240292]
+100 0.001 2 [ 1.78899823  0.06637574  0.16270486 -0.38478112]
+100 0.001 3 [ 1.79080834  0.06790581  0.1661312  -0.44622199]
+100 0.001 4 [ 1.79103221  0.06805302  0.16753881 -0.46788318]
+100 0.001 6 [ 1.79107889  0.06808424  0.16865122 -0.48358912]
+100 0.001 8 [ 1.79108154  0.06808759  0.16906822 -0.48913163]
+100 0.001 10 [ 1.7910818   0.06808864  0.169266   -0.49168409]
+100 0.001 12 [ 1.79108183  0.06808915  0.16937396 -0.49305315]
+100 0.95 2 [ 0.4966176   0.59719783  0.15157865 -0.81750358]
+100 0.95 3 [ 0.49680548  0.61337942  0.15170357 -0.86051994]
+100 0.95 4 [ 0.49682981  0.61512299  0.15172889 -0.86687523]
+100 0.95 6 [ 0.49683506  0.61550625  0.15173877 -0.86872837]
+100 0.95 8 [ 0.49683535  0.61553469  0.15174035 -0.86893092]
+100 0.95 10 [ 0.49683537  0.61553857  0.15174075 -0.8689685 ]
+100 0.95 12 [ 0.49683537  0.61553937  0.15174088 -0.86897832]
+[?2004hroot@6d9ebe23d9ab:/app# cat > /app/vector_weights.py <<'PY'
+[?2004l[?2004h> import numpy as np, math, functools
+[?2004l[?2004h> from scipy.special import gammaln
+[?2004l[?2004h> @functools.lru_cache(None)
+[?2004l[?2004h> def logI(b,L):
+[?2004l[?2004h>  if b<L or (b-L)%2: return -np.inf
+[?2004l[?2004h>  # b! / (b-L)!! / (b+L+1)!!
+[?2004l[?2004h>  j=(b-L)//2; k=(b+L)//2
+[?2004l[?2004h>  return math.lgamma(b+1)-j*math.log(2)-math.lgamma(j+1)-math.lgamma(2*k+2)+k*math.log(2)+math.lgamma(k+1)
+[?2004l[?2004h> @functools.lru_cache(None)
+[?2004l[?2004h> def S(n,h,L):
+[?2004l[?2004h>  if h<0 or h>2*n or L<0 or L>h or (h-L)%2: return 0.
+[?2004l[?2004h>  v=0.
+[?2004l[?2004h>  for a in range(max(0,h-n),h//2+1):
+[?2004l[?2004h>   b=h-2*a; d=n-a-b
+[?2004l[?2004h>   li=logI(b,L)
+[?2004l[?2004h>   if not np.isfinite(li): continue
+[?2004l[?2004h>   v+=math.exp(b*math.log(2)-math.lgamma(a+1)-math.lgamma(b+1)-math.lgamma(d+1)+li)
+[?2004l[?2004h>  return v
+[?2004l[?2004h> @functools.lru_cache(None)
+[?2004l[?2004h> def logNorm(d,L):
+[?2004l[?2004h>  q=(d-L)//2
+[?2004l[?2004h>  return math.log(2/math.sqrt(math.pi))+math.lgamma(q+1)+math.lgamma(q+L+1.5)
+[?2004l[?2004h> def coeff(n,h,L):
+[?2004l[?2004h>  k=2*n+1-h
+[?2004l[?2004h>  if L>k or (k-L)%2: return (0.,0.)
+[?2004l[?2004h>  q=(k-L)//2; sign=(-1)**(n+q)
+[?2004l[?2004h>  out=[]
+[?2004l[?2004h>  for lc,den,factor in [(L-1,L,L),(L+1,L+1,L+1)]:
+[?2004l[?2004h>   if lc>h or (h-lc)%2: out.append(0.); continue
+[?2004l[?2004h>   a=factor*(S(n,h,lc)+S(n,h-1,L))
+[?2004l[?2004h>   out.append(sign*math.exp(math.log(a)+.5*(logNorm(h,lc)+logNorm(k,L)-math.log(den))) if a else 0.)
+[?2004l[?2004h>  return out
+[?2004l[?2004h> 
+[?2004l[?2004h> def build(N):
+[?2004l[?2004h>  out=[]
+[?2004l[?2004h>  for h in range(2*N):
+[?2004l[?2004h>   for L in range(1,2*N-h):
+[?2004l[?2004h>    ns=[n for n in range(N) if 2*n+1-h>=L and (2*n+1-h-L)%2==0 and abs(h-L)<=2*n+1]
+[?2004l[?2004h>    if not ns: continue
+[?2004l[?2004h>    C=np.array([coeff(n,h,L) for n in ns]); W=C@C.T
+[?2004l[?2004h>    for a,n in enumerate(ns):
+[?2004l[?2004h>     for b,m in enumerate(ns[:a+1]):
+[?2004l[?2004h>      if W[a,b]!=0: out.append((n,m,h,L,W[a,b]))
+[?2004l[?2004h>   print(h,len(out),flush=True)
+[?2004l[?2004h>  return np.array(out)
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  import sys,time
+[?2004l[?2004h>  N=int(sys.argv[1]) if len(sys.argv)>1 else 12
+[?2004l[?2004h>  w=build(N)
+[?2004l[?2004h>  np.save('/app/vector%d.npy'%N,w)
+[?2004l[?2004h>  if N==12:
+[?2004l[?2004h>   ref=np.load('/app/weights12.npz')['w1']; D={(int(n),int(m),int(h),int(L)):v for n,m,h,L,v in ref}
+[?2004l[?2004h>   worst=0
+[?2004l[?2004h>   for n,m,h,L,v in w:
+[?2004l[?2004h>    vr=D.get((int(n),int(m),int(h),int(L)),0)
+[?2004l[?2004h>    worst=max(worst,abs(v-vr)/max(1e-25,abs(vr)))
+[?2004l[?2004h>   print('max discrepancy',worst,'sizes',w.shape,ref.shape)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=2 python3 /app/vector_weights.py 12 > /app/vector.log; tail -3 /app/vector.log
+[?2004l22 1365
+23 1365
+max discrepancy 1.5350585399449133e-14 sizes (1365, 5) (1550, 5)
+[?2004hroot@6d9ebe23d9ab:/app# cat > /app/scatter.py <<'PY'
+[?2004l[?2004h> import numpy as np, math, functools, time
+[?2004l[?2004h> from scipy.special import roots_legendre
+[?2004l[?2004h> from scipy.optimize import brentq, minimize_scalar
+[?2004l[?2004h> @functools.lru_cache(None)
+[?2004l[?2004h> def gauss(n):
+[?2004l[?2004h>  z,w=roots_legendre(n); return (z+1)/2,w/2
+[?2004l[?2004h> class Scatter:
+[?2004l[?2004h>  def __init__(self,A):
+[?2004l[?2004h>   self.A=A; self.s=1-A
+[?2004l[?2004h>   def W(y):
+[?2004l[?2004h>    r=A+self.s/y
+[?2004l[?2004h>    return 4*(y**12-y**6)+12*r/self.s*(y**7-2*y**13)
+[?2004l[?2004h>   self.W=W
+[?2004l[?2004h>   opt=minimize_scalar(lambda y:-W(y),bounds=(.01,2**(-1/6)),method='bounded',options={'xatol':1e-15})
+[?2004l[?2004h>   self.ym=opt.x; self.em=W(opt.x)
+[?2004l[?2004h>  def parameters(self,E):
+[?2004l[?2004h>   a=self.A; s=self.s
+[?2004l[?2004h>   yz=((1+math.sqrt(1+E))/2)**(1/6); rz=a+s/yz
+[?2004l[?2004h>   if E<self.em:
+[?2004l[?2004h>    y=brentq(lambda y:self.W(y)-E,1e-15,self.ym,xtol=1e-15)
+[?2004l[?2004h>    rc=a+s/y; bc2=rc**2*(1-4*(y**12-y**6)/E)
+[?2004l[?2004h>    return rz,rc,bc2
+[?2004l[?2004h>   return rz,0.,0.
+[?2004l[?2004h>  def angles(self,E,b2,pars,tol=2e-10):
+[?2004l[?2004h>   rz,rc,bc2=pars; a=self.A; s=self.s
+[?2004l[?2004h>   lo=np.full_like(b2,rz); hi=np.maximum(np.sqrt(b2)*2,rz*2)
+[?2004l[?2004h>   if rc:
+[?2004l[?2004h>    inner=b2<bc2; hi[inner]=rc; lo[~inner]=rc; hi[~inner]=np.maximum(hi[~inner],2*rc)
+[?2004l[?2004h>   for it in range(55):
+[?2004l[?2004h>    r=(lo+hi)/2; y=s/(r-a); H=r*r*(1-4*(y**12-y**6)/E)
+[?2004l[?2004h>    pick=H>b2; hi=np.where(pick,r,hi); lo=np.where(pick,lo,r)
+[?2004l[?2004h>   r0=(lo+hi)/2; y0=s/(r0-a); y6=y0**6; z=a/r0
+[?2004l[?2004h>   def vals(ids,v):
+[?2004l[?2004h>    u=1-v*v; lu=np.log1p(-v*v)
+[?2004l[?2004h>    lw=lu+np.log1p(-z[ids,None])-np.log1p(-z[ids,None]*u)
+[?2004l[?2004h>    den=-np.expm1(2*lu)+4*u*u/E*(y6[ids,None]*np.expm1(6*lw-2*lu)-y6[ids,None]**2*np.expm1(12*lw-2*lu))
+[?2004l[?2004h>    return 2*v/np.sqrt(np.maximum(den,1e-300))
+[?2004l[?2004h>   ids=np.arange(len(b2)); low=np.zeros(len(b2)); high=np.ones(len(b2)); acc=np.zeros(len(b2)); errtotal=0
+[?2004l[?2004h>   # Adaptive Gauss 12/24, including a split at the centrifugal barrier.
+[?2004l[?2004h>   if rc:
+[?2004l[?2004h>    vm=np.sqrt(np.maximum(0,1-r0/rc))
+[?2004l[?2004h>    split=(b2<bc2)&(vm>0)
+[?2004l[?2004h>    ids=np.concatenate([ids,ids[split]]); low=np.concatenate([low,vm[split]]); high=np.concatenate([np.where(split,vm,high),np.ones(sum(split))])
+[?2004l[?2004h>   x1,w1=gauss(12); x2,w2=gauss(24)
+[?2004l[?2004h>   for iteration in range(45):
+[?2004l[?2004h>    v1=low[:,None]+(high-low)[:,None]*x1; v2=low[:,None]+(high-low)[:,None]*x2
+[?2004l[?2004h>    I1=(vals(ids,v1)@w1)*(high-low); I2=(vals(ids,v2)@w2)*(high-low)
+[?2004l[?2004h>    good=abs(I1-I2)<tol*(high-low)+2e-12*abs(I2)
+[?2004l[?2004h>    if iteration==44: good[:]=True
+[?2004l[?2004h>    np.add.at(acc,ids[good],I2[good])
+[?2004l[?2004h>    if np.all(good): break
+[?2004l[?2004h>    ids=ids[~good]; low=low[~good]; high=high[~good]; mid=(low+high)/2
+[?2004l[?2004h>    ids=np.concatenate([ids,ids]); low=np.concatenate([low,mid]); high=np.concatenate([mid,high])
+[?2004l[?2004h>   return np.pi-2*np.sqrt(b2)/r0*acc
+[?2004l[?2004h>  def Q(self,E,Lmax=24,order=16,step=1.,tol=2e-10):
+[?2004l[?2004h>   pars=self.parameters(E); rz,rc,bc2=pars
+[?2004l[?2004h>   tail=(self.A+25*(4*self.s**6/E)**(1/6))**2
+[?2004l[?2004h>   xs,ws=gauss(order); bs=[]; wt=[]
+[?2004l[?2004h>   def segment(lo,hi,func):
+[?2004l[?2004h>    z=lo+(hi-lo)*xs; b,w=func(z); bs.append(b); wt.append(w*ws*(hi-lo))
+[?2004l[?2004h>   if rc:
+[?2004l[?2004h>    # Below orbiting critical impact parameter, b^2=bc^2(1-exp(-z)).
+[?2004l[?2004h>    for lo in np.arange(0,24,step):
+[?2004l[?2004h>     segment(lo,min(lo+step,24),lambda z:(bc2*(-np.expm1(-z)),bc2*np.exp(-z)))
+[?2004l[?2004h>    # Above it, b^2=bc^2(1+exp(z)).
+[?2004l[?2004h>    end=math.log(tail/bc2-1)
+[?2004l[?2004h>    for lo in np.arange(-24,end,step):
+[?2004l[?2004h>     segment(lo,min(lo+step,end),lambda z:(bc2*(1+np.exp(z)),bc2*np.exp(z)))
+[?2004l[?2004h>   else:
+[?2004l[?2004h>    # Compact impact interval plus a logarithmic tail.
+[?2004l[?2004h>    base=rz**2
+[?2004l[?2004h>    for lo in np.arange(0,2,step):
+[?2004l[?2004h>     segment(lo,min(lo+step,2),lambda z:(base*z,base*np.ones_like(z)))
+[?2004l[?2004h>    end=math.log(tail/(2*base))
+[?2004l[?2004h>    for lo in np.arange(0,end,step):
+[?2004l[?2004h>     segment(lo,min(lo+step,end),lambda z:(2*base*np.exp(z),2*base*np.exp(z)))
+[?2004l[?2004h>   b2=np.concatenate(bs); weights=np.concatenate(wt)*np.pi
+[?2004l[?2004h>   chi=self.angles(E,b2,pars,tol); c=np.cos(chi)
+[?2004l[?2004h>   Q=np.zeros(Lmax+1); p0=np.ones_like(c); p1=c
+[?2004l[?2004h>   Q[1]=np.dot(weights,1-p1)
+[?2004l[?2004h>   for L in range(2,Lmax+1):
+[?2004l[?2004h>    p=((2*L-1)*c*p1-(L-1)*p0)/L
+[?2004l[?2004h>    Q[L]=np.dot(weights,1-p); p0,p1=p1,p
+[?2004l[?2004h>   return Q
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  import sys
+[?2004l[?2004h>  A=float(sys.argv[1]) if len(sys.argv)>1 else 0
+[?2004l[?2004h>  S=Scatter(A); print('critical energy',S.em)
+[?2004l[?2004h>  for E in [.001,.05,.2,.6,S.em*.999,S.em*1.001,1,10,100,1000]:
+[?2004l[?2004h>   qprev=None
+[?2004l[?2004h>   for o in [8,16,24,32]:
+[?2004l[?2004h>    ts=time.time(); q=S.Q(E,24,o)
+[?2004l[?2004h>    print(E,o,q[1:5], 'err',np.max(abs(q/qprev-1)[1:]) if qprev is not None else 0,'time',time.time()-ts,flush=True); qprev=q
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=2 python3 /app/scatter.py 0 > /app/scatter.log 2>&1
+[?2004ltail -20 /app/scatter.log; ps -o pid,etime,rss,cmd -C python3; OPENBLAS_NUM_THREADS=2 python3 /app/vector_weights.py 40 > /app/vector40.log
+cat > /app/test_high.py <<'PY'
+import numpy as np
+from scipy.special import roots_genlaguerre
+from solver import *
+W1=np.load('/app/vector40.npy'); W2=np.load('/app/weights12.npz')['w2']
+t,w=roots_genlaguerre(192,.5); Q=np.full((82,len(t)),np.pi)
+J1=radial((t,w),Q,40,1); J2=radial((t,w),Q,12,2)
+def calc(N,R,X):
+ B=matrix(W1,J1,N,1,R,X,1)
+ SD=np.zeros(2*N); SD[0]=1.5*math.sqrt(2); SD[N]=-1.5*math.sqrt(2/R)
+ ST=np.zeros(2*N); ST[1]=-3.75*X*math.sqrt(2); ST[N+1]=-3.75*(1-X)*math.sqrt(2/R)
+ keep=np.arange(1,2*N); b=B[np.ix_(keep,keep)]; sd=SD[keep]; st=ST[keep]
+ sol=solve(b,np.stack([sd,st],axis=1),assume_a='pos'); DD=sd@sol[:,0]; DT=sd@sol[:,1]; TT=st@sol[:,1]
+ return np.array([(TT-DT**2/DD)/3,X*(1-X)*DD/3,DT/(DD*X*(1-X))])
+for R,X in [(4,.3),(100,.001),(100,.01),(100,.1),(100,.95)]:
+ for N in [12,16,20,24,28,32,36,40]:
+  print(R,X,N,calc(N,R,X),flush=True)
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/test_high.py > /app/high.log 2>&1
+^Ctail -30 /app/scatter.log; ps -o pid,etime,rss,cmd -C python3; ls /app/*40* /app/high.log 2>/dev/null
+
+[?2004hroot@6d9ebe23d9ab:/app# tail -30 /app/scatter.log; ps -o pid,etime,rss,cmd -C python3; ls /app/*40* /app/high.log 2>/dev/null
+[?2004lcritical energy 0.7999999999999993
+Traceback (most recent call last):
+  File "/app/scatter.py", line 92, in <module>
+    ts=time.time(); q=S.Q(E,24,o)
+                      ^^^^^^^^^^^
+  File "/app/scatter.py", line 78, in Q
+    chi=self.angles(E,b2,pars,tol); c=np.cos(chi)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/scatter.py", line 47, in angles
+    I1=(vals(ids,v1)@w1)*(high-low); I2=(vals(ids,v2)@w2)*(high-low)
+        ^^^^^^^^^^^^
+  File "/app/scatter.py", line 37, in vals
+    return 2*v/np.sqrt(np.maximum(den,1e-300))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+bash: ps: command not found
+[?2004hroot@6d9ebe23d9ab:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/scatter.py'
+[?2004l[?2004h> s=open(p).read().replace('tol=2e-10','tol=2e-9').replace('lw=lu+np.log1p(-z[ids,None])-np.log1p(-z[ids,None]*u)','lw=lu-np.log1p(z[ids,None]*v*v/(1-z[ids,None]))').replace('range(45)','range(18)').replace('iteration==44','iteration==17').replace('np.arange(0,24,step)','np.arange(0,20,step)').replace('min(lo+step,24)','min(lo+step,20)').replace('np.arange(-24,end,step)','np.arange(-20,end,step)')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/scatter.py 0 > /app/scatter.log 2>&1 &
+[?2004l[1] 343
+[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/vector_weights.py 40 > /app/vector40.log 2>&1 &
+[?2004l[2] 344
+[?2004hroot@6d9ebe23d9ab:/app# tail -16 /app/scatter.log; tail -3 /app/vector40.log; jobs -l
+[?2004l1 8 [ 8.21287373  8.37895764 10.46130106 11.5154555 ] err 0 time 0.0008738040924072266
+1 16 [ 7.42786963  8.9270311  10.94838012 11.18517881] err 0.09558214677382781 time 0.0011036396026611328
+1 24 [ 7.62555536  8.68549603 10.77966545 11.5148712 ] err 0.02947582638506807 time 0.0011496543884277344
+1 32 [ 7.5031129   8.93353864 10.70455132 11.0889622 ] err 0.05603018419448036 time 0.0016560554504394531
+10 8 [2.68726656 3.17728573 3.50509169 3.79986366] err 0 time 0.0010921955108642578
+10 16 [2.6872665  3.17728552 3.50509126 3.79986285] err 0.03277680904953795 time 0.001268148422241211
+10 24 [2.6872665  3.17728552 3.50509126 3.79986285] err 1.8497102494130502e-07 time 0.0013701915740966797
+10 32 [2.6872665  3.17728552 3.50509126 3.79986285] err 2.569056078982612e-13 time 0.0011723041534423828
+100 8 [1.86684024 2.21293486 2.40459996 2.5343442 ] err 0 time 0.0008170604705810547
+100 16 [1.86684024 2.21293486 2.40459997 2.53434422] err 0.06337993526626007 time 0.0009291172027587891
+100 24 [1.86684024 2.21293486 2.40459997 2.53434422] err 6.695521341804067e-07 time 0.0010492801666259766
+100 32 [1.86684024 2.21293486 2.40459997 2.53434422] err 8.79296635503124e-14 time 0.0011379718780517578
+1000 8 [1.29637961 1.55711598 1.70866881 1.81492183] err 0 time 0.00072479248046875
+1000 16 [1.29637961 1.55711598 1.70866881 1.81492182] err 0.05307765156329225 time 0.0009074211120605469
+1000 24 [1.29637961 1.55711598 1.70866881 1.81492182] err 6.623766215518856e-07 time 0.0012831687927246094
+1000 32 [1.29637961 1.55711598 1.70866881 1.81492182] err 1.758593271006248e-13 time 0.0011246204376220703
+[1]-  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/scatter.py 0 > /app/scatter.log 2>&1
+[2]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/vector_weights.py 40 > /app/vector40.log 2>&1
+77 123409
+78 123410
+79 123410
+[?2004hroot@6d9ebe23d9ab:/app# cat > /app/test_high.py <<'PY'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from scipy.special import roots_genlaguerre
+[?2004l[?2004h> from solver import *
+[?2004l[?2004h> W1=np.load('/app/vector40.npy'); W2=np.load('/app/weights12.npz')['w2']
+[?2004l[?2004h> t,w=roots_genlaguerre(192,.5); Q=np.full((82,len(t)),np.pi)
+[?2004l[?2004h> J1=radial((t,w),Q,40,1); J2=radial((t,w),Q,12,2)
+[?2004l[?2004h> def calc(N,R,X):
+[?2004l[?2004h>  B=matrix(W1,J1,N,1,R,X,1)
+[?2004l[?2004h>  SD=np.zeros(2*N); SD[0]=1.5*math.sqrt(2); SD[N]=-1.5*math.sqrt(2/R)
+[?2004l[?2004h>  ST=np.zeros(2*N); ST[1]=-3.75*X*math.sqrt(2); ST[N+1]=-3.75*(1-X)*math.sqrt(2/R)
+[?2004l[?2004h>  keep=np.arange(1,2*N); b=B[np.ix_(keep,keep)]; sd=SD[keep]; st=ST[keep]
+[?2004l[?2004h>  sol=solve(b,np.stack([sd,st],axis=1),assume_a='pos'); DD=sd@sol[:,0]; DT=sd@sol[:,1]; TT=st@sol[:,1]
+[?2004l[?2004h>  return np.array([(TT-DT**2/DD)/3,X*(1-X)*DD/3,DT/(DD*X*(1-X))])
+[?2004l[?2004h> for R,X in [(4,.3),(100,.001),(100,.01),(100,.1),(100,.95)]:
+[?2004l[?2004h>  for N in [12,16,20,24,28,32,36,40]:
+[?2004l[?2004h>   print(R,X,N,calc(N,R,X),flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# if test -f /app/vector40.npy; then OPENBLAS_NUM_THREADS=1 python3 /app/test_high.py > /app/high.log 2>&1 & fi
+[?2004l[1] 366
+[?2004hroot@6d9ebe23d9ab:/app# head -30 /app/scatter.log; tail -25 /app/high.log; jobs -l
+[?2004lcritical energy 0.7999999999999993
+0.001 8 [ 78.47372592  89.07670738 108.36558996 113.37675352] err 0 time 0.11268830299377441
+/app/scatter.py:93: RuntimeWarning: invalid value encountered in divide
+  print(E,o,q[1:5], 'err',np.max(abs(q/qprev-1)[1:]) if qprev is not None else 0,'time',time.time()-ts,flush=True); qprev=q
+0.001 16 [ 78.47372592  89.07670738 108.36559008 113.37672399] err 0.06821906086996865 time 0.2050466537475586
+0.001 24 [ 78.47372592  89.07670738 108.36559008 113.37672399] err 0.023609613292459475 time 0.2541790008544922
+0.001 32 [ 78.47372592  89.07670738 108.36559008 113.37672399] err 0.004054797600143045 time 0.3530552387237549
+0.05 8 [21.21409033 24.22863539 29.35959394 30.7999121 ] err 0 time 0.02794170379638672
+0.05 16 [21.21409033 24.22863539 29.35959395 30.79990938] err 0.05167596303043864 time 0.06902313232421875
+0.05 24 [21.21409033 24.22863539 29.35959395 30.79990938] err 0.02709013840057506 time 0.10785150527954102
+0.05 32 [21.21409033 24.22863539 29.35959395 30.79990938] err 0.0015858011328633292 time 0.12403440475463867
+0.2 8 [13.33939049 15.28516671 18.46411088 19.4101193 ] err 0 time 0.023169517517089844
+0.2 16 [13.33939049 15.28516671 18.46411088 19.4101186 ] err 0.08552218207655726 time 0.04752182960510254
+0.2 24 [13.33939049 15.28516671 18.46411088 19.4101186 ] err 0.020159120558765453 time 0.08427977561950684
+0.2 32 [13.33939049 15.28516671 18.46411088 19.4101186 ] err 0.00043588855037857144 time 0.12285232543945312
+0.6 8 [ 9.08241908 10.60219365 12.71096284 13.45327731] err 0 time 0.025261878967285156
+0.6 16 [ 9.08241908 10.60219365 12.71096284 13.45327711] err 0.059060181934889155 time 0.05423998832702637
+0.6 24 [ 9.08241908 10.60219365 12.71096284 13.45327711] err 0.021608924302777277 time 0.09142279624938965
+0.6 32 [ 9.08241908 10.60219365 12.71096284 13.45327711] err 4.085182702595613e-05 time 0.11046195030212402
+0.7991999999999992 8 [ 8.14397817  9.63681417 11.50063263 12.22440762] err 0 time 0.059900760650634766
+0.7991999999999992 16 [ 8.14397817  9.63681417 11.50063263 12.22440751] err 0.06552543934006194 time 0.12993073463439941
+0.7991999999999992 24 [ 8.14397817  9.63681417 11.50063263 12.22440751] err 0.02390096374964612 time 0.19667863845825195
+0.7991999999999992 32 [ 8.14397817  9.63681417 11.50063263 12.22440751] err 1.3888596552491528e-05 time 0.2826719284057617
+0.8007999999999992 8 [ 8.33118291  8.92013021 11.57892936 13.47629038] err 0 time 0.0012054443359375
+0.8007999999999992 16 [ 8.2743702   9.42121976 11.80498808 12.23083777] err 0.09346199218506279 time 0.0011591911315917969
+0.8007999999999992 24 [ 7.91544689 10.15138571 11.1993851  12.39012823] err 0.07750227357301709 time 0.0012171268463134766
+0.8007999999999992 32 [ 7.62738626  9.57355768 11.66944553 12.33094223] err 0.056921099239161776 time 0.0013935565948486328
+1 8 [ 8.21287373  8.37895764 10.46130106 11.5154555 ] err 0 time 0.0008738040924072266
+1 16 [ 7.42786963  8.9270311  10.94838012 11.18517881] err 0.09558214677382781 time 0.0011036396026611328
+1 24 [ 7.62555536  8.68549603 10.77966545 11.5148712 ] err 0.02947582638506807 time 0.0011496543884277344
+4 0.3 12 [ 0.37686236  0.17649876 -0.44240266]
+4 0.3 16 [ 0.37686315  0.17649932 -0.44241084]
+4 0.3 20 [ 0.37686324  0.1764994  -0.44241189]
+4 0.3 24 [ 0.37686326  0.17649941 -0.44241206]
+4 0.3 28 [ 0.37686326  0.17649941 -0.4424121 ]
+4 0.3 32 [ 0.37686326  0.17649941 -0.44241211]
+4 0.3 36 [ 0.37686326  0.17649941 -0.44241211]
+4 0.3 40 [ 0.37686326  0.17649941 -0.44241211]
+100 0.001 12 [ 0.06808915  0.16937383 -0.49305169]
+100 0.001 16 [ 0.06808963  0.16948004 -0.49437851]
+100 0.001 20 [ 0.06808983  0.16952768 -0.49496561]
+100 0.001 24 [ 0.06808994  0.16955249 -0.49526882]
+100 0.001 28 [ 0.06809     0.16956676 -0.49544212]
+100 0.001 32 [ 0.06809004  0.16957555 -0.49554853]
+100 0.001 36 [ 0.06809006  0.16958127 -0.49561747]
+100 0.001 40 [ 0.06809008  0.16958515 -0.49566404]
+100 0.01 12 [ 0.07085308  0.16922944 -0.4945665 ]
+100 0.01 16 [ 0.07085765  0.16933081 -0.495843  ]
+[1]+   366 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/test_high.py > /app/high.log 2>&1 &
+[?2004hroot@6d9ebe23d9ab:/app# cp /app/scatter.py /app/scatter_fixed.py
+[?2004l[1]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/test_high.py > /app/high.log 2>&1
+[?2004hroot@6d9ebe23d9ab:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/scatter.py'; s=open(p).read(); start=s.index('  xs,ws=gauss(order)'); end=s.index('\nif __name__',start)
+[?2004l[?2004h> s=s[:start]+'''  low=[]; high=[]; kinds=[]
+[?2004l[?2004h>   def segments(start,end,kind):
+[?2004l[?2004h>    for lo in np.arange(start,end,step):
+[?2004l[?2004h>     low.append(lo); high.append(min(lo+step,end)); kinds.append(kind)
+[?2004l[?2004h>   if rc:
+[?2004l[?2004h>    segments(0,20,0)
+[?2004l[?2004h>    segments(-20,math.log(tail/bc2-1),1)
+[?2004l[?2004h>   else:
+[?2004l[?2004h>    segments(0,2,2)
+[?2004l[?2004h>    segments(0,math.log(tail/(2*rz**2)),3)
+[?2004l[?2004h>   low=np.array(low); high=np.array(high); kinds=np.array(kinds)
+[?2004l[?2004h>   x1,w1=gauss(order); x2,w2=gauss(2*order)
+[?2004l[?2004h>   def evaluate(lo,hi,kind,x,w):
+[?2004l[?2004h>    z=lo[:,None]+(hi-lo)[:,None]*x
+[?2004l[?2004h>    kk=kind[:,None]
+[?2004l[?2004h>    b2=np.where(kk==0,bc2*(-np.expm1(-z)),np.where(kk==1,bc2*(1+np.exp(z)),np.where(kk==2,rz**2*z,2*rz**2*np.exp(z))))
+[?2004l[?2004h>    wt=np.where(kk==0,bc2*np.exp(-z),np.where(kk==1,bc2*np.exp(z),np.where(kk==2,rz**2,2*rz**2*np.exp(z))))*w*(hi-lo)[:,None]*np.pi
+[?2004l[?2004h>    chi=self.angles(E,b2.ravel(),pars,tol)
+[?2004l[?2004h>    c=np.cos(chi).reshape(z.shape)
+[?2004l[?2004h>    p0=np.ones_like(c); p1=c
+[?2004l[?2004h>    out=np.zeros((len(lo),Lmax))
+[?2004l[?2004h>    out[:,0]=np.sum(wt*(1-c),axis=1)
+[?2004l[?2004h>    for L in range(2,Lmax+1):
+[?2004l[?2004h>     p=((2*L-1)*c*p1-(L-1)*p0)/L
+[?2004l[?2004h>     out[:,L-1]=np.sum(wt*(1-p),axis=1); p0,p1=p1,p
+[?2004l[?2004h>    return out
+[?2004l[?2004h>   acc=np.zeros(Lmax)
+[?2004l[?2004h>   for iteration in range(18):
+[?2004l[?2004h>    I1=evaluate(low,high,kinds,x1,w1); I2=evaluate(low,high,kinds,x2,w2)
+[?2004l[?2004h>    area=max(rz**2,bc2)*np.pi
+[?2004l[?2004h>    allowance=area*2e-8*(high-low)/max(1,np.sum(high-low))
+[?2004l[?2004h>    good=np.all(abs(I1-I2)<allowance[:,None]+2e-9*abs(I2),axis=1)
+[?2004l[?2004h>    if iteration==17: good[:]=True
+[?2004l[?2004h>    acc+=np.sum(I2[good],axis=0)
+[?2004l[?2004h>    if np.all(good): break
+[?2004l[?2004h>    low=low[~good]; high=high[~good]; kinds=kinds[~good]; mid=(low+high)/2
+[?2004l[?2004h>    low=np.concatenate([low,mid]); high=np.concatenate([mid,high]); kinds=np.concatenate([kinds,kinds])
+[?2004l[?2004h>   return np.concatenate([[0],acc])
+[?2004l[?2004h> ''' + s[end:]
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/scatter.py 0 > /app/adaptive.log 2>&1 &
+[?2004l[1] 407
+[?2004hroot@6d9ebe23d9ab:/app# tail -15 /app/high.log
+[?2004l100 0.1 16 [ 0.09971201  0.1678598  -0.51179588]
+100 0.1 20 [ 0.09972376  0.16788538 -0.51214003]
+100 0.1 24 [ 0.09972921  0.1678975  -0.51230143]
+100 0.1 28 [ 0.09973205  0.1679039  -0.51238599]
+100 0.1 32 [ 0.09973364  0.16790755 -0.51243395]
+100 0.1 36 [ 0.0997346   0.16790976 -0.51246282]
+100 0.1 40 [ 0.0997352   0.16791116 -0.51248103]
+100 0.95 12 [ 0.61553936  0.15174087 -0.86897796]
+100 0.95 16 [ 0.61553965  0.15174095 -0.86898254]
+100 0.95 20 [ 0.6155397   0.15174097 -0.86898344]
+100 0.95 24 [ 0.61553971  0.15174098 -0.86898371]
+100 0.95 28 [ 0.61553972  0.15174098 -0.86898381]
+100 0.95 32 [ 0.61553972  0.15174098 -0.86898386]
+100 0.95 36 [ 0.61553972  0.15174098 -0.86898388]
+100 0.95 40 [ 0.61553972  0.15174098 -0.86898389]
+[?2004hroot@6d9ebe23d9ab:/app# tail -18 /app/adaptive.log
+[?2004l0.8007999999999992 24 [ 8.13775932  9.63042942 11.49260631 12.21623352] err 2.9091692710370154e-07 time 0.055860042572021484
+0.8007999999999992 32 [ 8.13775932  9.63042942 11.49260631 12.21623352] err 1.1926237775128357e-10 time 0.06076669692993164
+1 8 [ 7.5377255   8.85666264 10.73747574 11.23445603] err 0 time 0.01942133903503418
+1 16 [ 7.5377255   8.85666264 10.73747574 11.23445603] err 1.0380585280245214e-13 time 0.014347553253173828
+1 24 [ 7.5377255   8.85666264 10.73747574 11.23445603] err 2.9332092310596636e-13 time 0.012749195098876953
+1 32 [ 7.5377255   8.85666264 10.73747574 11.23445603] err 1.468825061579082e-13 time 0.014513731002807617
+10 8 [2.6872665  3.17728552 3.50509126 3.79986285] err 0 time 0.009706735610961914
+10 16 [2.6872665  3.17728552 3.50509126 3.79986285] err 3.8702374638432957e-13 time 0.004438638687133789
+10 24 [2.6872665  3.17728552 3.50509126 3.79986285] err 3.5926817076870066e-13 time 0.002576589584350586
+10 32 [2.6872665  3.17728552 3.50509126 3.79986285] err 3.2529534621517087e-13 time 0.0029289722442626953
+100 8 [1.86684024 2.21293486 2.40459997 2.53434422] err 0 time 0.009809255599975586
+100 16 [1.86684024 2.21293486 2.40459997 2.53434422] err 2.142730437526552e-13 time 0.005181312561035156
+100 24 [1.86684024 2.21293486 2.40459997 2.53434422] err 7.349676423018536e-14 time 0.003472566604614258
+100 32 [1.86684024 2.21293486 2.40459997 2.53434422] err 1.9695356456850277e-13 time 0.0033364295959472656
+1000 8 [1.29637961 1.55711598 1.70866881 1.81492182] err 0 time 0.008129119873046875
+1000 16 [1.29637961 1.55711598 1.70866881 1.81492182] err 2.0761170560490427e-14 time 0.0034449100494384766
+1000 24 [1.29637961 1.55711598 1.70866881 1.81492182] err 1.1379786002407855e-13 time 0.0022318363189697266
+1000 32 [1.29637961 1.55711598 1.70866881 1.81492182] err 3.0109248427834245e-13 time 0.00244903564453125
+[1]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/scatter.py 0 > /app/adaptive.log 2>&1
+[?2004hroot@6d9ebe23d9ab:/app# cat > /app/group_solver.py <<'PY'
+[?2004l[?2004h> import numpy as np, math, time
+[?2004l[?2004h> from scipy.special import gammaln
+[?2004l[?2004h> from scipy.linalg import solve
+[?2004l[?2004h> from vector_weights import coeff
+[?2004l[?2004h> 
+[?2004l[?2004h> def groups(N,R):
+[?2004l[?2004h>  out=[]
+[?2004l[?2004h>  ns=np.arange(N); norms=np.exp(.5*(math.log(2/math.sqrt(math.pi))+gammaln(ns+2.5)-gammaln(ns+1)))
+[?2004l[?2004h>  for h in range(2*N):
+[?2004l[?2004h>   for L in range(1,2*N-h):
+[?2004l[?2004h>    nn=np.arange(max(0,(h+L-1)//2),N)
+[?2004l[?2004h>    if not len(nn): continue
+[?2004l[?2004h>    if (h+L)%2!=1: continue
+[?2004l[?2004h>    kk=2*nn+1-h; qq=(kk-L)//2
+[?2004l[?2004h>    C=np.array([coeff(int(n),h,L) for n in nn])/norms[nn,None]
+[?2004l[?2004h>    out.append((h,L,nn,kk,qq,C))
+[?2004l[?2004h>  return out,norms
+[?2004l[?2004h> 
+[?2004l[?2004h> def vmat(G,J,N,R,X,T):
+[?2004l[?2004h>  B=np.zeros((2*N,2*N))
+[?2004l[?2004h>  for ii,jj in [(0,0),(0,1),(1,1)]:
+[?2004l[?2004h>   mi=[1,R][ii]; mj=[1,R][jj]; xi=[X,1-X][ii]; xj=[X,1-X][jj]
+[?2004l[?2004h>   c=math.sqrt(mi/(mi+mj)); s=math.sqrt(mj/(mi+mj)); mu=mi*mj/(mi+mj)
+[?2004l[?2004h>   scale=xi*xj*math.sqrt(2*T/mu)*(0.5 if ii==jj else 1)
+[?2004l[?2004h>   for h,L,nn,kk,qq,C in G:
+[?2004l[?2004h>    choose=nn<N
+[?2004l[?2004h>    if not np.any(choose): continue
+[?2004l[?2004h>    nn=nn[choose]; kk=kk[choose]; qq=qq[choose]; C=C[choose]
+[?2004l[?2004h>    V=J[L][np.ix_(qq,qq)]*scale
+[?2004l[?2004h>    if ii==jj:
+[?2004l[?2004h>     F=C*(c**h*s**kk+s**h*(-c)**kk)[:,None]
+[?2004l[?2004h>     B[np.ix_(ii*N+nn,ii*N+nn)]+=(F@F.T)*V
+[?2004l[?2004h>    else:
+[?2004l[?2004h>     F=C*(c**h*s**kk)[:,None]; H=C*(s**h*(-c)**kk)[:,None]
+[?2004l[?2004h>     B[np.ix_(nn,nn)]+=(F@F.T)*V
+[?2004l[?2004h>     B[np.ix_(N+nn,N+nn)]+=(H@H.T)*V
+[?2004l[?2004h>     cross=(F@H.T)*V
+[?2004l[?2004h>     B[np.ix_(nn,N+nn)]+=cross; B[np.ix_(N+nn,nn)]+=cross.T
+[?2004l[?2004h>  return B
+[?2004l[?2004h> 
+[?2004l[?2004h> def vector_result(B,norms,N,R,X,T):
+[?2004l[?2004h>  SD=np.zeros(2*N); SD[0]=1.5*math.sqrt(2*T); SD[N]=-1.5*math.sqrt(2*T/R)
+[?2004l[?2004h>  ST=np.zeros(2*N); ST[1]=-3.75*X*math.sqrt(2*T); ST[N+1]=-3.75*(1-X)*math.sqrt(2*T/R)
+[?2004l[?2004h>  norm=np.tile(norms[:N],2); SD/=norm; ST/=norm
+[?2004l[?2004h>  keep=np.arange(1,2*N); b=B[np.ix_(keep,keep)]; sd=SD[keep]; st=ST[keep]
+[?2004l[?2004h>  sol=solve(b,np.stack([sd,st],axis=1),assume_a='pos'); DD=sd@sol[:,0]; DT=sd@sol[:,1]; TT=st@sol[:,1]
+[?2004l[?2004h>  return np.array([(TT-DT**2/DD)/3,X*(1-X)*DD/3,DT/(DD*X*(1-X))])
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  from scipy.special import roots_genlaguerre
+[?2004l[?2004h>  from solver import radial,matrix
+[?2004l[?2004h>  import sys
+[?2004l[?2004h>  Nmax=int(sys.argv[1]) if len(sys.argv)>1 else 80
+[?2004l[?2004h>  t,w=roots_genlaguerre(max(256,2*Nmax+32),.5); Q=np.full((2*Nmax+2,len(t)),np.pi)
+[?2004l[?2004h>  J=radial((t,w),Q,Nmax,1)
+[?2004l[?2004h>  ts=time.time(); G,norm=groups(Nmax,100); print('built',len(G),time.time()-ts,flush=True)
+[?2004l[?2004h>  for R,X in [(100,.001),(100,.1),(4,.3)]:
+[?2004l[?2004h>   for N in [12,20,40,60,80,100,120]:
+[?2004l[?2004h>    if N>Nmax: continue
+[?2004l[?2004h>    ts=time.time(); B=vmat(G,J,N,R,X,1); print(R,X,N,vector_result(B,norm,N,R,X,1),'time',time.time()-ts,flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/group_solver.py 100 > /app/group.log 2>&1 &
+[?2004l[1] 428
+[?2004hroot@6d9ebe23d9ab:/app# tail -20 /app/group.log; head -18 /app/adaptive.log; jobs -l
+[?2004lbuilt 10000 4.243891477584839
+100 0.001 12 [ 0.06808915  0.16937382 -0.49305157] time 0.09857845306396484
+100 0.001 20 [ 0.06808983  0.16952766 -0.49496542] time 0.10537004470825195
+100 0.001 40 [ 0.06809008  0.16958512 -0.49566369] time 0.22881484031677246
+Traceback (most recent call last):
+  File "/app/group_solver.py", line 59, in <module>
+    ts=time.time(); B=vmat(G,J,N,R,X,1); print(R,X,N,vector_result(B,norm,N,R,X,1),'time',time.time()-ts,flush=True)
+                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/group_solver.py", line 46, in vector_result
+    sol=solve(b,np.stack([sd,st],axis=1),assume_a='pos'); DD=sd@sol[:,0]; DT=sd@sol[:,1]; TT=st@sol[:,1]
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/scipy/linalg/_basic.py", line 202, in solve
+    a1 = np.atleast_2d(_asarray_validated(a, check_finite=check_finite))
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/scipy/_lib/_util.py", line 409, in _asarray_validated
+    a = toarray(a)
+        ^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/numpy/lib/_function_base_impl.py", line 665, in asarray_chkfinite
+    raise ValueError(
+ValueError: array must not contain infs or NaNs
+[1]+  Exit 1                  OPENBLAS_NUM_THREADS=1 python3 /app/group_solver.py 100 > /app/group.log 2>&1
+critical energy 0.7999999999999993
+0.001 8 [ 78.47372592  89.07670738 108.36559008 113.37672399] err 0 time 2.0414888858795166
+/app/scatter.py:105: RuntimeWarning: invalid value encountered in divide
+  print(E,o,q[1:5], 'err',np.max(abs(q/qprev-1)[1:]) if qprev is not None else 0,'time',time.time()-ts,flush=True); qprev=q
+0.001 16 [ 78.47372592  89.07670738 108.36559008 113.37672399] err 5.960787419212465e-13 time 2.594494104385376
+0.001 24 [ 78.47372592  89.07670738 108.36559008 113.37672399] err 4.4875214655348827e-13 time 3.6387314796447754
+0.001 32 [ 78.47372592  89.07670738 108.36559008 113.37672399] err 3.5693670241698783e-13 time 4.449600458145142
+0.05 8 [21.21409033 24.22863539 29.35959395 30.79990938] err 0 time 0.17100024223327637
+0.05 16 [21.21409033 24.22863539 29.35959395 30.79990938] err 1.1479706074624119e-13 time 0.2005929946899414
+0.05 24 [21.21409033 24.22863539 29.35959395 30.79990938] err 8.681944052568724e-14 time 0.5089614391326904
+0.05 32 [21.21409033 24.22863539 29.35959395 30.79990938] err 2.3314683517128287e-14 time 0.8022670745849609
+0.2 8 [13.33939049 15.28516671 18.46411088 19.4101186 ] err 0 time 0.2709505558013916
+0.2 16 [13.33939049 15.28516671 18.46411088 19.4101186 ] err 3.426148253993233e-13 time 0.2607128620147705
+0.2 24 [13.33939049 15.28516671 18.46411088 19.4101186 ] err 1.8207657603852567e-13 time 0.34857845306396484
+0.2 32 [13.33939049 15.28516671 18.46411088 19.4101186 ] err 3.2451819009793326e-13 time 0.3906681537628174
+0.6 8 [ 9.08241908 10.60219365 12.71096284 13.45327711] err 0 time 0.1799321174621582
+0.6 16 [ 9.08241908 10.60219365 12.71096284 13.45327711] err 5.294653604437372e-13 time 0.1684122085571289
+0.6 24 [ 9.08241908 10.60219365 12.71096284 13.45327711] err 1.7563728249569976e-13 time 0.24952340126037598
+[?2004hroot@6d9ebe23d9ab:/app# cat > /app/energy.py <<'PY'
+[?2004l[?2004h> import numpy as np, math, time
+[?2004l[?2004h> from scipy.interpolate import CubicSpline
+[?2004l[?2004h> from scipy.special import eval_genlaguerre, gammaln, roots_legendre
+[?2004l[?2004h> from scatter import Scatter
+[?2004l[?2004h> 
+[?2004l[?2004h> def energy_nodes(n=16,du=.18,umax=25):
+[?2004l[?2004h>  z,w=roots_legendre(n); bounds=np.arange(0,umax+du*.5,du); bounds[-1]=umax
+[?2004l[?2004h>  u=((bounds[:-1]+bounds[1:])[:,None]/2+(bounds[1:]-bounds[:-1])[:,None]/2*z).ravel()
+[?2004l[?2004h>  wt=((bounds[1:]-bounds[:-1])[:,None]/2*w).ravel()
+[?2004l[?2004h>  return u*u,wt*2*u
+[?2004l[?2004h> 
+[?2004l[?2004h> def radial_stable(t,wt,Q,N,l):
+[?2004l[?2004h>  J={}; logt=np.log(t)
+[?2004l[?2004h>  for L in range(1,2*N+l):
+[?2004l[?2004h>   K=(2*(N-1)+l-L)//2
+[?2004l[?2004h>   if K<0: continue
+[?2004l[?2004h>   F=np.array([eval_genlaguerre(q,L+.5,t)*np.exp(.5*(L*logt-t+gammaln(q+1)-gammaln(q+L+1.5))) for q in range(K+1)])
+[?2004l[?2004h>   J[L]=(F*(wt*t*Q[L]))@F.T
+[?2004l[?2004h>  return J
+[?2004l[?2004h> 
+[?2004l[?2004h> class CrossSections:
+[?2004l[?2004h>  def __init__(self,A,Emin,Emax,Lmax,spacing=.05,order=16):
+[?2004l[?2004h>   self.s=Scatter(A); em=self.s.em
+[?2004l[?2004h>   # log grid, and clustered grids on both sides of the orbiting endpoint
+[?2004l[?2004h>   grid=list(np.arange(math.log(Emin),math.log(Emax)+spacing,spacing))
+[?2004l[?2004h>   for sign in [-1,1]:
+[?2004l[?2004h>    d=np.exp(np.arange(math.log(1e-6),math.log(1.)+.15,.15))
+[?2004l[?2004h>    es=em*(1+sign*d); es=es[(es>Emin)&(es<Emax)]
+[?2004l[?2004h>    grid.extend(np.log(es))
+[?2004l[?2004h>   grid=np.unique(grid); ts=time.time(); vals=[]
+[?2004l[?2004h>   for i,z in enumerate(grid):
+[?2004l[?2004h>    vals.append(self.s.Q(math.exp(z),Lmax,order))
+[?2004l[?2004h>    if i%100==0: print('scatter grid',i,len(grid),'time',time.time()-ts,flush=True)
+[?2004l[?2004h>   self.grid=grid; self.vals=np.array(vals)
+[?2004l[?2004h>   self.interp=CubicSpline(grid,self.vals,axis=0)
+[?2004l[?2004h>  def evaluate(self,E):
+[?2004l[?2004h>   return self.interp(np.log(E)).T
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  import sys
+[?2004l[?2004h>  A=float(sys.argv[1]) if len(sys.argv)>1 else 0
+[?2004l[?2004h>  C=CrossSections(A,1e-7,30000,32,.04)
+[?2004l[?2004h>  np.savez('/app/cross%g.npz'%A,grid=C.grid,vals=C.vals)
+[?2004l[?2004h>  rng=np.random.default_rng(43)
+[?2004l[?2004h>  worst=np.zeros(32)
+[?2004l[?2004h>  for E in np.exp(rng.uniform(math.log(.005),math.log(2000),80)):
+[?2004l[?2004h>   q=C.s.Q(E,32,24); qi=C.evaluate(np.array([E]))[:,0]
+[?2004l[?2004h>   worst=np.maximum(worst,abs(qi[1:]/q[1:]-1))
+[?2004l[?2004h>  print('interpolation errors',worst,flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 > /app/energy.log 2>&1 &
+[?2004l[1] 450
+[?2004hroot@6d9ebe23d9ab:/app# kill 450 2>/dev/null; tail -6 /app/energy.log
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/group_solver.py'; s=open(p).read().replace('t,w=roots_genlaguerre(max(256,2*Nmax+32),.5); Q=np.full((2*Nmax+2,len(t)),np.pi)\n J=radial((t,w),Q,Nmax,1)','from energy import energy_nodes,radial_stable\n t,w=energy_nodes(20,.16,25); Q=np.full((2*Nmax+2,len(t)),np.pi)\n J=radial_stable(t,w,Q,Nmax,1)'); open(p,'w').write(s)
+[?2004l[?2004h> p='/app/energy.py'; s=open(p).read().replace('1e-7,30000,32,.04','1e-4,30000,24,.04'); open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/group_solver.py 120 > /app/group.log 2>&1 &
+[?2004l[2] 470
+[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 > /app/energy.log 2>&1 &
+[?2004l[3] 471
+[?2004hroot@6d9ebe23d9ab:/app# tail -22 /app/group.log; tail -10 /app/energy.log; jobs -l
+[?2004lbuilt 14400 8.246864795684814
+100 0.001 12 [ 0.06808915  0.16937381 -0.49305149] time 0.11601781845092773
+100 0.001 20 [ 0.06808983  0.16952765 -0.49496528] time 0.14023280143737793
+100 0.001 40 [ 0.06809008  0.1695851  -0.49566345] time 0.26375603675842285
+100 0.001 60 [ 0.06809011  0.16959307 -0.49575888] time 0.5881242752075195
+[1]   Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 > /app/energy.log 2>&1
+scatter grid 0 676 time 1.0729050636291504
+[2]-   470 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/group_solver.py 120 > /app/group.log 2>&1 &
+[3]+   471 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 > /app/energy.log 2>&1 &
+[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+[?2004l[?2004h> from scatter import Scatter
+[?2004l[?2004h> import time
+[?2004l[?2004h> S=Scatter(0)
+[?2004l[?2004h> for E in [.0001,.001,.01,.1,.79,.81,1,10]:
+[?2004l[?2004h>  t=time.time(); q=S.Q(E,12,12)
+[?2004l[?2004h>  print(E,time.time()-t,q[1:4],flush=True)
+[?2004l[?2004h> PY
+[?2004l0.0001 1.3684139251708984 [169.31101764 191.84011283 233.58197047]
+0.001 0.5883805751800537 [ 78.47372592  89.07670738 108.36559008]
+0.01 0.31444668769836426 [36.33719373 41.38066792 50.25293477]
+0.1 0.20908212661743164 [16.82784197 19.24419997 23.28855944]
+0.79 0.30257487297058105 [ 8.17975664  9.67402718 11.54716414]
+0.81 0.07279109954833984 [ 8.10515281  9.59181053 11.44918919]
+1 0.017250776290893555 [ 7.5377255   8.85666264 10.73747574]
+10 0.003777742385864258 [2.6872665  3.17728552 3.50509126]
+[?2004hroot@6d9ebe23d9ab:/app# tail -30 /app/group.log; tail -8 /app/energy.log; jobs -l
+[?2004lbuilt 14400 8.246864795684814
+100 0.001 12 [ 0.06808915  0.16937381 -0.49305149] time 0.11601781845092773
+100 0.001 20 [ 0.06808983  0.16952765 -0.49496528] time 0.14023280143737793
+100 0.001 40 [ 0.06809008  0.1695851  -0.49566345] time 0.26375603675842285
+100 0.001 60 [ 0.06809011  0.16959307 -0.49575888] time 0.5881242752075195
+100 0.001 80 [ 0.06809012  0.16959516 -0.49578365] time 1.322927474975586
+100 0.001 100 [ 0.06809012  0.16959588 -0.49579224] time 2.786389112472534
+100 0.001 120 [ 0.06809012  0.16959618 -0.49579577] time 3.3092403411865234
+100 0.1 12 [ 0.09968192  0.16779635 -0.51092803] time 0.11954426765441895
+100 0.1 20 [ 0.09972375  0.16788536 -0.51213979] time 0.1513524055480957
+100 0.1 40 [ 0.09973519  0.16791113 -0.51248066] time 0.31130218505859375
+100 0.1 60 [ 0.09973625  0.16791363 -0.51251299] time 0.5939056873321533
+100 0.1 80 [ 0.09973646  0.16791413 -0.51251943] time 1.058387041091919
+100 0.1 100 [ 0.09973652  0.16791427 -0.51252124] time 1.9317896366119385
+100 0.1 120 [ 0.09973654  0.16791432 -0.51252186] time 3.260988473892212
+4 0.3 12 [ 0.37686236  0.17649876 -0.44240262] time 0.13791489601135254
+4 0.3 20 [ 0.37686324  0.17649939 -0.44241185] time 0.14104199409484863
+4 0.3 40 [ 0.37686326  0.17649941 -0.44241207] time 0.28452467918395996
+4 0.3 60 [ 0.37686326  0.17649941 -0.44241207] time 0.6133363246917725
+4 0.3 80 [ 0.37686326  0.17649941 -0.44241207] time 1.057784080505371
+4 0.3 100 [ 0.37686326  0.17649941 -0.44241207] time 1.8745079040527344
+4 0.3 120 [ 0.37686326  0.17649941 -0.44241207] time 3.428610324859619
+[2]-  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/group_solver.py 120 > /app/group.log 2>&1
+scatter grid 0 676 time 1.0729050636291504
+[3]+   471 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 > /app/energy.log 2>&1 &
+[?2004hroot@6d9ebe23d9ab:/app# kill 471 2>/dev/null; cp /app/scatter.py /app/scatter_strict.py
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/scatter.py'; s=open(p).read().replace('tol=2e-9','tol=1e-8').replace('segments(0,20,0)','segments(0,17,0)').replace('segments(-20,','segments(-17,').replace('area*2e-8','area*2e-7').replace('2e-9*abs(I2)','2e-8*abs(I2)'); open(p,'w').write(s)
+[?2004l[?2004h> p='/app/group_solver.py'; s=open(p).read().replace('if (h+L)%2!=1: continue','if (h+L)%2!=1 or L>h+1: continue'); open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[3]+  Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 > /app/energy.log 2>&1
+[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/scat_compare.log 2>&1 &
+[?2004l[?2004h> from scatter import Scatter
+[?2004l[?2004h> from scatter_strict import Scatter as Strict
+[?2004l[?2004h> import time,numpy as np
+[?2004l[?2004h> for A in [0,.4,.8]:
+[?2004l[?2004h>  S=Scatter(A); SS=Strict(A)
+[?2004l[?2004h>  for E in [.001,.01,.1,SS.em*.99,SS.em*1.01,1,10,100]:
+[?2004l[?2004h>   ts=time.time(); q=S.Q(E,32,12); elapsed=time.time()-ts; qr=SS.Q(E,32,16)
+[?2004l[?2004h>   print(A,E,elapsed,np.max(abs(q[1:]/qr[1:]-1)),q[1:4],flush=True)
+[?2004l[?2004h> PY
+[?2004l[1] 533
+[?2004hroot@6d9ebe23d9ab:/app# tail -12 /app/scat_compare.log; jobs -l
+[?2004l0.4 1.575474302630171 0.042180776596069336 3.504974088741619e-13 [4.78839875 5.67829625 6.41954281]
+0.4 1 0.040261268615722656 1.08067042758897e-07 [5.37015401 6.32389603 7.19209301]
+0.4 10 0.008538246154785156 2.2082335959794364e-13 [2.90355107 3.25339989 3.49557978]
+0.4 100 0.008006095886230469 1.7852386235972517e-13 [2.33440098 2.58024834 2.71384092]
+0.8 0.001 0.33565306663513184 1.0755304402643162e-07 [ 9.26716221 11.01923169 12.23295071]
+0.8 0.01 0.13894104957580566 1.5485230686618223e-07 [6.3057712  7.36782185 8.05609909]
+0.8 0.1 0.06815528869628906 1.724422878934817e-07 [4.64032815 5.2953252  5.70626924]
+0.8 5.460439802903537 0.020945310592651367 6.804446928132535e-08 [3.27845864 3.52979443 3.70100169]
+0.8 5.5707517181137085 0.05163311958312988 7.149836278586008e-14 [3.27368792 3.52382091 3.69446559]
+0.8 1 0.04082369804382324 1.384736560972044e-07 [3.68866828 4.08474081 4.33782693]
+0.8 10 0.013489723205566406 3.9768188742073107e-13 [3.11060695 3.29562655 3.44143945]
+0.8 100 0.00926065444946289 2.1649348980190553e-14 [2.85984393 2.95794087 3.01237445]
+[1]+  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/scat_compare.log 2>&1
+from scatter import Scatter
+from scatter_strict import Scatter as Strict
+import time,numpy as np
+for A in [0,.4,.8]:
+ S=Scatter(A); SS=Strict(A)
+ for E in [.001,.01,.1,SS.em*.99,SS.em*1.01,1,10,100]:
+  ts=time.time(); q=S.Q(E,32,12); elapsed=time.time()-ts; qr=SS.Q(E,32,16)
+  print(A,E,elapsed,np.max(abs(q[1:]/qr[1:]-1)),q[1:4],flush=True)
+PY
+
+[?2004hroot@6d9ebe23d9ab:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/energy.py'; s=open(p).read().replace('C=CrossSections(A,1e-4,30000,24,.04)','C=CrossSections(A,1e-4,30000,48,.03,12)').replace('q=C.s.Q(E,32,24)','q=C.s.Q(E,48,16)').replace('worst=np.zeros(32)','worst=np.zeros(48)'); open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 > /app/energy.log 2>&1 &
+[?2004l[1] 554
+[?2004hroot@6d9ebe23d9ab:/app# tail -8 /app/energy.log
+[?2004lscatter grid 0 839 time 0.8588175773620605
+[?2004hroot@6d9ebe23d9ab:/app# cat > /app/test_real.py <<'PY'
+[?2004l[?2004h> import numpy as np, math, time, sys
+[?2004l[?2004h> from scipy.interpolate import CubicSpline
+[?2004l[?2004h> from solver import matrix
+[?2004l[?2004h> from group_solver import groups,vmat,vector_result
+[?2004l[?2004h> from energy import energy_nodes,radial_stable
+[?2004l[?2004h> from scipy.linalg import solve
+[?2004l[?2004h> A=float(sys.argv[1]) if len(sys.argv)>1 else 0
+[?2004l[?2004h> D=np.load('/app/cross%g.npz'%A); interp=CubicSpline(D['grid'],D['vals'],axis=0)
+[?2004l[?2004h> W2=np.load('/app/weights12.npz')['w2']; G,norm=groups(120,100)
+[?2004l[?2004h> for T in [.2,1,10,50]:
+[?2004l[?2004h>  t,wt=energy_nodes(20,.12,25); Q0=interp(np.log(np.maximum(t*T,1e-4))).T
+[?2004l[?2004h>  for cap in [12,24,48]:
+[?2004l[?2004h>   Q=np.concatenate([Q0[:cap+1],np.tile(Q0[cap],(241-cap,1))])
+[?2004l[?2004h>   J1=radial_stable(t,wt,Q,120,1); J2=radial_stable(t,wt,Q,12,2)
+[?2004l[?2004h>   for R,X in [(1,.4),(4,.3),(100,.001),(100,.1),(100,.95)]:
+[?2004l[?2004h>    B2=matrix(W2,J2,12,2,R,X,T); S=np.zeros(24); S[0]=2.5*X; S[12]=2.5*(1-X)
+[?2004l[?2004h>    visc=2*T/5*(S@solve(B2,S,assume_a='pos'))
+[?2004l[?2004h>    for N in [20,40,80,120]:
+[?2004l[?2004h>     B=vmat(G,J1,N,R,X,T); res=vector_result(B,norm,N,R,X,T)
+[?2004l[?2004h>     print(A,T,cap,R,X,N,visc,*res,flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# tail -8 /app/energy.log; jobs -l; OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+[?2004l[?2004h> from solver import *
+[?2004l[?2004h> W=np.load('/app/weights12.npz');t,w=roots_genlaguerre(96,.5); Q=np.full((26,len(t)),np.pi)
+[?2004l[?2004h> J1=radial((t,w),Q,12,1);J2=radial((t,w),Q,12,2)
+[?2004l[?2004h> B=matrix(W['w2'],J2,1,2,1,.5,1)
+[?2004l[?2004h> s=np.array([1.25,1.25]); print('first viscosity',.4*s@solve(B,s), 'analytic',5/(16*math.sqrt(math.pi)))
+[?2004l[?2004h> print('first conductivity analytic',75/(64*math.sqrt(math.pi)))
+[?2004l[?2004h> PY
+[?2004lscatter grid 0 839 time 0.8588175773620605
+[1]+   554 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 > /app/energy.log 2>&1 &
+first viscosity 0.17630924475013246 analytic 0.17630924485867386
+first conductivity analytic 0.6611596682200269
+[?2004hroot@6d9ebe23d9ab:/app# cat /proc/554/status | head -25; tail -4 /app/energy.log; date; ls -lh /app/cross* 2>/dev/null
+[?2004lName:	python3
+Umask:	0022
+State:	R (running)
+Tgid:	554
+Ngid:	0
+Pid:	554
+PPid:	55
+TracerPid:	0
+Uid:	0	0	0	0
+Gid:	0	0	0	0
+FDSize:	256
+Groups:	0 
+NStgid:	554
+NSpid:	554
+NSpgid:	554
+NSsid:	54
+Kthread:	0
+VmPeak:	  449128 kB
+VmSize:	  298824 kB
+VmLck:	       0 kB
+VmPin:	       0 kB
+VmHWM:	  262340 kB
+VmRSS:	  113720 kB
+RssAnon:	   78512 kB
+RssFile:	   35208 kB
+scatter grid 0 839 time 0.8588175773620605
+Tue Nov  3 01:07:02 UTC 2026
+[?2004hroot@6d9ebe23d9ab:/app# kill 554 2>/dev/null
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/energy.py'; s=open(p).read().replace("if i%100==0: print('scatter grid',i,len(grid),'time',time.time()-ts,flush=True)","if i%10==0: print('scatter grid',i,len(grid),'energy',math.exp(z),'time',time.time()-ts,flush=True)"); open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[1]+  Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 > /app/energy.log 2>&1
+[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 > /app/energy.log 2>&1 &
+[?2004l[1] 618
+[?2004hroot@6d9ebe23d9ab:/app# tail -12 /app/energy.log
+[?2004lscatter grid 0 839 energy 0.00010000000000000009 time 2.8713595867156982
+[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/timing.log 2>&1 &
+[?2004l[?2004h> from scatter import Scatter
+[?2004l[?2004h> import time,math
+[?2004l[?2004h> S=Scatter(0)
+[?2004l[?2004h> for i in range(30):
+[?2004l[?2004h>  E=1e-4*math.exp(i*.03); t=time.time(); q=S.Q(E,48,12)
+[?2004l[?2004h>  print(i,E,time.time()-t,flush=True)
+[?2004l[?2004h> PY
+[?2004l[2] 638
+[?2004hroot@6d9ebe23d9ab:/app# tail -12 /app/timing.log; tail -8 /app/energy.log; kill 618 638 2>/dev/null
+[?2004l0 0.0001 3.0138278007507324
+1 0.0001030454533953517 2.1795542240142822
+2 0.00010618365465453597 1.968745470046997
+3 0.00010941742837052105 1.6651980876922607
+4 0.00011274968515793757 1.8452043533325195
+5 0.00011618342427282832 1.6559257507324219
+scatter grid 0 839 energy 0.00010000000000000009 time 2.8713595867156982
+scatter grid 10 839 energy 0.00013498588075759957 time 19.846614360809326
+[?2004hroot@6d9ebe23d9ab:/app# sed -i 's/30000,48,.03,12/30000,24,.025,12/; s/Q(E,48,16)/Q(E,24,16)/; s/zeros(48)/zeros(24)/' /app/energy.py
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# sed -i 's/\[12,24,48\]/[8,12,24]/' /app/test_real.py
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 > /app/energy.log 2>&1 &
+[?2004l[3] 661
+[?2004hroot@6d9ebe23d9ab:/app# tail -10 /app/energy.log; jobs -l
+[?2004lscatter grid 0 969 energy 0.00010000000000000009 time 0.8626132011413574
+scatter grid 10 969 energy 0.00012840254166877473 time 7.050045490264893
+scatter grid 20 969 energy 0.00016487212707001414 time 12.015406608581543
+scatter grid 30 969 energy 0.0002117000016612699 time 16.551973819732666
+scatter grid 40 969 energy 0.0002718281828459086 time 20.718410968780518
+[1]   Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 > /app/energy.log 2>&1
+[2]-  Terminated              OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/timing.log 2>&1
+from scatter import Scatter
+import time,math
+S=Scatter(0)
+for i in range(30):
+ E=1e-4*math.exp(i*.03); t=time.time(); q=S.Q(E,48,12)
+ print(i,E,time.time()-t,flush=True)
+PY
+
+[3]+   661 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 > /app/energy.log 2>&1 &
+[?2004hroot@6d9ebe23d9ab:/app# cat > /app/test_target.py <<'PY'
+[?2004l[?2004h> import numpy as np, math, time,sys
+[?2004l[?2004h> from scipy.interpolate import CubicSpline
+[?2004l[?2004h> from solver import matrix
+[?2004l[?2004h> from group_solver import groups,vmat,vector_result
+[?2004l[?2004h> from energy import energy_nodes,radial_stable
+[?2004l[?2004h> from scipy.linalg import solve
+[?2004l[?2004h> A=float(sys.argv[1]) if len(sys.argv)>1 else 0
+[?2004l[?2004h> D=np.load('/app/cross%g.npz'%A); interp=CubicSpline(D['grid'],D['vals'],axis=0)
+[?2004l[?2004h> W2=np.load('/app/weights12.npz')['w2']; G,norm=groups(120,100)
+[?2004l[?2004h> for T,R,X in [(.2,1,.4),(.2,4,.3),(.2,100,.001),(1,100,.001),(10,100,.001),(50,100,.001),(50,100,.95)]:
+[?2004l[?2004h>  t,wt=energy_nodes(20,.12,25); Q0=interp(np.log(np.maximum(t*T,1e-4))).T
+[?2004l[?2004h>  for cap in [8,12,16,24]:
+[?2004l[?2004h>   Q=np.concatenate([Q0[:cap+1],np.tile(Q0[cap],(241-cap,1))])
+[?2004l[?2004h>   J1=radial_stable(t,wt,Q,120,1); J2=radial_stable(t,wt,Q,12,2)
+[?2004l[?2004h>   for Nv in [6,8,10,12]:
+[?2004l[?2004h>    B2=matrix(W2,J2,Nv,2,R,X,T); S=np.zeros(2*Nv); S[0]=2.5*X; S[Nv]=2.5*(1-X)
+[?2004l[?2004h>    visc=2*T/5*(S@solve(B2,S,assume_a='pos'))
+[?2004l[?2004h>    if cap==24: print('visc',A,T,R,X,Nv,visc,flush=True)
+[?2004l[?2004h>   for N in [20,40,80,100,120]:
+[?2004l[?2004h>    B=vmat(G,J1,N,R,X,T); res=vector_result(B,norm,N,R,X,T)
+[?2004l[?2004h>    print('vector',A,T,cap,R,X,N,*res,flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# (while ! test -f /app/cross0.npz; do sleep 2; done; OPENBLAS_NUM_THREADS=1 python3 /app/test_target.py 0 > /app/target0.log 2>&1) &
+[?2004l[4] 699
+[?2004hroot@6d9ebe23d9ab:/app# tail -6 /app/energy.log
+[?2004lscatter grid 80 969 energy 0.0007389056098930867 time 32.24640679359436
+scatter grid 90 969 energy 0.0009487735836358837 time 34.560057640075684
+scatter grid 100 969 energy 0.0012182493960703918 time 36.60452079772949
+scatter grid 110 969 energy 0.0015642631884188797 time 38.61490225791931
+scatter grid 120 969 energy 0.0020085536923188543 time 40.30129814147949
+scatter grid 130 969 energy 0.0025790339917194276 time 41.5769739151001
+[?2004hroot@6d9ebe23d9ab:/app# tail -12 /app/energy.log; tail -8 /app/target0.log 2>/dev/null
+[?2004lscatter grid 910 969 energy 7077.384008072098 time 68.21333074569702
+scatter grid 920 969 energy 9087.540950023933 time 68.26272392272949
+scatter grid 930 969 energy 11668.633555021479 time 68.31166410446167
+scatter grid 940 969 energy 14982.822062663015 time 68.35975527763367
+scatter grid 950 969 energy 19238.3243421693 time 68.40805244445801
+scatter grid 960 969 energy 24702.497429827858 time 68.45734310150146
+interpolation errors [2.57242489e-07 1.16456541e-06 4.25832911e-06 3.44913848e-06
+ 1.62359713e-05 2.66079438e-05 3.74524757e-05 6.17711845e-05
+ 8.00211933e-05 6.58950418e-05 9.71742061e-05 1.35783487e-04
+ 1.29460315e-04 1.85181869e-04 1.56894542e-04 2.57132519e-04
+ 1.64364132e-04 3.23673449e-04 1.79735703e-04 3.71477077e-04
+ 3.65762661e-04 4.54102795e-04 5.25087039e-04 5.72732413e-04]
+[3]-  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 > /app/energy.log 2>&1
+vector 0.0 0.2 12 1 0.4 80 0.09078671621822082 0.03024794055272907 4.113527670593208e-17
+vector 0.0 0.2 12 1 0.4 100 0.09078671621822082 0.03024794055272907 4.2332111118208076e-17
+vector 0.0 0.2 12 1 0.4 120 0.0907867162182208 0.03024794055272906 4.2029335254656224e-17
+vector 0.0 0.2 16 1 0.4 20 0.09078671621821945 0.030247940552728947 3.400648837312995e-17
+vector 0.0 0.2 16 1 0.4 40 0.0907867162182208 0.03024794055272906 3.615286715380879e-17
+vector 0.0 0.2 16 1 0.4 80 0.09078671621822082 0.03024794055272907 3.5258808605084647e-17
+vector 0.0 0.2 16 1 0.4 100 0.09078671621822082 0.03024794055272907 3.645564301736063e-17
+vector 0.0 0.2 16 1 0.4 120 0.0907867162182208 0.03024794055272906 3.615286715380879e-17
+[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/build_weights.py 20 > /app/weights20.log 2>&1 &
+[?2004l[5] 742
+[?2004hroot@6d9ebe23d9ab:/app# tail -25 /app/target0.log; tail -8 /app/weights20.log; jobs -l
+[?2004lvector 0.0 0.2 8 1 0.4 20 0.09078671621822075 0.03024794055272936 4.622360721256138e-18
+vector 0.0 0.2 8 1 0.4 40 0.09078671621822214 0.030247940552729485 1.4929217785126538e-17
+vector 0.0 0.2 8 1 0.4 80 0.09078671621822211 0.030247940552729488 0.0
+vector 0.0 0.2 8 1 0.4 100 0.09078671621822214 0.030247940552729485 1.4929217785126538e-17
+vector 0.0 0.2 8 1 0.4 120 0.09078671621822214 0.030247940552729485 1.4929217785126538e-17
+vector 0.0 0.2 12 1 0.4 20 0.09078671621821945 0.030247940552728947 3.400648837312995e-17
+vector 0.0 0.2 12 1 0.4 40 0.0907867162182208 0.03024794055272906 4.2029335254656224e-17
+vector 0.0 0.2 12 1 0.4 80 0.09078671621822082 0.03024794055272907 4.113527670593208e-17
+vector 0.0 0.2 12 1 0.4 100 0.09078671621822082 0.03024794055272907 4.2332111118208076e-17
+vector 0.0 0.2 12 1 0.4 120 0.0907867162182208 0.03024794055272906 4.2029335254656224e-17
+vector 0.0 0.2 16 1 0.4 20 0.09078671621821945 0.030247940552728947 3.400648837312995e-17
+vector 0.0 0.2 16 1 0.4 40 0.0907867162182208 0.03024794055272906 3.615286715380879e-17
+vector 0.0 0.2 16 1 0.4 80 0.09078671621822082 0.03024794055272907 3.5258808605084647e-17
+vector 0.0 0.2 16 1 0.4 100 0.09078671621822082 0.03024794055272907 3.645564301736063e-17
+vector 0.0 0.2 16 1 0.4 120 0.0907867162182208 0.03024794055272906 3.615286715380879e-17
+visc 0.0 0.2 1 0.4 6 0.02418301495997518
+visc 0.0 0.2 1 0.4 8 0.02418301585478115
+visc 0.0 0.2 1 0.4 10 0.024183015875734282
+visc 0.0 0.2 1 0.4 12 0.024183015875986733
+vector 0.0 0.2 24 1 0.4 20 0.09078671621821945 0.030247940552728947 3.400648837312995e-17
+vector 0.0 0.2 24 1 0.4 40 0.0907867162182208 0.03024794055272906 3.615286715380879e-17
+vector 0.0 0.2 24 1 0.4 80 0.09078671621822082 0.03024794055272907 3.5258808605084647e-17
+vector 0.0 0.2 24 1 0.4 100 0.09078671621822082 0.03024794055272907 3.645564301736063e-17
+vector 0.0 0.2 24 1 0.4 120 0.0907867162182208 0.03024794055272906 3.615286715380879e-17
+weights 2 27 15521
+weights 2 28 15577
+weights 2 29 15633
+weights 2 30 15668
+weights 2 31 15703
+weights 2 32 15723
+weights 2 33 15743
+weights 2 34 15753
+[4]-   699 Running                 ( while ! test -f /app/cross0.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_target.py 0 > /app/target0.log 2>&1 ) &
+[5]+   742 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/build_weights.py 20 > /app/weights20.log 2>&1 &
+[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0.8 > /app/energy08.log 2>&1 &
+[?2004l[6] 762
+[?2004hroot@6d9ebe23d9ab:/app# tail -16 /app/target0.log; tail -6 /app/energy08.log; tail -4 /app/weights20.log; jobs -l
+[?2004lvector 0.0 0.2 16 4 0.3 100 0.0533500326674441 0.023975968561398112 -0.10827476419006572
+vector 0.0 0.2 16 4 0.3 120 0.0533500326674441 0.023975968561398112 -0.10827476419006575
+visc 0.0 0.2 4 0.3 6 0.042889796607398625
+visc 0.0 0.2 4 0.3 8 0.04288980985677869
+visc 0.0 0.2 4 0.3 10 0.04288981237695752
+visc 0.0 0.2 4 0.3 12 0.04288981293157331
+vector 0.0 0.2 24 4 0.3 20 0.053350032620479236 0.023975968545837143 -0.10827476563601028
+vector 0.0 0.2 24 4 0.3 40 0.05335003266743535 0.023975968561393907 -0.10827476418955392
+vector 0.0 0.2 24 4 0.3 80 0.05335003266744412 0.023975968561398105 -0.10827476419006575
+vector 0.0 0.2 24 4 0.3 100 0.05335003266744411 0.023975968561398112 -0.1082747641900657
+vector 0.0 0.2 24 4 0.3 120 0.05335003266744411 0.023975968561398112 -0.10827476419006572
+vector 0.0 0.2 8 100 0.001 20 0.009128568997267212 0.02167748901658878 -0.12332720287991927
+vector 0.0 0.2 8 100 0.001 40 0.009128570997710033 0.021677671179879125 -0.1233439191684017
+vector 0.0 0.2 8 100 0.001 80 0.009128571239590528 0.02167770369382017 -0.12334497956233126
+vector 0.0 0.2 8 100 0.001 100 0.00912857125991392 0.021677704534990527 -0.12334503232398077
+vector 0.0 0.2 8 100 0.001 120 0.00912857126453353 0.021677705567236163 -0.12334502040468234
+[5]-  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/build_weights.py 20 > /app/weights20.log 2>&1
+scatter grid 30 969 energy 0.0002117000016612699 time 16.448583364486694
+scatter grid 40 969 energy 0.0002718281828459086 time 21.312744617462158
+scatter grid 50 969 energy 0.00034903429574619063 time 27.810983657836914
+scatter grid 60 969 energy 0.0004481689070338164 time 35.3505642414093
+scatter grid 70 969 energy 0.0005754602676005879 time 43.43067717552185
+scatter grid 80 969 energy 0.0007389056098930867 time 50.942537784576416
+weights 2 38 15772
+weights 2 39 15773
+weights 2 40 15773
+saved (12947, 5) (15773, 5)
+[4]-   699 Running                 ( while ! test -f /app/cross0.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_target.py 0 > /app/target0.log 2>&1 ) &
+[6]+   762 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0.8 > /app/energy08.log 2>&1 &
+[?2004hroot@6d9ebe23d9ab:/app# (while ! test -f /app/cross0.8.npz; do sleep 2; done; OPENBLAS_NUM_THREADS=1 python3 /app/test_target.py 0.8 > /app/target08.log 2>&1) & M[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[K&
+[?2004l[7] 790
+[?2004hroot@6d9ebe23d9ab:/app# tail -15 /app/target0.log; tail -6 /app/energy08.log; tail -6 /app/target08.log 2>/dev/null
+[?2004lvector 0.0 1 12 100 0.001 120 0.04173219013761361 0.10472432301879274 -0.007461348085004311
+vector 0.0 1 16 100 0.001 20 0.041732182375614095 0.104721016315727 -0.007414348539001503
+vector 0.0 1 16 100 0.001 40 0.0417321886677883 0.10472376697504532 -0.007453155927002525
+vector 0.0 1 16 100 0.001 80 0.0417321899583158 0.10472422655782886 -0.007460106638649687
+vector 0.0 1 16 100 0.001 100 0.04173219013393837 0.10472431715877911 -0.007461311092148061
+vector 0.0 1 16 100 0.001 120 0.04173219013759216 0.10472432300969105 -0.007461347957634987
+visc 0.0 1 100 0.001 6 1.1065624702039827
+visc 0.0 1 100 0.001 8 1.1065625495986013
+visc 0.0 1 100 0.001 10 1.10656255490567
+visc 0.0 1 100 0.001 12 1.106562555340388
+vector 0.0 1 24 100 0.001 20 0.041732182375614095 0.10472101631572696 -0.007414348539001499
+vector 0.0 1 24 100 0.001 40 0.04173218866778817 0.10472376697500206 -0.0074531559263046705
+vector 0.0 1 24 100 0.001 80 0.04173218995831509 0.10472422655748548 -0.007460106634353393
+vector 0.0 1 24 100 0.001 100 0.04173219013393612 0.10472431715766066 -0.007461311077458787
+vector 0.0 1 24 100 0.001 120 0.041732190137589865 0.10472432300848894 -0.007461347942487769
+[6]-  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0.8 > /app/energy08.log 2>&1
+interpolation errors [3.28943495e-09 4.65741889e-09 1.15853935e-08 2.85832681e-08
+ 3.48138924e-08 6.38883229e-08 1.56155984e-07 1.18610853e-07
+ 3.79560259e-07 2.30474028e-07 5.92155617e-07 7.67443741e-07
+ 5.56624377e-07 1.57483510e-06 2.18705633e-07 2.36255195e-06
+ 1.29470388e-06 2.64898034e-06 3.17788925e-06 1.91285749e-06
+ 5.19748302e-06 7.27513399e-07 6.62152393e-06 3.60609142e-06]
+vector 0.8 0.2 8 1 0.4 40 0.22223046399192134 0.0764365351830928 1.8713534318878307e-18
+vector 0.8 0.2 8 1 0.4 80 0.22223046399192126 0.07643653518309282 0.0
+vector 0.8 0.2 8 1 0.4 100 0.22223046399192126 0.0764365351830928 -3.2197752097534625e-17
+vector 0.8 0.2 8 1 0.4 120 0.22223046399192134 0.0764365351830928 1.8713534318878307e-18
+vector 0.8 0.2 12 1 0.4 20 0.2222304639905185 0.07643653518295161 1.2100669214978249e-16
+vector 0.8 0.2 12 1 0.4 40 0.22223046399181445 0.07643653518307165 1.1006475367250295e-16
+[?2004hroot@6d9ebe23d9ab:/app# cat > /app/test_quad.py <<'PY'
+[?2004l[?2004h> import numpy as np, math, sys
+[?2004l[?2004h> from scipy.interpolate import CubicSpline
+[?2004l[?2004h> from energy import energy_nodes,radial_stable
+[?2004l[?2004h> from group_solver import groups,vmat,vector_result
+[?2004l[?2004h> from solver import matrix
+[?2004l[?2004h> from scipy.linalg import solve
+[?2004l[?2004h> A=float(sys.argv[1]) if len(sys.argv)>1 else 0
+[?2004l[?2004h> D=np.load('/app/cross%g.npz'%A); C=CubicSpline(D['grid'],D['vals'],axis=0)
+[?2004l[?2004h> W=np.load('/app/weights20.npz')['w2']; G,norm=groups(120,100)
+[?2004l[?2004h> for T,R,X in [(.2,4,.3),(.2,100,.001),(1,100,.001),(50,100,.001),(50,100,.95)]:
+[?2004l[?2004h>  for du in [.16,.08,.04]:
+[?2004l[?2004h>   t,w=energy_nodes(20,du,25); Q0=C(np.log(np.maximum(t*T,1e-4))).T
+[?2004l[?2004h>   Q=np.concatenate([Q0,np.tile(Q0[-1],(241-(Q0.shape[0]-1),1))])
+[?2004l[?2004h>   J=radial_stable(t,w,Q,120,1); J2=radial_stable(t,w,Q,20,2)
+[?2004l[?2004h>   B=vmat(G,J,120,R,X,T); res=vector_result(B,norm,120,R,X,T)
+[?2004l[?2004h>   vs=[]
+[?2004l[?2004h>   for N in [12,16,20]:
+[?2004l[?2004h>    B2=matrix(W,J2,N,2,R,X,T); S=np.zeros(2*N);S[0]=2.5*X;S[N]=2.5*(1-X)
+[?2004l[?2004h>    vs.append(2*T/5*(S@solve(B2,S,assume_a='pos')))
+[?2004l[?2004h>   print(A,T,R,X,du,vs,res,flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/test_quad.py 0 > /app/quad0.log 2>&1 &
+[?2004l[8] 848
+[?2004hroot@6d9ebe23d9ab:/app# tail -12 /app/quad0.log; tail -10 /app/target0.log; tail -10 /app/target08.log; jobs -l
+[?2004lvector 0.0 1 24 100 0.001 20 0.041732182375614095 0.10472101631572696 -0.007414348539001499
+vector 0.0 1 24 100 0.001 40 0.04173218866778817 0.10472376697500206 -0.0074531559263046705
+vector 0.0 1 24 100 0.001 80 0.04173218995831509 0.10472422655748548 -0.007460106634353393
+vector 0.0 1 24 100 0.001 100 0.04173219013393612 0.10472431715766066 -0.007461311077458787
+vector 0.0 1 24 100 0.001 120 0.041732190137589865 0.10472432300848894 -0.007461347942487769
+vector 0.0 10 8 100 0.001 20 0.2579440585303026 0.6717148531164389 -0.31544886573348196
+vector 0.0 10 8 100 0.001 40 0.25794417050820956 0.6717407668530747 -0.31552905329137515
+vector 0.0 10 8 100 0.001 80 0.2579441796136765 0.6717431660015869 -0.31553600150067856
+vector 0.0 10 8 100 0.001 100 0.25794418176433226 0.6717437353756023 -0.3155376495955665
+vector 0.0 10 8 100 0.001 120 0.2579441821633088 0.6717438495116378 -0.31553796739923745
+vector 0.8 0.2 8 1 0.4 20 0.22223046399062385 0.0764365351829726 1.6796971419745074e-17
+vector 0.8 0.2 8 1 0.4 40 0.22223046399192134 0.0764365351830928 1.8713534318878307e-18
+vector 0.8 0.2 8 1 0.4 80 0.22223046399192126 0.07643653518309282 0.0
+vector 0.8 0.2 8 1 0.4 100 0.22223046399192126 0.0764365351830928 -3.2197752097534625e-17
+vector 0.8 0.2 8 1 0.4 120 0.22223046399192134 0.0764365351830928 1.8713534318878307e-18
+vector 0.8 0.2 12 1 0.4 20 0.2222304639905185 0.07643653518295161 1.2100669214978249e-16
+vector 0.8 0.2 12 1 0.4 40 0.22223046399181445 0.07643653518307165 1.1006475367250295e-16
+vector 0.8 0.2 12 1 0.4 80 0.22223046399181445 0.07643653518307167 8.858221284561861e-17
+vector 0.8 0.2 12 1 0.4 100 0.22223046399181445 0.07643653518307165 1.0552305242499651e-16
+vector 0.8 0.2 12 1 0.4 120 0.22223046399181445 0.07643653518307165 1.691195622362487e-16
+[4]    699 Running                 ( while ! test -f /app/cross0.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_target.py 0 > /app/target0.log 2>&1 ) &
+[7]-   790 Running                 ( while ! test -f /app/cross0.8.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_target.py 0.8 > /app/target08.log 2>&1 ) &
+[8]+   848 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/test_quad.py 0 > /app/quad0.log 2>&1 &
+[?2004hroot@6d9ebe23d9ab:/app# python3 - <<'PY'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> for f in ['/app/target0.log','/app/target08.log']:
+[?2004l[?2004h>  d={}
+[?2004l[?2004h>  for line in open(f):
+[?2004l[?2004h>   p=line.split()
+[?2004l[?2004h>   if p[0]=='vector' and p[6]=='120':
+[?2004l[?2004h>    a,t,cap,r,x,n=map(float,p[1:7]);d[t,r,x,cap]=np.array(list(map(float,p[7:])))
+[?2004l[?2004h>  for t,r,x,cap in sorted(d):
+[?2004l[?2004h>   if cap==24 and (t,r,x,8) in d:
+[?2004l[?2004h>    q=d[t,r,x,cap]; q8=d[t,r,x,8]
+[?2004l[?2004h>    print(f,t,r,x,'cap8 relative',(q8/q-1)[:2],'alpha abs',q8[2]-q[2])
+[?2004l[?2004h> PY
+[?2004l/app/target0.log 0.2 1.0 0.4 cap8 relative [1.46549439e-14 1.39888101e-14] alpha abs -2.122364936868225e-17
+/app/target0.log 0.2 4.0 0.3 cap8 relative [8.26871904e-12 7.74003084e-12] alpha abs -1.2199352639186145e-11
+/app/target0.log 0.2 100.0 0.001 cap8 relative [4.52171633e-12 3.20084181e-10] alpha abs -4.0848970039863985e-10
+/app/target0.log 1.0 100.0 0.001 cap8 relative [6.94244662e-12 1.00560715e-09] alpha abs -1.579542966041736e-09
+[?2004hroot@6d9ebe23d9ab:/app# date; tail -8 /app/quad0.log; tail -8 /app/target08.log; for p in 848 699 790; do grep -E 'State|VmRSS|Threads' /proc/$p/status 2>/dev/null; done
+[?2004lTue Nov  3 01:13:26 UTC 2026
+0.0 0.2 4 0.3 0.16 [np.float64(0.04288979328212622), np.float64(0.04288979349878202), np.float64(0.04288979352483759)] [ 0.05335003  0.02397599 -0.10827317]
+0.0 0.2 4 0.3 0.08 [np.float64(0.0428898086662507), np.float64(0.04288980888293805), np.float64(0.04288980890898831)] [ 0.05335003  0.02397598 -0.10827426]
+vector 0.8 0.2 8 4 0.3 80 0.12734567141760084 0.06177557640510173 -0.34468563596075263
+vector 0.8 0.2 8 4 0.3 100 0.12734567141760086 0.06177557640510176 -0.34468563596075347
+vector 0.8 0.2 8 4 0.3 120 0.12734567141760086 0.06177557640510176 -0.34468563596075347
+vector 0.8 0.2 12 4 0.3 20 0.1273456703024382 0.06177557522532681 -0.3446855954542961
+vector 0.8 0.2 12 4 0.3 40 0.12734567141346256 0.0617755764012424 -0.3446856358203914
+vector 0.8 0.2 12 4 0.3 80 0.12734567141410452 0.06177557640207512 -0.34468563584622
+vector 0.8 0.2 12 4 0.3 100 0.1273456714141046 0.06177557640207517 -0.3446856358462207
+vector 0.8 0.2 12 4 0.3 120 0.1273456714141046 0.06177557640207515 -0.34468563584622075
+State:	R (running)
+VmRSS:	  221232 kB
+Threads:	1
+State:	S (sleeping)
+VmRSS:	    2196 kB
+Threads:	1
+State:	S (sleeping)
+VmRSS:	    2196 kB
+Threads:	1
+[?2004hroot@6d9ebe23d9ab:/app# python3 - <<'PY'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> for f in ['/app/target0.log','/app/target08.log']:
+[?2004l[?2004h>  d={}
+[?2004l[?2004h>  for line in open(f):
+[?2004l[?2004h>   p=line.split()
+[?2004l[?2004h>   if p[0]=='vector' and p[6]=='120':
+[?2004l[?2004h>    a,t,cap,r,x,n=map(float,p[1:7]);d[t,r,x,int(cap)]=np.array(list(map(float,p[7:])))
+[?2004l[?2004h>  for key,q in sorted(d.items()):
+[?2004l[?2004h>   t,r,x,cap=key
+[?2004l[?2004h>   if cap==24 and (t,r,x,8) in d:
+[?2004l[?2004h>    q8=d[t,r,x,8]; print(f,t,r,x,'cap8 relative',(q8/q-1)[:2],'alpha abs',q8[2]-q[2])
+[?2004l[?2004h> PY
+[?2004l/app/target0.log 0.2 1.0 0.4 cap8 relative [1.46549439e-14 1.39888101e-14] alpha abs -2.122364936868225e-17
+/app/target0.log 0.2 4.0 0.3 cap8 relative [8.26871904e-12 7.74003084e-12] alpha abs -1.2199352639186145e-11
+/app/target0.log 0.2 100.0 0.001 cap8 relative [4.52171633e-12 3.20084181e-10] alpha abs -4.0848970039863985e-10
+/app/target0.log 1.0 100.0 0.001 cap8 relative [6.94244662e-12 1.00560715e-09] alpha abs -1.579542966041736e-09
+/app/target0.log 10.0 100.0 0.001 cap8 relative [1.05593312e-11 1.03198916e-09] alpha abs -2.042799762680403e-09
+/app/target08.log 0.2 1.0 0.4 cap8 relative [4.80948614e-13 2.76667578e-13] alpha abs -1.8961475772801657e-16
+[?2004hroot@6d9ebe23d9ab:/app# cat > /app/knot_test.py <<'PY'
+[?2004l[?2004h> import numpy as np, math,sys,time
+[?2004l[?2004h> from scipy.interpolate import CubicSpline
+[?2004l[?2004h> from scipy.special import roots_legendre
+[?2004l[?2004h> from energy import radial_stable
+[?2004l[?2004h> from group_solver import groups,vmat,vector_result
+[?2004l[?2004h> from solver import matrix
+[?2004l[?2004h> from scipy.linalg import solve
+[?2004l[?2004h> 
+[?2004l[?2004h> def knot_nodes(grid,T,N,order=12):
+[?2004l[?2004h>  umax=math.sqrt(4*N+100)
+[?2004l[?2004h>  bounds=np.unique(np.concatenate([[0,umax],np.arange(.1,umax,.16),np.sqrt(np.exp(grid)/T)]))
+[?2004l[?2004h>  bounds=bounds[(bounds>=0)&(bounds<=umax)]
+[?2004l[?2004h>  z,w=roots_legendre(order)
+[?2004l[?2004h>  u=((bounds[:-1]+bounds[1:])[:,None]/2+(bounds[1:]-bounds[:-1])[:,None]/2*z).ravel()
+[?2004l[?2004h>  wt=((bounds[1:]-bounds[:-1])[:,None]/2*w).ravel()
+[?2004l[?2004h>  return u*u,wt*2*u
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  A=float(sys.argv[1]) if len(sys.argv)>1 else 0
+[?2004l[?2004h>  D=np.load('/app/cross%g.npz'%A); C=CubicSpline(D['grid'],D['vals'],axis=0)
+[?2004l[?2004h>  W=np.load('/app/weights20.npz')['w2']; G,norm=groups(120,100)
+[?2004l[?2004h>  for T,R,X in [(.2,4,.3),(.2,100,.001),(1,100,.001),(50,100,.001),(50,100,.95)]:
+[?2004l[?2004h>   for order in [8,12,16]:
+[?2004l[?2004h>    ts=time.time(); t,w=knot_nodes(D['grid'],T,120,order)
+[?2004l[?2004h>    Q0=C(np.log(np.maximum(t*T,1e-4))).T
+[?2004l[?2004h>    Q=np.concatenate([Q0,np.tile(Q0[-1],(241-(Q0.shape[0]-1),1))])
+[?2004l[?2004h>    J=radial_stable(t,w,Q,120,1); J2=radial_stable(t,w,Q,20,2)
+[?2004l[?2004h>    B=vmat(G,J,120,R,X,T); res=vector_result(B,norm,120,R,X,T)
+[?2004l[?2004h>    B2=matrix(W,J2,20,2,R,X,T); S=np.zeros(40);S[0]=2.5*X;S[20]=2.5*(1-X)
+[?2004l[?2004h>    visc=2*T/5*(S@solve(B2,S,assume_a='pos'))
+[?2004l[?2004h>    print(A,T,R,X,order,len(t),visc,*res,'time',time.time()-ts,flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/knot_test.py 0 > /app/knot0.log 2>&1 &
+[?2004l[9] 1045
+[?2004hroot@6d9ebe23d9ab:/app# tail -12 /app/knot0.log; tail -10 /app/quad0.log; tail -10 /app/target0.log; tail -10 /app/target08.log; jobs -l
+[?2004l0.0 0.2 4 0.3 0.16 [np.float64(0.04288979328212622), np.float64(0.04288979349878202), np.float64(0.04288979352483759)] [ 0.05335003  0.02397599 -0.10827317]
+0.0 0.2 4 0.3 0.08 [np.float64(0.0428898086662507), np.float64(0.04288980888293805), np.float64(0.04288980890898831)] [ 0.05335003  0.02397598 -0.10827426]
+0.0 0.2 4 0.3 0.04 [np.float64(0.04288980963778509), np.float64(0.04288980985447201), np.float64(0.04288980988052199)] [ 0.05335003  0.02397598 -0.10827428]
+0.0 0.2 100 0.001 0.16 [np.float64(0.24179570716783821), np.float64(0.24179570752149462), np.float64(0.24179570761858368)] [ 0.00912857  0.02167773 -0.12334345]
+0.0 0.2 100 0.001 0.08 [np.float64(0.2417958146689394), np.float64(0.24179581502263542), np.float64(0.24179581511971812)] [ 0.00912857  0.02167771 -0.12334452]
+vector 0.0 50 16 100 0.001 120 0.7322464510295497 1.9534358960622236 -0.34103823440346825
+visc 0.0 50 100 0.001 6 19.333773928336363
+visc 0.0 50 100 0.001 8 19.333779925116964
+visc 0.0 50 100 0.001 10 19.33378040007591
+visc 0.0 50 100 0.001 12 19.333780468239
+vector 0.0 50 24 100 0.001 20 0.7322461539020866 1.9533810770221696 -0.34097291120118756
+vector 0.0 50 24 100 0.001 40 0.7322464413141524 1.953433540670652 -0.34103580008447815
+vector 0.0 50 24 100 0.001 80 0.7322464468071789 1.9534348789118472 -0.3410371729842928
+vector 0.0 50 24 100 0.001 100 0.7322464497049678 1.953435578919626 -0.34103790244418836
+vector 0.0 50 24 100 0.001 120 0.7322464510295217 1.9534358960554528 -0.34103823439643693
+vector 0.8 0.2 24 4 0.3 20 0.1273456703024369 0.06177557522532559 -0.34468559545425226
+vector 0.8 0.2 24 4 0.3 40 0.12734567141345582 0.0617755764012351 -0.344685635820144
+vector 0.8 0.2 24 4 0.3 80 0.12734567141409758 0.06177557640206746 -0.3446856358459618
+vector 0.8 0.2 24 4 0.3 100 0.12734567141409758 0.06177557640206747 -0.3446856358459627
+vector 0.8 0.2 24 4 0.3 120 0.12734567141409758 0.06177557640206746 -0.34468563584596273
+vector 0.8 0.2 8 100 0.001 20 0.022334204848594885 0.05795438579486436 -0.3972431255080076
+vector 0.8 0.2 8 100 0.001 40 0.022334234192782937 0.057960606662354815 -0.39747635377674806
+vector 0.8 0.2 8 100 0.001 80 0.022334238111121004 0.05796147780858483 -0.39750824504452315
+vector 0.8 0.2 8 100 0.001 100 0.02233423833144178 0.05796152834664663 -0.3975100664809901
+vector 0.8 0.2 8 100 0.001 120 0.02233423841324092 0.05796154731629837 -0.39751074643730483
+[4]    699 Running                 ( while ! test -f /app/cross0.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_target.py 0 > /app/target0.log 2>&1 ) &
+[7]    790 Running                 ( while ! test -f /app/cross0.8.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_target.py 0.8 > /app/target08.log 2>&1 ) &
+[8]-   848 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/test_quad.py 0 > /app/quad0.log 2>&1 &
+[9]+  1045 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/knot_test.py 0 > /app/knot0.log 2>&1 &
+[?2004hroot@6d9ebe23d9ab:/app# cp /app/energy.py /app/energy_dense.py; sed -i 's/24,.025,12/24,.0125,12/; s@/app/cross%g.npz@/app/dense%g.npz@' /app/energy_dense.py
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/energy_dense.py 0 > /app/dense0.log 2>&1 &
+[?2004l[10] 1069
+[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/knot_test.py 0.8 > /app/knot08.log 2>&1 &
+[?2004l[11] 1070
+[?2004hroot@6d9ebe23d9ab:/app# kill 848 2>/dev/null; tail -10 /app/knot0.log; tail -6 /app/knot08.log; tail -4 /app/dense0.log
+[?2004lscatter grid 0 1750 energy 0.00010000000000000009 time 2.411424160003662
+scatter grid 10 1750 energy 0.00011331484530668193 time 20.584890365600586
+[?2004hroot@6d9ebe23d9ab:/app# cp /app/energy.py /app/energy_oldradial.py
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/energy.py';s=open(p).read();old="  F=np.array([eval_genlaguerre(q,L+.5,t)*np.exp(.5*(L*logt-t+gammaln(q+1)-gammaln(q+L+1.5))) for q in range(K+1)])";new="""  F=np.empty((K+1,len(t)))
+[?2004l[?2004h>   F[0]=np.exp(.5*(L*logt-t-gammaln(L+1.5)))
+[?2004l[?2004h>   if K: F[1]=(L+1.5-t)/math.sqrt(L+1.5)*F[0]
+[?2004l[?2004h>   for q in range(1,K):
+[?2004l[?2004h>    F[q+1]=((2*q+L+1.5-t)*F[q]-math.sqrt(q*(q+L+.5))*F[q-1])/math.sqrt((q+1)*(q+L+1.5))"""; assert old in s;s=s.replace(old,new);open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+[?2004l[?2004h> from energy import radial_stable,energy_nodes
+[?2004l[?2004h> from energy_oldradial import radial_stable as old
+[?2004l[?2004h> import numpy as np,time
+[?2004l[?2004h> t,w=energy_nodes(12,.2,20);Q=np.full((82,len(t)),np.pi)
+[?2004l[?2004h> ts=time.time();a=radial_stable(t,w,Q,40,1); print('new',time.time()-ts)
+[?2004l[?2004h> ts=time.time();b=old(t,w,Q,40,1);print('old',time.time()-ts)
+[?2004l[?2004h> print('max error',max(np.max(abs(a[L]-b[L]))/np.max(abs(b[L])) for L in a))
+[?2004l[?2004h> PY
+[?2004lnew 0.016469955444335938
+old 0.4966003894805908
+max error 8.389530925927763e-14
+[8]   Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/test_quad.py 0 > /app/quad0.log 2>&1
+[?2004hroot@6d9ebe23d9ab:/app# kill 1045 1070 2>/dev/null; tail -8 /app/knot0.log; tail -8 /app/knot08.log; tail -5 /app/dense0.log; jobs -l
+[?2004l0.0 0.2 4 0.3 8 7176 0.04288981028248214 0.053350033818698794 0.023975976520176634 -0.10827427406402274 time 47.634501934051514
+scatter grid 0 1750 energy 0.00010000000000000009 time 2.411424160003662
+scatter grid 10 1750 energy 0.00011331484530668193 time 20.584890365600586
+scatter grid 20 1750 energy 0.00012840254166877245 time 35.10588073730469
+[4]    699 Running                 ( while ! test -f /app/cross0.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_target.py 0 > /app/target0.log 2>&1 ) &
+[7]    790 Running                 ( while ! test -f /app/cross0.8.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_target.py 0.8 > /app/target08.log 2>&1 ) &
+[9]   1045 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/knot_test.py 0 > /app/knot0.log 2>&1 &
+[10]-  1069 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/energy_dense.py 0 > /app/dense0.log 2>&1 &
+[11]+  1070 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/knot_test.py 0.8 > /app/knot08.log 2>&1 &
+[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/knot_test.py 0 > /app/knot0.log 2>&1 &
+[?2004l[12] 1116
+[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/knot_test.py 0.8 > /app/knot08.log 2>&1 &
+[?2004l[13] 1117
+[?2004hroot@6d9ebe23d9ab:/app# tail -10 /app/knot0.log; tail -10 /app/knot08.log; tail -8 /app/target0.log; tail -8 /app/target08.log; tail -5 /app/dense0.log; jobs -l M[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Kl
+[?2004l0.0 0.2 4 0.3 8 7176 0.04288981028248214 0.053350033818698794 0.023975976520176634 -0.10827427406402283 time 8.32933259010315
+0.0 0.2 4 0.3 12 10764 0.04288981028248214 0.053350033818698774 0.023975976520176634 -0.1082742740640224 time 9.586338758468628
+[9]   Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/knot_test.py 0 > /app/knot0.log 2>&1
+[11]   Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/knot_test.py 0.8 > /app/knot08.log 2>&1
+0.8 0.2 4 0.3 8 7176 0.10456986555846527 0.1273456714141528 0.06177557640213516 -0.3446856358480207 time 7.799056053161621
+0.8 0.2 4 0.3 12 10764 0.10456986555846526 0.1273456714141528 0.06177557640213519 -0.3446856358480209 time 9.803454875946045
+vector 0.0 50 12 100 0.95 40 6.735277432157781 1.8531272377110237 -0.5314472689609224
+vector 0.0 50 12 100 0.95 80 6.735277435559151 1.8531272428220003 -0.5314472792812116
+vector 0.0 50 12 100 0.95 100 6.735277436145789 1.8531272437442932 -0.5314472811023404
+vector 0.0 50 12 100 0.95 120 6.735277436344618 1.853127244084036 -0.5314472817458178
+vector 0.0 50 16 100 0.95 20 6.7352774009594585 1.853127216221252 -0.5314472050243413
+vector 0.0 50 16 100 0.95 40 6.73527743215729 1.8531272377106502 -0.5314472689599051
+vector 0.0 50 16 100 0.95 80 6.735277435551661 1.8531272428112144 -0.5314472792590519
+vector 0.0 50 16 100 0.95 100 6.735277436134726 1.8531272437278947 -0.5314472810691002
+visc 0.8 0.2 100 0.001 8 0.5891984707099632
+visc 0.8 0.2 100 0.001 10 0.5891984911238618
+visc 0.8 0.2 100 0.001 12 0.5891984940420004
+vector 0.8 0.2 24 100 0.001 20 0.022334204848562984 0.057954385790511015 -0.39724312534113454
+vector 0.8 0.2 24 100 0.001 40 0.02233423419260007 0.057960606625750526 -0.39747635240609824
+vector 0.8 0.2 24 100 0.001 80 0.02233423811074105 0.057961477728143286 -0.39750824206942087
+vector 0.8 0.2 24 100 0.001 100 0.022334238331022827 0.05796152825730915 -0.39751006318434834
+vector 0.8 0.2 24 100 0.001 120 0.02233423841280048 0.05796154722200841 -0.3975107429625639
+scatter grid 30 1750 energy 0.00014549914146181717 time 47.21412539482117
+scatter grid 40 1750 energy 0.0001648721270700083 time 57.40220093727112
+scatter grid 50 1750 energy 0.00018682459574321578 time 66.37874174118042
+scatter grid 60 1750 energy 0.00021170000166125864 time 76.08291840553284
+scatter grid 70 1750 energy 0.00023988752939669807 time 84.58830761909485
+[4]    699 Running                 ( while ! test -f /app/cross0.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_target.py 0 > /app/target0.log 2>&1 ) &
+[7]    790 Running                 ( while ! test -f /app/cross0.8.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_target.py 0.8 > /app/target08.log 2>&1 ) &
+[10]   1069 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/energy_dense.py 0 > /app/dense0.log 2>&1 &
+[12]-  1116 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/knot_test.py 0 > /app/knot0.log 2>&1 &
+[13]+  1117 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/knot_test.py 0.8 > /app/knot08.log 2>&1 &
+[?2004hroot@6d9ebe23d9ab:/app# tail -8 /app/knot0.log; tail -8 /app/knot08.log; tail -5 /app/dense0.log; tail -5 /app/target0.log
+[?2004l0.0 0.2 4 0.3 8 7176 0.04288981028248214 0.053350033818698794 0.023975976520176634 -0.10827427406402283 time 8.32933259010315
+0.0 0.2 4 0.3 12 10764 0.04288981028248214 0.053350033818698774 0.023975976520176634 -0.1082742740640224 time 9.586338758468628
+0.0 0.2 4 0.3 16 14352 0.042889810282482135 0.05335003381869879 0.02397597652017663 -0.10827427406402282 time 11.41352915763855
+0.0 0.2 100 0.001 8 7176 0.2417958236047789 0.009128570384782637 0.02167771199424072 -0.12334453323431747 time 7.990453243255615
+0.0 0.2 100 0.001 12 10764 0.2417958236047789 0.009128570384782637 0.02167771199424072 -0.12334453323431693 time 9.712426662445068
+0.8 0.2 4 0.3 8 7176 0.10456986555846527 0.1273456714141528 0.06177557640213516 -0.3446856358480207 time 7.799056053161621
+0.8 0.2 4 0.3 12 10764 0.10456986555846526 0.1273456714141528 0.06177557640213519 -0.3446856358480209 time 9.803454875946045
+0.8 0.2 4 0.3 16 14352 0.10456986555846526 0.1273456714141528 0.06177557640213519 -0.3446856358480207 time 10.886059999465942
+0.8 0.2 100 0.001 8 7176 0.589198495353038 0.022334238412803326 0.05796154722266841 -0.397510742985986 time 7.996765613555908
+scatter grid 60 1750 energy 0.00021170000166125864 time 76.08291840553284
+scatter grid 70 1750 energy 0.00023988752939669807 time 84.58830761909485
+scatter grid 80 1750 energy 0.0002718281828458893 time 92.7059977054596
+scatter grid 90 1750 energy 0.0003080216848917837 time 101.41899251937866
+scatter grid 100 1750 energy 0.0003490342957461597 time 111.69415068626404
+visc 0.0 50 100 0.95 8 5.736114069655191
+visc 0.0 50 100 0.95 10 5.736114084291072
+visc 0.0 50 100 0.95 12 5.736114085522999
+vector 0.0 50 24 100 0.95 20 6.7352774009594585 1.853127216221252 -0.5314472050243413
+vector 0.0 50 24 100 0.95 40 6.735277432157289 1.853127237710648 -0.5314472689598998
+[?2004hroot@6d9ebe23d9ab:/app# python3 - <<'PY'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> w=np.load('/app/weights20.npz')['w2']; ref=np.load('/app/weights12.npz')['w2']
+[?2004l[?2004h> d={(int(n),int(m),int(h),int(L)):v for n,m,h,L,v in w if max(n,m)<12}
+[?2004l[?2004h> print('tensor common discrepancy',max(abs(v-d.get((int(n),int(m),int(h),int(L)),0))/max(abs(v),1e-20) for n,m,h,L,v in ref if abs(v)>1e-18))
+[?2004l[?2004h> PY
+[?2004ltensor common discrepancy 3.729874781143765e-16
+[?2004hroot@6d9ebe23d9ab:/app# tail -8 /app/dense0.log; tail -8 /app/knot0.log; tail -8 /app/knot08.log; jobs -l
+[?2004lscatter grid 300 1750 energy 0.004252108200005376 time 211.9636640548706
+scatter grid 310 1750 energy 0.004818269829108825 time 213.1327908039093
+scatter grid 320 1750 energy 0.005459815003313187 time 214.31926774978638
+scatter grid 330 1750 energy 0.006186780925035344 time 215.38002824783325
+scatter grid 340 1750 energy 0.007010541234667099 time 216.41331458091736
+scatter grid 350 1750 energy 0.007943983955224165 time 217.40246391296387
+scatter grid 360 1750 energy 0.009001713130049887 time 218.39093589782715
+scatter grid 370 1750 energy 0.010200277308267296 time 219.33860206604004
+[4]   Done                    ( while ! test -f /app/cross0.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_target.py 0 > /app/target0.log 2>&1 )
+[12]-  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/knot_test.py 0 > /app/knot0.log 2>&1
+[13]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/knot_test.py 0.8 > /app/knot08.log 2>&1
+0.0 1 100 0.001 12 11532 1.106562947956137 0.041732204401206986 0.10472427017994758 -0.007460499673623916 time 8.032804012298584
+0.0 1 100 0.001 16 15376 1.1065629479561379 0.041732204401207 0.10472427017994758 -0.0074604996736242525 time 9.681700944900513
+0.0 50 100 0.001 8 8944 19.333780497538214 0.7322464509718255 1.9534358853879539 -0.34103822283096286 time 7.914426803588867
+0.0 50 100 0.001 12 13416 19.333780497538214 0.7322464509718255 1.9534358853879539 -0.3410382228309636 time 9.389998197555542
+0.0 50 100 0.001 16 17888 19.333780497538214 0.7322464509718256 1.9534358853879548 -0.34103822283096286 time 13.011257886886597
+0.0 50 100 0.95 8 8944 5.736114094454331 6.735277434927998 1.8531272425983267 -0.5314472783125828 time 8.170377969741821
+0.0 50 100 0.95 12 13416 5.736114094454331 6.7352774349279985 1.8531272425983267 -0.5314472783125836 time 10.093008995056152
+0.0 50 100 0.95 16 17888 5.736114094454333 6.735277434927998 1.8531272425983272 -0.5314472783125828 time 10.728904724121094
+0.8 1 100 0.001 12 11532 1.5287998609320819 0.057973238067498566 0.14901090681095552 -0.4207821692504755 time 7.515987157821655
+0.8 1 100 0.001 16 15376 1.5287998609320819 0.05797323806749854 0.14901090681095552 -0.42078216925047546 time 9.759828567504883
+0.8 50 100 0.001 8 8944 13.632021936166279 0.5178030070394414 1.3061029337255208 -0.4665071295553661 time 7.228115558624268
+0.8 50 100 0.001 12 13416 13.632021936166268 0.5178030070394407 1.306102933725519 -0.4665071295553661 time 9.194291353225708
+0.8 50 100 0.001 16 17888 13.63202193616627 0.517803007039441 1.306102933725519 -0.4665071295553652 time 11.889501571655273
+0.8 50 100 0.95 8 8944 3.8323954175796398 4.697023725702553 1.1836578012109642 -0.8024091818358472 time 8.232643365859985
+0.8 50 100 0.95 12 13416 3.832395417579635 4.697023725702545 1.1836578012109626 -0.8024091818358455 time 9.481497287750244
+0.8 50 100 0.95 16 17888 3.8323954175796358 4.6970237257025484 1.1836578012109626 -0.8024091818358449 time 11.20422625541687
+[7]-   790 Running                 ( while ! test -f /app/cross0.8.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_target.py 0.8 > /app/target08.log 2>&1 ) &
+[10]+  1069 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/energy_dense.py 0 > /app/dense0.log 2>&1 &
+[?2004hroot@6d9ebe23d9ab:/app# cat > /app/assemble.py <<'PY'
+[?2004l[?2004h> import pathlib, numpy as np, base64,zlib
+[?2004l[?2004h> out='''#!/usr/bin/env python3
+[?2004l[?2004h> """Classical binary-gas transport from converged collision brackets.
+[?2004l[?2004h> 
+[?2004l[?2004h> Units: sigma=epsilon=k_B=m_1=1.  The vector and traceless-tensor
+[?2004l[?2004h> Galerkin spaces are Maxwell-weighted Hermite (Sonine) spaces.  Collisions
+[?2004l[?2004h> are evaluated by separating centre-of-mass and relative Hermites, then
+[?2004l[?2004h> expanding the latter in spherical harmonics.  Legendre scattering moments
+[?2004l[?2004h> are computed from classical central-force trajectories, including both
+[?2004l[?2004h> sides of orbiting.  Heat conductivity is the Schur complement at zero
+[?2004l[?2004h> relative species velocity.  The momentum null mode is removed explicitly.
+[?2004l[?2004h> """
+[?2004l[?2004h> import os
+[?2004l[?2004h> os.environ['OPENBLAS_NUM_THREADS']='1'
+[?2004l[?2004h> os.environ['OMP_NUM_THREADS']='1'
+[?2004l[?2004h> os.environ['MKL_NUM_THREADS']='1'
+[?2004l[?2004h> import sys, json, math, functools, time, base64, zlib
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from scipy.special import roots_legendre, gammaln
+[?2004l[?2004h> from scipy.optimize import brentq, minimize_scalar
+[?2004l[?2004h> from scipy.interpolate import CubicSpline
+[?2004l[?2004h> from scipy.linalg import solve
+[?2004l[?2004h> '''
+[?2004l[?2004h> # Include only definitions; remove imports provided above.
+[?2004l[?2004h> for path in ['scatter.py','vector_weights.py','group_solver.py','energy.py','knot_test.py']:
+[?2004l[?2004h>  text=pathlib.Path('/app/'+path).read_text().split("if __name__")[0]
+[?2004l[?2004h>  lines=[]
+[?2004l[?2004h>  for line in text.splitlines():
+[?2004l[?2004h>   if line.startswith('import ') or line.startswith('from '): continue
+[?2004l[?2004h>   lines.append(line)
+[?2004l[?2004h>  out+='\n'+'\n'.join(lines)+'\n'
+[?2004l[?2004h> # Tensor assembly routine only.
+[?2004l[?2004h> text=pathlib.Path('/app/solver.py').read_text(); out+='\n'+text[text.index('def matrix'):text.index('def calculate')]
+[?2004l[?2004h> W=np.load('/app/weights20.npz')['w2']
+[?2004l[?2004h> # Remove numerical zeros arising from the Cartesian spherical transform.
+[?2004l[?2004h> W=W[np.abs(W[:,4])>1e-22]
+[?2004l[?2004h> b=base64.b85encode(zlib.compress(W.astype('<f8').tobytes(),9)).decode()
+[?2004l[?2004h> out+="\n_TENSOR_DATA='''"+b+"'''\n"
+[?2004l[?2004h> out+="\nTENSOR_WEIGHTS=np.frombuffer(zlib.decompress(base64.b85decode(_TENSOR_DATA)),dtype='<f8').reshape(-1,5)\n"
+[?2004l[?2004h> out+='''
+[?2004l[?2004h> def transport(A,R,X,T):
+[?2004l[?2004h>  start=time.monotonic()
+[?2004l[?2004h>  # The slowly converging Brownian/tracer limit receives a larger basis.
+[?2004l[?2004h>  if R<2: N=32
+[?2004l[?2004h>  elif R<8: N=56
+[?2004l[?2004h>  elif R<25: N=88
+[?2004l[?2004h>  else: N=160 if X<.5 else 104
+[?2004l[?2004h>  Nv=20
+[?2004l[?2004h>  Lcap=24
+[?2004l[?2004h>  Emax=T*(4*N+100)*1.05
+[?2004l[?2004h>  C=CrossSections(A,1e-4,Emax,Lcap,.0125,12)
+[?2004l[?2004h>  t,wt=knot_nodes(C.grid,T,N,10)
+[?2004l[?2004h>  Q0=C.evaluate(np.maximum(t*T,1e-4))
+[?2004l[?2004h>  Q=np.concatenate([Q0,np.tile(Q0[-1],(2*N+1-Lcap,1))])
+[?2004l[?2004h>  J1=radial_stable(t,wt,Q,N,1)
+[?2004l[?2004h>  J2=radial_stable(t,wt,Q,Nv,2)
+[?2004l[?2004h>  G,norms=groups(N,R)
+[?2004l[?2004h>  B=vmat(G,J1,N,R,X,T)
+[?2004l[?2004h>  res=vector_result(B,norms,N,R,X,T)
+[?2004l[?2004h>  B2=matrix(TENSOR_WEIGHTS,J2,Nv,2,R,X,T)
+[?2004l[?2004h>  S=np.zeros(2*Nv);S[0]=2.5*X;S[Nv]=2.5*(1-X)
+[?2004l[?2004h>  viscosity=2*T/5*(S@solve(B2,S,assume_a='pos'))
+[?2004l[?2004h>  if R==1: res[2]=0.
+[?2004l[?2004h>  return dict(viscosity=float(viscosity),thermal_conductivity=float(res[0]),binary_diffusion=float(res[1]),thermal_diffusion_factor=float(res[2]))
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  A,R,X,T=map(float,sys.argv[1:])
+[?2004l[?2004h>  result=transport(A,R,X,T)
+[?2004l[?2004h>  print(json.dumps(result,allow_nan=False,separators=(',',':')))
+[?2004l[?2004h> '''
+[?2004l[?2004h> # All diagnostics must go to stderr, not the JSON stream.
+[?2004l[?2004h> out=out.replace("if i%10==0: print('scatter grid',i,len(grid),'energy',math.exp(z),'time',time.time()-ts,flush=True)","if i%100==0: print('collision grid',i,len(grid),file=sys.stderr,flush=True)")
+[?2004l[?2004h> # Avoid unused build routines with diagnostic stdout.
+[?2004l[?2004h> out=out.replace("  print(h,len(out),flush=True)","  print(h,len(out),file=sys.stderr,flush=True)")
+[?2004l[?2004h> pathlib.Path('/app/output/transport.py').write_text(out)
+[?2004l[?2004h> print('file bytes',len(out))
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# python3 /app/assemble.py; python3 -m py_compile /app/output/transport.py
+[?2004lfile bytes 184469
+[?2004hroot@6d9ebe23d9ab:/app# (time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0 100 0.001 1 > /app/finaltest1.json 2> /app/finaltest1.err) 2> /app/finaltest1.time &
+[?2004l[11] 1344
+[?2004hroot@6d9ebe23d9ab:/app# (time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0.35 1 0.4 2 > /app/finaltest2.json 2> /app/finaltest2.err) 2> /app/finaltest2.time &
+[?2004l[12] 1345
+[?2004hroot@6d9ebe23d9ab:/app# tail -8 /app/dense0.log; tail -8 /app/target08.log; ls -lh /app/output/transport.py
+[?2004lscatter grid 510 1750 energy 0.057969378081115686 time 232.22793078422546
+scatter grid 520 1750 energy 0.06568791109786176 time 232.8887894153595
+scatter grid 530 1750 energy 0.07443415484573274 time 233.50086402893066
+scatter grid 540 1750 energy 0.08434494741877807 time 234.09879302978516
+scatter grid 550 1750 energy 0.0955753466915905 time 234.6796317100525
+scatter grid 560 1750 energy 0.10830105625490062 time 235.2528088092804
+scatter grid 570 1750 energy 0.12203126744348373 time 235.81196403503418
+scatter grid 580 1750 energy 0.13733386156286276 time 236.3666796684265
+vector 0.8 10 8 100 0.001 80 0.21955620034177695 0.5501021368155649 -0.44731433049359576
+vector 0.8 10 8 100 0.001 100 0.2195562047097712 0.5501032320696095 -0.4473183082963093
+vector 0.8 10 8 100 0.001 120 0.2195562060736037 0.5501035409079101 -0.4473194885723571
+vector 0.8 10 12 100 0.001 20 0.2195556492110319 0.5499757791643299 -0.44683437379971647
+vector 0.8 10 12 100 0.001 40 0.2195561436937147 0.5500894802638062 -0.4472656552341377
+vector 0.8 10 12 100 0.001 80 0.2195562003371149 0.5501021357725208 -0.44731432650964614
+vector 0.8 10 12 100 0.001 100 0.21955620470454273 0.550103230886548 -0.4473183038001053
+vector 0.8 10 12 100 0.001 120 0.2195562060681107 0.5501035396634825 -0.4473194838443786
+-rw-r--r-- 1 root root 181K Nov  3 01:18 /app/output/transport.py
+[?2004hroot@6d9ebe23d9ab:/app# tail -8 /app/finaltest1.err; tail -8 /app/finaltest2.err; cat /app/finaltest1.json /app/finaltest2.json; tail -6 /app/dense0.log; tail -6 /app/weights20.log
+[?2004lcollision grid 0 1458
+collision grid 0 1419
+scatter grid 820 1750 energy 0.8000026560935375 time 261.1852717399597
+scatter grid 830 1750 energy 0.8000119037853792 time 262.4874737262726
+scatter grid 840 1750 energy 0.800053349064832 time 263.9150104522705
+scatter grid 850 1750 energy 0.8002390939207729 time 265.31798005104065
+scatter grid 860 1750 energy 0.800922286994226 time 266.7885229587555
+scatter grid 870 1750 energy 0.8041334035417401 time 268.1122760772705
+weights 2 36 15767
+weights 2 37 15771
+weights 2 38 15772
+weights 2 39 15773
+weights 2 40 15773
+saved (12947, 5) (15773, 5)
+[?2004hroot@6d9ebe23d9ab:/app# cat > /app/test_dense.py <<'PY'
+[?2004l[?2004h> import numpy as np,math,time
+[?2004l[?2004h> from scipy.interpolate import CubicSpline
+[?2004l[?2004h> from energy import radial_stable
+[?2004l[?2004h> from knot_test import knot_nodes
+[?2004l[?2004h> from group_solver import groups,vmat,vector_result
+[?2004l[?2004h> from solver import matrix
+[?2004l[?2004h> from scipy.linalg import solve
+[?2004l[?2004h> G,norm=groups(160,100);W=np.load('/app/weights20.npz')['w2']
+[?2004l[?2004h> for T,R,X in [(.2,4,.3),(.2,100,.001),(1,100,.001),(50,100,.001)]:
+[?2004l[?2004h>  for name in ['cross','dense']:
+[?2004l[?2004h>   D=np.load('/app/'+name+'0.npz');C=CubicSpline(D['grid'],D['vals'],axis=0)
+[?2004l[?2004h>   t,w=knot_nodes(D['grid'],T,160,8);Q0=C(np.log(np.maximum(t*T,1e-4))).T
+[?2004l[?2004h>   Q=np.concatenate([Q0,np.tile(Q0[-1],(321-(Q0.shape[0]-1),1))]);J=radial_stable(t,w,Q,160,1)
+[?2004l[?2004h>   B=vmat(G,J,160,R,X,T)
+[?2004l[?2004h>   for N in [80,100,120,140,160]:
+[?2004l[?2004h>    ids=np.concatenate([np.arange(N),160+np.arange(N)]);res=vector_result(B[np.ix_(ids,ids)],norm,N,R,X,T)
+[?2004l[?2004h>    print(T,R,X,name,N,*res,flush=True)
+[?2004l[?2004h>   J2=radial_stable(t,w,Q,20,2);B2=matrix(W,J2,20,2,R,X,T);S=np.zeros(40);S[0]=2.5*X;S[20]=2.5*(1-X)
+[?2004l[?2004h>   print('visc',T,R,X,name,2*T/5*S@solve(B2,S,assume_a='pos'),flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# (while ! test -f /app/dense0.npz; do sleep 2; done; OPENBLAS_NUM_THREADS=1 python3 /app/test_dense.py > /app/compare_dense.log 2>&1) &
+[?2004l[13] 1375
+[?2004hroot@6d9ebe23d9ab:/app# date; tail -8 /app/finaltest1.err; tail -8 /app/finaltest2.err; cat /app/finaltest1.json /app/finaltest2.json; cat /app/finaltest1.time /app/finaltest2.time; tail -8 /app/dense0.log; tail -12 /app/compare_dense.log 2>/dev/null; jobs -l
+[?2004lTue Nov  3 01:20:16 UTC 2026
+[10]   Done                    OPENBLAS_NUM_THREADS=1 python3 /app/energy_dense.py 0 > /app/dense0.log 2>&1
+collision grid 0 1458
+collision grid 100 1458
+collision grid 200 1458
+collision grid 0 1419
+collision grid 100 1419
+scatter grid 1730 1750 energy 23793.307628140563 time 283.0929145812988
+scatter grid 1740 1750 energy 26961.349732170405 time 283.20441365242004
+interpolation errors [1.95321683e-07 1.20642293e-06 2.86916329e-06 4.03561732e-06
+ 1.74986304e-05 2.30992909e-05 1.99155528e-05 5.24873510e-05
+ 7.56562681e-05 3.07750605e-05 8.14517332e-05 1.43297196e-04
+ 9.46907543e-05 9.45246508e-05 1.19994316e-04 1.47796129e-04
+ 1.06486731e-04 1.74156212e-04 7.21281918e-05 2.03889557e-04
+ 1.26357756e-04 2.14877655e-04 2.05217833e-04 1.97515327e-04]
+[7]    790 Running                 ( while ! test -f /app/cross0.8.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_target.py 0.8 > /app/target08.log 2>&1 ) &
+[11]   1344 Running                 ( time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0 100 0.001 1 > /app/finaltest1.json 2> /app/finaltest1.err ) 2> /app/finaltest1.time &
+[12]-  1345 Running                 ( time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0.35 1 0.4 2 > /app/finaltest2.json 2> /app/finaltest2.err ) 2> /app/finaltest2.time &
+[13]+  1375 Running                 ( while ! test -f /app/dense0.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_dense.py > /app/compare_dense.log 2>&1 ) &
+[?2004hroot@6d9ebe23d9ab:/app# tail -28 /app/compare_dense.log; tail -6 /app/finaltest1.err; tail -6 /app/finaltest2.err; cat /app/finaltest1.json /app/finaltest2.json; cat /app/finaltest1.time /app/finaltest2.time; tail -8 /app/target08.log
+[?2004l0.2 4 0.3 cross 80 0.053350033818698794 0.023975976520176644 -0.10827427406402279
+0.2 4 0.3 cross 100 0.053350033818698794 0.023975976520176634 -0.10827427406402283
+0.2 4 0.3 cross 120 0.053350033818698794 0.023975976520176634 -0.10827427406402283
+0.2 4 0.3 cross 140 0.0533500338186988 0.023975976520176634 -0.10827427406402282
+0.2 4 0.3 cross 160 0.053350033818698815 0.023975976520176644 -0.10827427406402279
+visc 0.2 4 0.3 cross 0.04288981028248215
+0.2 4 0.3 dense 80 0.0533500337988761 0.02397597652160184 -0.10827427202217027
+0.2 4 0.3 dense 100 0.0533500337988761 0.023975976521601845 -0.10827427202217023
+0.2 4 0.3 dense 120 0.0533500337988761 0.023975976521601845 -0.10827427202217023
+0.2 4 0.3 dense 140 0.0533500337988761 0.023975976521601845 -0.10827427202217023
+0.2 4 0.3 dense 160 0.053350033798876116 0.02397597652160184 -0.10827427202217026
+visc 0.2 4 0.3 dense 0.04288981020803987
+0.2 100 0.001 cross 80 0.009128570359831197 0.021677710120164496 -0.12334449263800704
+0.2 100 0.001 cross 100 0.009128570380161618 0.021677710961203005 -0.12334454524557568
+0.2 100 0.001 cross 120 0.009128570384782637 0.02167771199424072 -0.12334453323431747
+0.2 100 0.001 cross 140 0.009128570386394738 0.021677712391549864 -0.12334452904787978
+0.2 100 0.001 cross 160 0.00912857038804363 0.02167771243878015 -0.12334453105054789
+visc 0.2 100 0.001 cross 0.2417958236047789
+0.2 100 0.001 dense 80 0.009128570344511746 0.02167771012222712 -0.12334449035965221
+0.2 100 0.001 dense 100 0.009128570364842171 0.021677710963265012 -0.12334454296697661
+0.2 100 0.001 dense 120 0.009128570369463176 0.02167771199630991 -0.12334453095521897
+0.2 100 0.001 dense 140 0.009128570371075301 0.021677712393619975 -0.12334452676864145
+0.2 100 0.001 dense 160 0.009128570372724194 0.021677712440850913 -0.12334452877117934
+visc 0.2 100 0.001 dense 0.24179582314875941
+collision grid 200 1458
+collision grid 300 1458
+collision grid 400 1458
+collision grid 500 1458
+collision grid 600 1458
+collision grid 700 1458
+collision grid 0 1419
+collision grid 100 1419
+collision grid 200 1419
+collision grid 300 1419
+collision grid 400 1419
+vector 0.8 50 24 100 0.001 80 0.5178029894622128 1.3060985925229358 -0.4665004475531255
+vector 0.8 50 24 100 0.001 100 0.5178030018253902 1.3061016496366384 -0.46650515690344485
+vector 0.8 50 24 100 0.001 120 0.5178030070832834 1.3061029596543727 -0.46650716731277325
+vector 0.8 50 8 100 0.95 20 4.697023622941525 1.1836577389177148 -0.8024088727255219
+vector 0.8 50 8 100 0.95 40 4.697023722977575 1.183657799188096 -0.8024091732780363
+vector 0.8 50 8 100 0.95 80 4.697023727530179 1.1836578032464458 -0.8024091899296476
+vector 0.8 50 8 100 0.95 100 4.697023727750275 1.1836578034845848 -0.8024091908170788
+vector 0.8 50 8 100 0.95 120 4.697023727807861 1.183657803550124 -0.8024091910552147
+[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/interp_detail.log 2>&1 &
+[?2004l[?2004h> from scipy.interpolate import CubicSpline
+[?2004l[?2004h> from scatter import Scatter
+[?2004l[?2004h> import numpy as np,math
+[?2004l[?2004h> D=np.load('/app/dense0.npz');C=CubicSpline(D['grid'],D['vals'],axis=0);S=Scatter(0);rng=np.random.default_rng(43)
+[?2004l[?2004h> for E in np.exp(rng.uniform(math.log(.005),math.log(2000),80)):
+[?2004l[?2004h>  q=S.Q(E,24,16);qi=C(np.log(E));err=abs(qi[1:]/q[1:]-1)
+[?2004l[?2004h>  if max(err)>1e-6:print(E,err[:6],max(err),flush=True)
+[?2004l[?2004h> PY
+[?2004l[14] 1445
+[?2004hroot@6d9ebe23d9ab:/app# tail -22 /app/compare_dense.log; cat /app/interp_detail.log; tail -6 /app/finaltest1.err; tail -6 /app/finaltest2.err; cat /app/finaltest1.json /app/finaltest2.json; cat /app/finaltest1.time /app/finaltest2.time; jobs -l
+[?2004l0.2 4 0.3 dense 120 0.0533500337988761 0.023975976521601845 -0.10827427202217023
+0.2 4 0.3 dense 140 0.0533500337988761 0.023975976521601845 -0.10827427202217023
+0.2 4 0.3 dense 160 0.053350033798876116 0.02397597652160184 -0.10827427202217026
+visc 0.2 4 0.3 dense 0.04288981020803987
+0.2 100 0.001 cross 80 0.009128570359831197 0.021677710120164496 -0.12334449263800704
+0.2 100 0.001 cross 100 0.009128570380161618 0.021677710961203005 -0.12334454524557568
+0.2 100 0.001 cross 120 0.009128570384782637 0.02167771199424072 -0.12334453323431747
+0.2 100 0.001 cross 140 0.009128570386394738 0.021677712391549864 -0.12334452904787978
+0.2 100 0.001 cross 160 0.00912857038804363 0.02167771243878015 -0.12334453105054789
+visc 0.2 100 0.001 cross 0.2417958236047789
+0.2 100 0.001 dense 80 0.009128570344511746 0.02167771012222712 -0.12334449035965221
+0.2 100 0.001 dense 100 0.009128570364842171 0.021677710963265012 -0.12334454296697661
+0.2 100 0.001 dense 120 0.009128570369463176 0.02167771199630991 -0.12334453095521897
+0.2 100 0.001 dense 140 0.009128570371075301 0.021677712393619975 -0.12334452676864145
+0.2 100 0.001 dense 160 0.009128570372724194 0.021677712440850913 -0.12334452877117934
+visc 0.2 100 0.001 dense 0.24179582314875941
+1 100 0.001 cross 80 0.04173220422195536 0.10472417376651859 -0.007459258681967953
+1 100 0.001 cross 100 0.041732204397552077 0.10472426433669742 -0.007460462843437603
+1 100 0.001 cross 120 0.041732204401207 0.10472427017994758 -0.007460499673623933
+1 100 0.001 cross 140 0.04173220440277672 0.10472427348649753 -0.007460510510594444
+1 100 0.001 cross 160 0.041732204409690644 0.10472427829818665 -0.007460564732122974
+visc 1 100 0.001 cross 1.1065629479561372
+[14]+  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/interp_detail.log 2>&1
+from scipy.interpolate import CubicSpline
+from scatter import Scatter
+import numpy as np,math
+D=np.load('/app/dense0.npz');C=CubicSpline(D['grid'],D['vals'],axis=0);S=Scatter(0);rng=np.random.default_rng(43)
+for E in np.exp(rng.uniform(math.log(.005),math.log(2000),80)):
+ q=S.Q(E,24,16);qi=C(np.log(E));err=abs(qi[1:]/q[1:]-1)
+ if max(err)>1e-6:print(E,err[:6],max(err),flush=True)
+PY
+
+1.12644878156804 [4.88731966e-09 2.14201921e-08 5.99219110e-08 1.09511539e-07
+ 1.32953303e-07 4.72844565e-08] 1.017235533840033e-05
+1.156210579575706 [4.95143682e-09 2.06750467e-08 4.91937151e-08 5.69533171e-08
+ 1.37084476e-08 2.09249527e-07] 1.2425884537758947e-05
+1.095756915961084 [8.89335494e-10 4.23012603e-09 1.21556312e-08 2.33572375e-08
+ 2.88597926e-08 7.26311922e-09] 1.5068151114183692e-05
+1.0504263454157572 [4.30928249e-09 1.14822409e-08 2.64710363e-08 6.58199166e-08
+ 1.50638942e-07 3.18714154e-07] 3.261284667011033e-05
+0.8273806602317719 [1.03989028e-07 1.20642293e-06 1.70495295e-06 4.03561732e-06
+ 1.74986304e-05 2.30992909e-05] 0.00014779612872128922
+0.8905586660910954 [1.95321683e-07 1.14234118e-07 2.86916329e-06 2.86797454e-07
+ 9.55656332e-06 3.35184733e-06] 0.00021487765501126965
+collision grid 900 1458
+collision grid 1000 1458
+collision grid 1100 1458
+collision grid 1200 1458
+collision grid 1300 1458
+collision grid 1400 1458
+collision grid 200 1419
+collision grid 300 1419
+collision grid 400 1419
+collision grid 500 1419
+collision grid 600 1419
+collision grid 700 1419
+[7]    790 Running                 ( while ! test -f /app/cross0.8.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_target.py 0.8 > /app/target08.log 2>&1 ) &
+[11]   1344 Running                 ( time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0 100 0.001 1 > /app/finaltest1.json 2> /app/finaltest1.err ) 2> /app/finaltest1.time &
+[12]-  1345 Running                 ( time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0.35 1 0.4 2 > /app/finaltest2.json 2> /app/finaltest2.err ) 2> /app/finaltest2.time &
+[13]+  1375 Running                 ( while ! test -f /app/dense0.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_dense.py > /app/compare_dense.log 2>&1 ) &
+[?2004hroot@6d9ebe23d9ab:/app# cat > /app/audit_basis.py <<'PY'
+[?2004l[?2004h> import numpy as np,math
+[?2004l[?2004h> from scipy.interpolate import CubicSpline
+[?2004l[?2004h> from energy import radial_stable
+[?2004l[?2004h> from knot_test import knot_nodes
+[?2004l[?2004h> from group_solver import groups,vmat,vector_result
+[?2004l[?2004h> G,norm=groups(180,100)
+[?2004l[?2004h> for A in [0,.8]:
+[?2004l[?2004h>  D=np.load('/app/cross%g.npz'%A);C=CubicSpline(D['grid'],D['vals'],axis=0)
+[?2004l[?2004h>  for T in [.2,1,50]:
+[?2004l[?2004h>   t,w=knot_nodes(D['grid'],T,180,8);Q0=C(np.log(np.maximum(t*T,1e-4))).T
+[?2004l[?2004h>   Q=np.concatenate([Q0,np.tile(Q0[-1],(361-(Q0.shape[0]-1),1))]);J=radial_stable(t,w,Q,180,1)
+[?2004l[?2004h>   for R,X in [(1.99,.001),(7.99,.001),(24.99,.001),(100,.5),(100,.3),(25,.5)]:
+[?2004l[?2004h>    B=vmat(G,J,180,R,X,T)
+[?2004l[?2004h>    N=32 if R<2 else 56 if R<8 else 88 if R<25 else 160 if X<.5 else 104
+[?2004l[?2004h>    ids=np.concatenate([np.arange(N),180+np.arange(N)])
+[?2004l[?2004h>    low=vector_result(B[np.ix_(ids,ids)],norm,N,R,X,T);high=vector_result(B,norm,180,R,X,T)
+[?2004l[?2004h>    print(A,T,R,X,N,'low',*low,'high',*high,'rel',*(low/high-1),'alpha absolute',low[2]-high[2],flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/audit_basis.py > /app/audit_basis.log 2>&1 &
+[?2004l[14] 1471
+[?2004hroot@6d9ebe23d9ab:/app# date; cat /app/finaltest1.json /app/finaltest2.json; cat /app/finaltest1.time /app/finaltest2.time; tail -10 /app/finaltest1.err; tail -10 /app/finaltest2.err; tail -18 /app/compare_dense.log; tail -8 /app/audit_basis.log; jobs -l
+[?2004lTue Nov  3 01:22:21 UTC 2026
+collision grid 500 1458
+collision grid 600 1458
+collision grid 700 1458
+collision grid 800 1458
+collision grid 900 1458
+collision grid 1000 1458
+collision grid 1100 1458
+collision grid 1200 1458
+collision grid 1300 1458
+collision grid 1400 1458
+collision grid 0 1419
+collision grid 100 1419
+collision grid 200 1419
+collision grid 300 1419
+collision grid 400 1419
+collision grid 500 1419
+collision grid 600 1419
+collision grid 700 1419
+collision grid 800 1419
+0.2 100 0.001 dense 80 0.009128570344511746 0.02167771012222712 -0.12334449035965221
+0.2 100 0.001 dense 100 0.009128570364842171 0.021677710963265012 -0.12334454296697661
+0.2 100 0.001 dense 120 0.009128570369463176 0.02167771199630991 -0.12334453095521897
+0.2 100 0.001 dense 140 0.009128570371075301 0.021677712393619975 -0.12334452676864145
+0.2 100 0.001 dense 160 0.009128570372724194 0.021677712440850913 -0.12334452877117934
+visc 0.2 100 0.001 dense 0.24179582314875941
+1 100 0.001 cross 80 0.04173220422195536 0.10472417376651859 -0.007459258681967953
+1 100 0.001 cross 100 0.041732204397552077 0.10472426433669742 -0.007460462843437603
+1 100 0.001 cross 120 0.041732204401207 0.10472427017994758 -0.007460499673623933
+1 100 0.001 cross 140 0.04173220440277672 0.10472427348649753 -0.007460510510594444
+1 100 0.001 cross 160 0.041732204409690644 0.10472427829818665 -0.007460564732122974
+visc 1 100 0.001 cross 1.1065629479561372
+1 100 0.001 dense 80 0.04173220418436737 0.10472417397650603 -0.007459261555686866
+1 100 0.001 dense 100 0.041732204359964324 0.1047242645466467 -0.007460465717579606
+1 100 0.001 dense 120 0.04173220436361924 0.1047242703898827 -0.0074605025478821346
+1 100 0.001 dense 140 0.04173220436518893 0.10472427369643751 -0.007460513384922461
+1 100 0.001 dense 160 0.0417322043721029 0.10472427850811106 -0.007460567606406077
+visc 1 100 0.001 dense 1.106562946935735
+[7]    790 Running                 ( while ! test -f /app/cross0.8.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_target.py 0.8 > /app/target08.log 2>&1 ) &
+[11]   1344 Running                 ( time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0 100 0.001 1 > /app/finaltest1.json 2> /app/finaltest1.err ) 2> /app/finaltest1.time &
+[12]   1345 Running                 ( time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0.35 1 0.4 2 > /app/finaltest2.json 2> /app/finaltest2.err ) 2> /app/finaltest2.time &
+[13]-  1375 Running                 ( while ! test -f /app/dense0.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_dense.py > /app/compare_dense.log 2>&1 ) &
+[14]+  1471 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/audit_basis.py > /app/audit_basis.log 2>&1 &
+[?2004hroot@6d9ebe23d9ab:/app# date; cat /app/finaltest1.json /app/finaltest2.json; cat /app/finaltest1.time /app/finaltest2.time; tail -8 /app/audit_basis.log; tail -12 /app/compare_dense.log; for p in /proc/[0-9]*; do if test -r "$p/cmdline"; then c=$(tr '\0' ' ' < "$p/cmdline"); case "$c" in *python3*transport.py*|*python3*audit_basis.py*) echo "$p $c"; grep -E 'State|VmRSS|Threads' "$p/status"; cut -d' ' -f14,15 "$p/stat";; esac; fi; done
+[?2004lTue Nov  3 01:23:43 UTC 2026
+[7]   Done                    ( while ! test -f /app/cross0.8.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_target.py 0.8 > /app/target08.log 2>&1 )
+[11]   Done                    ( time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0 100 0.001 1 > /app/finaltest1.json 2> /app/finaltest1.err ) 2> /app/finaltest1.time
+[12]   Done                    ( time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0.35 1 0.4 2 > /app/finaltest2.json 2> /app/finaltest2.err ) 2> /app/finaltest2.time
+[13]-  Done                    ( while ! test -f /app/dense0.npz; do
+    sleep 2;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/test_dense.py > /app/compare_dense.log 2>&1 )
+{"viscosity":1.1065629469357359,"thermal_conductivity":0.04173220437210292,"binary_diffusion":0.10472427850811107,"thermal_diffusion_factor":-0.007460567606405689}
+{"viscosity":0.21598123935328295,"thermal_conductivity":0.8113603241500228,"binary_diffusion":0.2783511314723305,"thermal_diffusion_factor":0.0}
+
+real	4m53.115s
+user	2m15.418s
+sys	0m15.055s
+
+real	4m20.253s
+user	1m48.027s
+sys	0m16.238s
+0 0.2 1.99 0.001 32 low 0.06437242434492248 0.026259244949077023 -0.06613342461107244 high 0.06437242434492248 0.026259244949077377 -0.0661334246110795 rel 0.0 -1.3433698597964394e-14 -1.0680345496894006e-13 alpha absolute 7.0637939941775585e-15
+0 0.2 7.99 0.001 56 low 0.03214459505489751 0.022818547015610327 -0.11597039301838552 high 0.03214459505489881 0.02281854701592467 -0.11597039303098426 rel -4.063416270128073e-14 -1.3775758311851405e-11 -1.0863754340562082e-10 alpha absolute 1.2598741494507237e-11
+50 100 0.001 cross 80 0.7322464467482143 1.9534348679372622 -0.3410371610991226
+50 100 0.001 cross 100 0.7322464496468357 1.953435568146445 -0.34103789076887653
+50 100 0.001 cross 120 0.7322464509718255 1.9534358853879539 -0.34103822283096286
+50 100 0.001 cross 140 0.7322464514406116 1.953435997907503 -0.3410383404613348
+50 100 0.001 cross 160 0.7322464515709889 1.9534360294371498 -0.3410383732994289
+visc 50 100 0.001 cross 19.333780497538214
+50 100 0.001 dense 80 0.7322464467447488 1.9534348679168374 -0.3410371610842828
+50 100 0.001 dense 100 0.7322464496433705 1.953435568125981 -0.3410378907539961
+50 100 0.001 dense 120 0.7322464509683596 1.9534358853674725 -0.341038222816064
+50 100 0.001 dense 140 0.7322464514371458 1.9534359978870144 -0.34103834044642956
+50 100 0.001 dense 160 0.7322464515675229 1.95343602941666 -0.3410383732845222
+visc 50 100 0.001 dense 19.333780497452764
+/proc/1471 python3 /app/audit_basis.py 
+State:	R (running)
+VmRSS:	  336468 kB
+Threads:	1
+6721 120
+[?2004hroot@6d9ebe23d9ab:/app# tail -10 /app/audit_basis.log
+[?2004l0 0.2 1.99 0.001 32 low 0.06437242434492248 0.026259244949077023 -0.06613342461107244 high 0.06437242434492248 0.026259244949077377 -0.0661334246110795 rel 0.0 -1.3433698597964394e-14 -1.0680345496894006e-13 alpha absolute 7.0637939941775585e-15
+0 0.2 7.99 0.001 56 low 0.03214459505489751 0.022818547015610327 -0.11597039301838552 high 0.03214459505489881 0.02281854701592467 -0.11597039303098426 rel -4.063416270128073e-14 -1.3775758311851405e-11 -1.0863754340562082e-10 alpha absolute 1.2598741494507237e-11
+0 0.2 24.99 0.001 88 low 0.018202064438032756 0.021979815533180375 -0.12156127774616227 high 0.018202064438249694 0.021979815545054005 -0.1215612782748857 rel -1.1918244169351055e-11 -5.402061020731708e-10 -4.349439586270876e-09 alpha absolute 5.287234400297436e-10
+0 0.2 100 0.5 104 low 0.04001608176411877 0.02158849965903253 -0.15239330966282075 high 0.04001608242751548 0.021588499824073928 -0.15239328589601214 rel -1.6578252326482357e-08 -7.644875732459866e-09 1.5595705860071973e-07 alpha absolute -2.3766808604497314e-08
+0 0.2 100 0.3 160 low 0.02600484265254725 0.02162618627627386 -0.13902769733569245 high 0.026004842684674515 0.021626186305382978 -0.13902769451741626 rel -1.2354339773423817e-09 -1.3460125236619547e-09 2.0271329503884772e-08 alpha absolute -2.8182761957484814e-09
+0 0.2 25 0.5 104 low 0.044602410651615014 0.02189676145140243 -0.14796401127289194 high 0.044602410655219936 0.021896761451599245 -0.1479640112102354 rel -8.082345903659416e-11 -8.988254585062805e-12 4.2345793538345333e-10 alpha absolute -6.265654661774533e-11
+[?2004hroot@6d9ebe23d9ab:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read();s=s.replace(' C=CrossSections(A,1e-4,Emax,Lcap,.0125,12)',' C=CrossSections(A,1e-4,Emax,Lcap,.0125,12)\n print("scattering seconds",time.monotonic()-start,file=sys.stderr)');s=s.replace(' G,norms=groups(N,R)',' print("radial seconds",time.monotonic()-start,file=sys.stderr)\n G,norms=groups(N,R)');s=s.replace(' res=vector_result(B,norms,N,R,X,T)',' res=vector_result(B,norms,N,R,X,T)\n print("vector seconds",time.monotonic()-start,file=sys.stderr)');open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# (time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0.8 100 0.001 50 > /app/finaltest3.json 2> /app/finaltest3.err) 2> /app/finaltest3.time &
+[?2004l[15] 1571
+[?2004hroot@6d9ebe23d9ab:/app# tail -12 /app/finaltest3.err; cat /app/finaltest3.json /app/finaltest3.time; tail -10 /app/audit_basis.log; jobs -l
+[?2004lcollision grid 0 1771
+0 1 1.99 0.001 32 low 0.2942839329943604 0.1273931717016333 -0.004488078618567184 high 0.29428393299436034 0.12739317170163522 -0.004488078618601076 rel 2.220446049250313e-16 -1.4988010832439613e-14 -7.551625991197852e-12 alpha absolute 3.389215991189687e-14
+0 1 7.99 0.001 56 low 0.1469572259638855 0.11034462694000303 -0.00666161331347803 high 0.14695722596389893 0.11034462694071322 -0.00666161333975488 rel -9.137135492665038e-14 -6.436073896054495e-12 -3.944517379395052e-09 alpha absolute 2.6276849619810694e-11
+0 1 24.99 0.001 88 low 0.08321474038232243 0.10619579458444733 -0.006976894596622621 high 0.08321474038267752 0.10619579477588183 -0.00697689284552581 rel -4.267142195146789e-12 -1.802656024452176e-09 2.509851948495623e-07 alpha absolute -1.7510968109563096e-09
+0 1 100 0.5 104 low 0.1832762558671146 0.10455916124195365 -0.009689196703884767 high 0.18327625742332196 0.10455916751597875 -0.00968925447597675 rel -8.491047198688761e-09 -6.000454344512463e-08 -5.962490935429443e-06 alpha absolute 5.7772091983585017e-08
+0 1 100 0.3 160 low 0.11908389208150023 0.10461965589590243 -0.008533066943319581 high 0.11908389217755411 0.10461965671535152 -0.00853307273578502 rel -8.066067813672362e-10 -7.832649417949256e-09 -6.788252742140344e-07 alpha absolute 5.792465439594108e-09
+0 1 25 0.5 104 low 0.20478860471326352 0.1060702227415526 -0.009344990412457545 high 0.20478860472306634 0.10607022274507942 -0.009344990326697352 rel -4.786804286283086e-11 -3.324984731989389e-11 9.177130166904135e-09 alpha absolute -8.576019235040366e-11
+0 50 1.99 0.001 32 low 5.164210948745292 2.2946034597893807 -0.174215431924536 high 5.164210948745307 2.2946034597921448 -0.17421543192690558 rel -2.886579864025407e-15 -1.2045919817182948e-12 -1.3601453296985255e-11 alpha absolute 2.3695767570330872e-12
+0 50 7.99 0.001 56 low 2.578726709765225 2.032937051101585 -0.3111039448258214 high 2.578726709765285 2.0329370511131137 -0.3111039448309 rel -2.3203661214665772e-14 -5.670908187482837e-12 -1.6324497309483377e-11 alpha absolute 5.078604203845316e-12
+0 50 24.99 0.001 88 low 1.4601858275506336 1.974003108606162 -0.3330947745568092 high 1.4601858275728568 1.9740031167957397 -0.33309478139433585 rel -1.5219381310771496e-11 -4.148715704310746e-09 -2.0527270438996936e-08 alpha absolute 6.837526655978365e-09
+0 50 100 0.5 104 low 3.147190182721115 1.9063690359399565 -0.41200329330257063 high 3.147190208637324 1.9063690524082497 -0.41200331497245857 rel -8.234713355648182e-09 -8.638565085483663e-09 -5.2596392241532897e-08 alpha absolute 2.1669887939612664e-08
+[14]-  1471 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/audit_basis.py > /app/audit_basis.log 2>&1 &
+[15]+  1571 Running                 ( time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0.8 100 0.001 50 > /app/finaltest3.json 2> /app/finaltest3.err ) 2> /app/finaltest3.time &
+[?2004hroot@6d9ebe23d9ab:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read();old=''' res=vector_result(B,norms,N,R,X,T)
+[?2004l[?2004h>  print("vector seconds",time.monotonic()-start,file=sys.stderr)''';new=''' res=vector_result(B,norms,N,R,X,T)
+[?2004l[?2004h>  small=max(12,int(.8*N))
+[?2004l[?2004h>  ids=np.concatenate([np.arange(small),N+np.arange(small)])
+[?2004l[?2004h>  previous=vector_result(B[np.ix_(ids,ids)],norms,small,R,X,T)
+[?2004l[?2004h>  limits=np.array([2e-6*abs(res[0]),2e-6*abs(res[1]),max(2e-6*abs(res[2]),1.5e-7)])
+[?2004l[?2004h>  if np.any(abs(res-previous)>limits) and N<224 and time.monotonic()-start<430:
+[?2004l[?2004h>   # Recompute a larger Galerkin space using the same scattering kernel.
+[?2004l[?2004h>   bigger=min(224,max(N+24,int(N*1.35)))
+[?2004l[?2004h>   t,wt=knot_nodes(C.grid,T,bigger,10)
+[?2004l[?2004h>   q0=C.evaluate(np.maximum(t*T,1e-4))
+[?2004l[?2004h>   q=np.concatenate([q0,np.tile(q0[-1],(2*bigger+1-Lcap,1))])
+[?2004l[?2004h>   j=radial_stable(t,wt,q,bigger,1)
+[?2004l[?2004h>   G,norms=groups(bigger,R)
+[?2004l[?2004h>   B=vmat(G,j,bigger,R,X,T)
+[?2004l[?2004h>   res=vector_result(B,norms,bigger,R,X,T)
+[?2004l[?2004h>  print("vector seconds",time.monotonic()-start,file=sys.stderr)''';assert old in s;s=s.replace(old,new)
+[?2004l[?2004h> # Add a tensor convergence diagnostic.
+[?2004l[?2004h> old=''' viscosity=2*T/5*(S@solve(B2,S,assume_a='pos'))
+[?2004l[?2004h>  if R==1: res[2]=0.''';new=''' viscosity=2*T/5*(S@solve(B2,S,assume_a='pos'))
+[?2004l[?2004h>  k=16
+[?2004l[?2004h>  ids=np.concatenate([np.arange(k),Nv+np.arange(k)])
+[?2004l[?2004h>  ss=S[ids]
+[?2004l[?2004h>  vprev=2*T/5*(ss@solve(B2[np.ix_(ids,ids)],ss,assume_a='pos'))
+[?2004l[?2004h>  print("tensor relative increment",viscosity/vprev-1,file=sys.stderr)
+[?2004l[?2004h>  if R==1: res[2]=0.''';assert old in s;s=s.replace(old,new);open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# python3 -m py_compile /app/output/transport.py; tail -8 /app/finaltest3.err; cat /app/finaltest3.json /app/finaltest3.time; tail -8 /app/audit_basis.log
+[?2004lcollision grid 0 1771
+collision grid 100 1771
+collision grid 200 1771
+collision grid 300 1771
+0.8 0.2 24.99 0.001 88 low 0.044543748885619905 0.058491360964458394 -0.3888243204034866 high 0.044543748889504485 0.05849136206311828 -0.38882435573985685 rel -8.720824062891097e-11 -1.878328437232568e-08 -9.088003294355218e-08 alpha absolute 3.533637027430814e-08
+0.8 0.2 100 0.5 104 low 0.0923038495260891 0.05611448464611502 -0.4882832725176644 high 0.0923038497422314 0.056114484772581456 -0.48828327840923713 rel -2.3416389938191173e-09 -2.2537217647666807e-09 -1.2065890842016813e-08 alpha absolute 5.891572729677108e-09
+0.8 0.2 100 0.3 160 low 0.060117288000371805 0.056878171472320584 -0.44426826622566035 high 0.06011728803256019 0.05687817150194868 -0.44426826741043063 rel -5.354263699075545e-10 -5.20904541723155e-10 -2.666790233085692e-09 alpha absolute 1.1847702818812422e-09
+0.8 0.2 25 0.5 104 low 0.1035981811952414 0.05677077739410517 -0.47376787331479425 high 0.10359818119576064 0.05677077739475655 -0.47376787333527076 rel -5.011990822367807e-12 -1.1473932914896068e-11 -4.3220538259447494e-11 alpha absolute 2.0476509376976537e-11
+0.8 1 1.99 0.001 32 low 0.4090337265549226 0.1717615968849978 -0.22559986376133992 high 0.4090337265549269 0.17176159688618153 -0.22559986377259042 rel -1.0547118733938987e-14 -6.891598403058197e-12 -4.9869219864717707e-11 alpha absolute 1.1250500531190255e-11
+0.8 1 7.99 0.001 56 low 0.20421778132819654 0.15402455577819346 -0.38772825811969625 high 0.20421778132894716 0.15402455606509327 -0.38772826113379316 rel -3.675615367626506e-12 -1.862688780995825e-09 -7.773735433147522e-09 alpha absolute 3.0140969164982323e-09
+0.8 1 24.99 0.001 88 low 0.1156271641216497 0.1502697802127345 -0.4116289979693581 high 0.11562716413584646 0.1502697842547079 -0.41162904840012626 rel -1.2278056349401822e-10 -2.6898111515905043e-08 -1.2251508574312453e-07 alpha absolute 5.0430768172571305e-08
+0.8 1 100 0.5 104 low 0.23672263668886584 0.14369378249714762 -0.5184296775170928 high 0.23672263727904594 0.14369378285370044 -0.518429683664549 rel -2.493129147573825e-09 -2.4813378018961885e-09 -1.1857839932183367e-08 alpha absolute 6.147456210747748e-09
+[?2004hroot@6d9ebe23d9ab:/app# mkdir -p /app/checkcopy; cp /app/output/transport.py /app/checkcopy/transport.py; chmod 555 /app/checkcopy
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# (time cd /app/checkcopy && env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 transport.py 0.67 3.2 0.23 0.45 > /app/copytest.json 2> /app/copytest.err) 2> /app/copytest.time &
+[?2004l[16] 1632
+[?2004hroot@6d9ebe23d9ab:/app# date; tail -12 /app/finaltest3.err; cat /app/finaltest3.json /app/finaltest3.time; tail -12 /app/copytest.err; cat /app/copytest.json /app/copytest.time; tail -8 /app/audit_basis.log; jobs -l
+[?2004lTue Nov  3 01:28:19 UTC 2026
+collision grid 200 1771
+collision grid 300 1771
+collision grid 400 1771
+collision grid 500 1771
+collision grid 600 1771
+collision grid 700 1771
+collision grid 800 1771
+collision grid 900 1771
+collision grid 1000 1771
+collision grid 1100 1771
+collision grid 1200 1771
+collision grid 1300 1771
+collision grid 0 1328
+
+real	0m0.000s
+user	0m0.000s
+sys	0m0.000s
+0.8 1 24.99 0.001 88 low 0.1156271641216497 0.1502697802127345 -0.4116289979693581 high 0.11562716413584646 0.1502697842547079 -0.41162904840012626 rel -1.2278056349401822e-10 -2.6898111515905043e-08 -1.2251508574312453e-07 alpha absolute 5.0430768172571305e-08
+0.8 1 100 0.5 104 low 0.23672263668886584 0.14369378249714762 -0.5184296775170928 high 0.23672263727904594 0.14369378285370044 -0.518429683664549 rel -2.493129147573825e-09 -2.4813378018961885e-09 -1.1857839932183367e-08 alpha absolute 6.147456210747748e-09
+0.8 1 100 0.3 160 low 0.15421240432001518 0.1458843131509068 -0.4707809706350445 high 0.1542124044213021 0.14588431323507614 -0.4707809719938533 rel -6.568013910523973e-10 -5.769594801918743e-10 -2.8862866541246035e-09 alpha absolute 1.3588088432214818e-09
+0.8 1 25 0.5 104 low 0.2658241412891695 0.14532222444490703 -0.5032675365774698 high 0.2658241412909811 0.14532222444683318 -0.5032675366024715 rel -6.8151040366615234e-12 -1.3254397579487431e-11 -4.967870559369203e-11 alpha absolute 2.5001667403046213e-11
+0.8 50 1.99 0.001 32 low 3.654134902954903 1.4861264875940163 -0.2562478175981936 high 3.6541349029550525 1.486126487627861 -0.25624781763531795 rel -4.0967229608668276e-14 -2.277378285953091e-11 -1.448767772416204e-10 alpha absolute 3.712435914238199e-11
+0.8 50 7.99 0.001 56 low 1.824242213681778 1.3436930349037606 -0.4318427137495531 high 1.8242422136940306 1.3436930395731974 -0.43184271938118834 rel -6.7165162320748095e-12 -3.475077003933791e-09 -1.3040940660680178e-08 alpha absolute 5.631635269232049e-09
+0.8 50 24.99 0.001 88 low 1.032840348141374 1.3153069628141754 -0.4567498459017953 high 1.0328403484003446 1.315307038827455 -0.4567499526250461 rel -2.5073632059502415e-10 -5.7791281760088964e-08 -2.3365793511143096e-07 alpha absolute 1.067232507923066e-07
+0.8 50 100 0.5 104 low 2.0572332712782893 1.2492517494200843 -0.5794566195274775 high 2.0572332835868687 1.249251756239335 -0.5794566341945319 rel -5.983074258253396e-09 -5.458668073110573e-09 -2.5311737705813186e-08 alpha absolute 1.466705434882698e-08
+[14]   1471 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/audit_basis.py > /app/audit_basis.log 2>&1 &
+[15]-  1571 Running                 ( time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0.8 100 0.001 50 > /app/finaltest3.json 2> /app/finaltest3.err ) 2> /app/finaltest3.time &
+[16]+  1632 Running                 ( time cd /app/checkcopy && env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 transport.py 0.67 3.2 0.23 0.45 > /app/copytest.json 2> /app/copytest.err ) 2> /app/copytest.time &
+[?2004hroot@6d9ebe23d9ab:/app# date; tail -14 /app/finaltest3.err; cat /app/finaltest3.json /app/finaltest3.time; tail -12 /app/copytest.err; cat /app/copytest.json; tail -5 /app/audit_basis.log; for p in /proc/[0-9]*; do if test -r "$p/cmdline"; then c=$(tr '\0' ' ' < "$p/cmdline"); case "$c" in *python3*transport.py*) echo "$p $c"; grep -E 'State|VmRSS|Threads' "$p/status"; cut -d' ' -f14,15 "$p/stat";; esac; fi; done
+[?2004lTue Nov  3 01:28:45 UTC 2026
+[14]   Done                    OPENBLAS_NUM_THREADS=1 python3 /app/audit_basis.py > /app/audit_basis.log 2>&1
+collision grid 600 1771
+collision grid 700 1771
+collision grid 800 1771
+collision grid 900 1771
+collision grid 1000 1771
+collision grid 1100 1771
+collision grid 1200 1771
+collision grid 1300 1771
+collision grid 1400 1771
+collision grid 1500 1771
+collision grid 1600 1771
+collision grid 1700 1771
+scattering seconds 258.2531642857939
+radial seconds 269.5885386238806
+collision grid 0 1328
+0.8 50 7.99 0.001 56 low 1.824242213681778 1.3436930349037606 -0.4318427137495531 high 1.8242422136940306 1.3436930395731974 -0.43184271938118834 rel -6.7165162320748095e-12 -3.475077003933791e-09 -1.3040940660680178e-08 alpha absolute 5.631635269232049e-09
+0.8 50 24.99 0.001 88 low 1.032840348141374 1.3153069628141754 -0.4567498459017953 high 1.0328403484003446 1.315307038827455 -0.4567499526250461 rel -2.5073632059502415e-10 -5.7791281760088964e-08 -2.3365793511143096e-07 alpha absolute 1.067232507923066e-07
+0.8 50 100 0.5 104 low 2.0572332712782893 1.2492517494200843 -0.5794566195274775 high 2.0572332835868687 1.249251756239335 -0.5794566341945319 rel -5.983074258253396e-09 -5.458668073110573e-09 -2.5311737705813186e-08 alpha absolute 1.466705434882698e-08
+0.8 50 100 0.3 160 low 1.341236269732171 1.2725279477411109 -0.5236460484026322 high 1.3412362707728542 1.2725279485859924 -0.523646050010573 rel -7.759134446061466e-10 -6.639394589669223e-10 -3.0706633902255476e-09 alpha absolute 1.6079407805236201e-09
+0.8 50 25 0.5 104 low 2.312972093801547 1.2624713375882408 -0.5632591681399582 high 2.3129720938450595 1.2624713376315524 -0.5632591682087275 rel -1.8812507107668353e-11 -3.430700168394196e-11 -1.2209155908493585e-10 alpha absolute 6.876921254672652e-11
+/proc/1572 python3 /app/output/transport.py 0.8 100 0.001 50 
+State:	R (running)
+VmRSS:	  239364 kB
+Threads:	1
+16894 7779
+/proc/1633 python3 transport.py 0.67 3.2 0.23 0.45 
+State:	R (running)
+VmRSS:	  144104 kB
+Threads:	1
+3527 4148
+[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/timing067.log 2>&1 &
+[?2004l[?2004h> from scatter import Scatter
+[?2004l[?2004h> import time,math
+[?2004l[?2004h> S=Scatter(.67)
+[?2004l[?2004h> for i in range(15):
+[?2004l[?2004h>  E=1e-4*math.exp(i*.0125);ts=time.time();q=S.Q(E,24,12);print(i,E,time.time()-ts,q[1:3],flush=True)
+[?2004l[?2004h> PY
+[?2004l[17] 1734
+[?2004hroot@6d9ebe23d9ab:/app# tail -15 /app/timing067.log; tail -8 /app/finaltest3.err; cat /app/finaltest3.json /app/finaltest3.time; tail -8 /app/copytest.err
+[?2004l0 0.0001 4.406962871551514 [27.84746864 33.39192995]
+1 0.00010125784515406344 2.098419189453125 [27.75486306 33.28190615]
+2 0.00010253151205244288 2.801973342895508 [27.66260792 33.17229184]
+3 0.00010382119970818252 1.8665330410003662 [27.57070185 33.06308541]
+4 0.00010512710963760242 2.22711443901062 [27.47914345 32.95428526]
+5 0.00010644944589178593 1.9911270141601562 [27.38793136 32.8458898 ]
+6 0.00010778841508846316 2.6030898094177246 [27.29706418 32.73789746]
+7 0.00010914422644429518 2.4314746856689453 [27.20654057 32.63030665]
+8 0.00011051709180756478 1.6662137508392334 [27.11635915 32.52311581]
+9 0.00011190722569127807 0.8078837394714355 [27.02651857 32.41632337]
+10 0.00011331484530668264 0.7684714794158936 [26.93701749 32.30992777]
+11 0.00011474017059720723 0.739870548248291 [26.84785455 32.20392747]
+12 0.00011618342427282832 0.7635068893432617 [26.75902842 32.0983209 ]
+13 0.00011764483184486906 0.7949016094207764 [26.67053776 31.99310655]
+14 0.00011912462166123581 0.7221240997314453 [26.58238124 31.88828287]
+[17]+  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/timing067.log 2>&1
+from scatter import Scatter
+import time,math
+S=Scatter(.67)
+for i in range(15):
+ E=1e-4*math.exp(i*.0125);ts=time.time();q=S.Q(E,24,12);print(i,E,time.time()-ts,q[1:3],flush=True)
+PY
+
+collision grid 1200 1771
+collision grid 1300 1771
+collision grid 1400 1771
+collision grid 1500 1771
+collision grid 1600 1771
+collision grid 1700 1771
+scattering seconds 258.2531642857939
+radial seconds 269.5885386238806
+collision grid 0 1328
+collision grid 100 1328
+[?2004hroot@6d9ebe23d9ab:/app# cp /app/scatter.py /app/scatter_beforelocal.py
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/scatter.py';s=open(p).read();s=s.replace('  x1,w1=gauss(12); x2,w2=gauss(24)','  angle_tol=np.full(len(b2),tol)\n  if rc:\n   distance=np.maximum(abs(b2/bc2-1),1e-12)\n   angle_tol=np.minimum(2e-4,tol/np.sqrt(distance))\n  x1,w1=gauss(12); x2,w2=gauss(24)');s=s.replace('good=abs(I1-I2)<tol*(high-low)+2e-12*abs(I2)','good=abs(I1-I2)<angle_tol[ids]*(high-low)+2e-11*abs(I2)');open(p,'w').write(s)
+[?2004l[?2004h> # Apply the same validated numerical change to the deliverable.
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read();s=s.replace('  x1,w1=gauss(12); x2,w2=gauss(24)','  angle_tol=np.full(len(b2),tol)\n  if rc:\n   distance=np.maximum(abs(b2/bc2-1),1e-12)\n   angle_tol=np.minimum(2e-4,tol/np.sqrt(distance))\n  x1,w1=gauss(12); x2,w2=gauss(24)');s=s.replace('good=abs(I1-I2)<tol*(high-low)+2e-12*abs(I2)','good=abs(I1-I2)<angle_tol[ids]*(high-low)+2e-11*abs(I2)');open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/local_compare.log 2>&1 &
+[?2004l[?2004h> from scatter import Scatter
+[?2004l[?2004h> from scatter_beforelocal import Scatter as Old
+[?2004l[?2004h> import time,numpy as np
+[?2004l[?2004h> for A in [0,.35,.67,.8]:
+[?2004l[?2004h>  for E in [.0001,.00012,.001,.1,.7,1,4]:
+[?2004l[?2004h>   S=Scatter(A);O=Old(A);ts=time.time();q=S.Q(E,24,12);t=time.time()-ts
+[?2004l[?2004h>   print('new',A,E,t,q[1:4],flush=True)
+[?2004l[?2004h>   qr=O.Q(E,24,12);print('comparison',A,E,np.max(abs(q[1:]/qr[1:]-1)),flush=True)
+[?2004l[?2004h> PY
+[?2004l[17] 1759
+[?2004hroot@6d9ebe23d9ab:/app# date; tail -18 /app/local_compare.log; tail -10 /app/finaltest3.err; cat /app/finaltest3.json /app/finaltest3.time; tail -10 /app/copytest.err; jobs -l
+[?2004lTue Nov  3 01:29:23 UTC 2026
+[15]   Done                    ( time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0.8 100 0.001 50 > /app/finaltest3.json 2> /app/finaltest3.err ) 2> /app/finaltest3.time
+[17]+  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/local_compare.log 2>&1
+from scatter import Scatter
+from scatter_beforelocal import Scatter as Old
+import time,numpy as np
+for A in [0,.35,.67,.8]:
+ for E in [.0001,.00012,.001,.1,.7,1,4]:
+  S=Scatter(A);O=Old(A);ts=time.time();q=S.Q(E,24,12);t=time.time()-ts
+  print('new',A,E,t,q[1:4],flush=True)
+  qr=O.Q(E,24,12);print('comparison',A,E,np.max(abs(q[1:]/qr[1:]-1)),flush=True)
+PY
+
+new 0.67 1 0.021971464157104492 [4.15016274 4.7733056  5.19300238]
+comparison 0.67 1 5.615952147763892e-12
+new 0.67 4 0.014817476272583008 [3.43630992 3.93482008 4.23808657]
+comparison 0.67 4 0.0
+new 0.8 0.0001 0.03614234924316406 [14.73605674 17.69146622 19.94224639]
+comparison 0.8 0.0001 3.341227294839655e-11
+new 0.8 0.00012 0.036711692810058594 [14.1653214  16.99844757 19.13815831]
+comparison 0.8 0.00012 1.871836019518014e-13
+new 0.8 0.001 0.027582645416259766 [ 9.26716221 11.01923169 12.23295071]
+comparison 0.8 0.001 4.729550084903167e-14
+new 0.8 0.1 0.024028778076171875 [4.64032815 5.2953252  5.70626924]
+comparison 0.8 0.1 2.0183854587685346e-13
+new 0.8 0.7 0.02089405059814453 [3.80169128 4.23207247 4.50527783]
+comparison 0.8 0.7 2.453592884421596e-13
+new 0.8 1 0.021334409713745117 [3.68866828 4.08474081 4.33782693]
+comparison 0.8 1 8.615330671091215e-14
+new 0.8 4 0.018091440200805664 [3.34610823 3.62140008 3.80430079]
+comparison 0.8 4 4.529709940470639e-14
+collision grid 1100 1771
+collision grid 1200 1771
+collision grid 1300 1771
+collision grid 1400 1771
+collision grid 1500 1771
+collision grid 1600 1771
+collision grid 1700 1771
+scattering seconds 258.2531642857939
+radial seconds 269.5885386238806
+vector seconds 310.6439280610066
+{"viscosity":13.632021936129624,"thermal_conductivity":0.5178030104695727,"binary_diffusion":1.3061037869866337,"thermal_diffusion_factor":-0.4665084403319505}
+
+real	5m11.461s
+user	3m9.735s
+sys	1m18.351s
+collision grid 0 1328
+collision grid 100 1328
+[16]+  1632 Running                 ( time cd /app/checkcopy && env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 transport.py 0.67 3.2 0.23 0.45 > /app/copytest.json 2> /app/copytest.err ) 2> /app/copytest.time &
+[?2004hroot@6d9ebe23d9ab:/app# python3 - <<'PY'
+[?2004l[?2004h> for p in ['/app/vector_weights.py','/app/output/transport.py']:
+[?2004l[?2004h>  s=open(p).read();start=s.index('@functools.lru_cache(None)\ndef S(');end=s.index('@functools.lru_cache(None)\ndef logNorm',start)
+[?2004l[?2004h>  new='''@functools.lru_cache(None)
+[?2004l[?2004h> def logS(n,h,L):
+[?2004l[?2004h>  if h<0 or h>2*n or L<0 or L>h or (h-L)%2: return -math.inf
+[?2004l[?2004h>  terms=[]
+[?2004l[?2004h>  for a in range(max(0,h-n),h//2+1):
+[?2004l[?2004h>   b=h-2*a; d=n-a-b
+[?2004l[?2004h>   li=logI(b,L)
+[?2004l[?2004h>   if not math.isfinite(li): continue
+[?2004l[?2004h>   terms.append(b*math.log(2)-math.lgamma(a+1)-math.lgamma(b+1)-math.lgamma(d+1)+li)
+[?2004l[?2004h>  if not terms: return -math.inf
+[?2004l[?2004h>  peak=max(terms)
+[?2004l[?2004h>  return peak+math.log(sum(math.exp(v-peak) for v in terms))
+[?2004l[?2004h> '''
+[?2004l[?2004h>  s=s[:start]+new+s[end:]
+[?2004l[?2004h>  old='''  a=factor*(S(n,h,lc)+S(n,h-1,L))
+[?2004l[?2004h>   out.append(sign*math.exp(math.log(a)+.5*(logNorm(h,lc)+logNorm(k,L)-math.log(den))) if a else 0.)'''
+[?2004l[?2004h>  new='''  a=logS(n,h,lc); b=logS(n,h-1,L)
+[?2004l[?2004h>   peak=max(a,b)
+[?2004l[?2004h>   if not math.isfinite(peak): out.append(0.); continue
+[?2004l[?2004h>   la=math.log(factor)+peak+math.log(math.exp(a-peak)+math.exp(b-peak))
+[?2004l[?2004h>   out.append(sign*math.exp(la+.5*(logNorm(h,lc)+logNorm(k,L)-math.log(den))))'''
+[?2004l[?2004h>  assert old in s;s=s.replace(old,new);open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/vector_weights.py 12 > /app/logcoeff.log; tail -3 /app/logcoeff.log
+[?2004l22 1365
+23 1365
+max discrepancy 1.5350585399449133e-14 sizes (1365, 5) (1550, 5)
+[?2004hroot@6d9ebe23d9ab:/app# kill 1633 2>/dev/null; cp /app/output/transport.py /app/checkcopy/transport.py
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# (time (cd /app/checkcopy && env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 transport.py 0.67 3.2 0.23 0.45 > /app/copytest_new.json 2> /app/copytest_new.err)) 2> /app/copytest_new.time &
+[?2004l[17] 1811
+[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/group_solver.py 224 > /app/group224.log 2>&1 &
+[?2004l[18] 1832
+[16]   Exit 143                ( time cd /app/checkcopy && env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 transport.py 0.67 3.2 0.23 0.45 > /app/copytest.json 2> /app/copytest.err ) 2> /app/copytest.time
+[?2004hroot@6d9ebe23d9ab:/app# cat > /app/angle_check.py <<'PY'
+[?2004l[?2004h> import numpy as np,math
+[?2004l[?2004h> from scipy.integrate import quad
+[?2004l[?2004h> from scipy.optimize import brentq
+[?2004l[?2004h> from scatter import Scatter
+[?2004l[?2004h> for A in [0,.35,.8]:
+[?2004l[?2004h>  S=Scatter(A)
+[?2004l[?2004h>  for E in [.03,.7,1,8,100]:
+[?2004l[?2004h>   pars=S.parameters(E); rz,rc,bc=pars
+[?2004l[?2004h>   for b2 in [rz**2*.1,rz**2*.8,rz**2*2,rz**2*5]:
+[?2004l[?2004h>    def F(r):
+[?2004l[?2004h>     y=(1-A)/(r-A);return 1-b2/r**2-4*(y**12-y**6)/E
+[?2004l[?2004h>    lo=rz
+[?2004l[?2004h>    if rc and b2>bc:lo=rc
+[?2004l[?2004h>    hi=max(2*rz,2*math.sqrt(b2),2*rc)
+[?2004l[?2004h>    rt=brentq(F,lo,rc if rc and b2<bc else hi,xtol=1e-14)
+[?2004l[?2004h>    # independent r=rt/(1-v^2) mapping of the trajectory integral
+[?2004l[?2004h>    def f(v):
+[?2004l[?2004h>     r=rt/(1-v*v)
+[?2004l[?2004h>     return 2*v/(rt*math.sqrt(F(r)))
+[?2004l[?2004h>    val,err=quad(f,0,1,epsabs=1e-10,epsrel=1e-10,limit=300)
+[?2004l[?2004h>    ref=np.pi-2*math.sqrt(b2)*val
+[?2004l[?2004h>    got=S.angles(E,np.array([b2]),pars)[0]
+[?2004l[?2004h>    print(A,E,b2,got,ref,got-ref,flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/angle_check.py > /app/angle_check.log 2>&1 &
+[?2004l[19] 1834
+[?2004hroot@6d9ebe23d9ab:/app# cat /app/copytest_new.json; tail -12 /app/copytest_new.err; cat /app/copytest_new.time
+[?2004lcollision grid 0 1328
+collision grid 100 1328
+collision grid 200 1328
+collision grid 300 1328
+collision grid 400 1328
+collision grid 500 1328
+collision grid 600 1328
+collision grid 700 1328
+collision grid 800 1328
+collision grid 900 1328
+[?2004hroot@6d9ebe23d9ab:/app# tail -15 /app/group224.log; tail -8 /app/angle_check.log; cat /app/copytest_new.json /app/copytest_new.time; tail -10 /app/copytest_new.err; jobs -l
+[?2004l[17]   Done                    ( time ( cd /app/checkcopy && env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 transport.py 0.67 3.2 0.23 0.45 > /app/copytest_new.json 2> /app/copytest_new.err ) ) 2> /app/copytest_new.time
+[19]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/angle_check.py > /app/angle_check.log 2>&1
+0.8 8 0.09568356108442727 2.4939050090534076 2.4939050090533925 1.509903313490213e-14
+0.8 8 0.7654684886754182 0.990850113902705 0.9908501139026051 9.992007221626409e-14
+0.8 8 1.9136712216885454 -0.0037462659305949053 -0.0037462659305358414 -5.906386491005833e-14
+0.8 8 4.784178054221363 -1.6721393940599683e-05 -1.6721393979679533e-05 3.907985046680551e-14
+0.8 100 0.0903300269354423 2.4885080403372837 2.488508040337307 -2.353672812205332e-14
+0.8 100 0.7226402154835384 0.9467778864192629 0.9467778864190848 1.780797731498751e-13
+0.8 100 1.806600538708846 -0.000461013620739692 -0.00046101362072503704 -1.4654943925052066e-14
+0.8 100 4.516501346772115 -1.7758612687046593e-06 -1.7758614467844325e-06 1.780797731498751e-13
+{"viscosity":0.1376020758843348,"thermal_conductivity":0.19144281602486277,"binary_diffusion":0.09015266024362527,"thermal_diffusion_factor":-0.2795899068828322}
+
+real	0m33.566s
+user	0m33.202s
+sys	0m0.071s
+collision grid 800 1328
+collision grid 900 1328
+collision grid 1000 1328
+collision grid 1100 1328
+collision grid 1200 1328
+collision grid 1300 1328
+scattering seconds 32.2839293491561
+radial seconds 32.57725766301155
+vector seconds 33.05549011612311
+tensor relative increment 3.8782532740810893e-11
+[18]+  1832 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/group_solver.py 224 > /app/group224.log 2>&1 &
+[?2004hroot@6d9ebe23d9ab:/app# cat > /app/tracer224.py <<'PY'
+[?2004l[?2004h> import numpy as np,math,time
+[?2004l[?2004h> from scipy.interpolate import CubicSpline
+[?2004l[?2004h> from energy import radial_stable
+[?2004l[?2004h> from knot_test import knot_nodes
+[?2004l[?2004h> from group_solver import groups,vmat,vector_result
+[?2004l[?2004h> G,norm=groups(224,100)
+[?2004l[?2004h> for A,T in [(0,1),(0,.2),(.8,50),(.8,.2)]:
+[?2004l[?2004h>  D=np.load('/app/dense0.npz' if A==0 else '/app/cross0.8.npz');C=CubicSpline(D['grid'],D['vals'],axis=0)
+[?2004l[?2004h>  t,w=knot_nodes(D['grid'],T,224,8);Q0=C(np.log(np.maximum(t*T,1e-4))).T
+[?2004l[?2004h>  Q=np.concatenate([Q0,np.tile(Q0[-1],(449-(Q0.shape[0]-1),1))]);J=radial_stable(t,w,Q,224,1)
+[?2004l[?2004h>  B=vmat(G,J,224,100,.001,T)
+[?2004l[?2004h>  for N in [100,120,140,160,180,200,224]:
+[?2004l[?2004h>   ids=np.concatenate([np.arange(N),224+np.arange(N)]);res=vector_result(B[np.ix_(ids,ids)],norm,N,100,.001,T)
+[?2004l[?2004h>   print(A,T,N,*res,flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# OPENBLAS_NUM_THREADS=1 python3 /app/tracer224.py > /app/tracer224.log 2>&1 &
+[?2004l[19] 1867
+[?2004hroot@6d9ebe23d9ab:/app# date; tail -20 /app/group224.log; tail -16 /app/tracer224.log; for p in 1832 1867; do grep -E 'State|VmRSS|VmPeak|Threads' /proc/$p/status 2>/dev/null; done
+[?2004lTue Nov  3 01:31:39 UTC 2026
+State:	R (running)
+VmPeak:	  657900 kB
+VmRSS:	  451616 kB
+Threads:	1
+State:	R (running)
+VmPeak:	  412968 kB
+VmRSS:	  257260 kB
+Threads:	1
+[?2004hroot@6d9ebe23d9ab:/app# (time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0.8 100 0.001 50 > /app/optimized_tracer.json 2> /app/optimized_tracer.err) 2> /app/optimized_tracer.time &
+[?2004l[20] 1891
+[?2004hroot@6d9ebe23d9ab:/app# find /app/output -maxdepth 2 -type f -printf '%p %s bytes\n'
+[?2004l/app/output/__pycache__/transport.cpython-312.pyc 208381 bytes
+/app/output/transport.py 185940 bytes
+[?2004hroot@6d9ebe23d9ab:/app# tail -16 /app/group224.log; tail -16 /app/tracer224.log; tail -10 /app/optimized_tracer.err; cat /app/optimized_tracer.json /app/optimized_tracer.time; rm -rf /app/output/__pycache__
+[?2004l100 0.001 100 [ 0.06809012  0.16959588 -0.49579224] time 1.698242425918579
+100 0.001 120 [ 0.06809012  0.16959618 -0.49579577] time 2.7426679134368896
+100 0.1 12 [ 0.09968192  0.16779635 -0.51092803] time 0.2583034038543701
+100 0.1 20 [ 0.09972375  0.16788536 -0.51213979] time 0.30652594566345215
+100 0.1 40 [ 0.09973519  0.16791113 -0.51248066] time 0.4583430290222168
+100 0.1 60 [ 0.09973625  0.16791363 -0.51251299] time 0.6100633144378662
+100 0.1 80 [ 0.09973646  0.16791413 -0.51251943] time 0.9965198040008545
+100 0.1 100 [ 0.09973652  0.16791427 -0.51252124] time 1.696347713470459
+100 0.1 120 [ 0.09973654  0.16791432 -0.51252186] time 2.7256479263305664
+4 0.3 12 [ 0.37686236  0.17649876 -0.44240262] time 0.2930715084075928
+4 0.3 20 [ 0.37686324  0.17649939 -0.44241185] time 0.3577284812927246
+4 0.3 40 [ 0.37686326  0.17649941 -0.44241207] time 0.43648862838745117
+4 0.3 60 [ 0.37686326  0.17649941 -0.44241207] time 0.60347580909729
+4 0.3 80 [ 0.37686326  0.17649941 -0.44241207] time 0.9918322563171387
+4 0.3 100 [ 0.37686326  0.17649941 -0.44241207] time 1.6912851333618164
+4 0.3 120 [ 0.37686326  0.17649941 -0.44241207] time 2.7839295864105225
+[18]   Done                    OPENBLAS_NUM_THREADS=1 python3 /app/group_solver.py 224 > /app/group224.log 2>&1
+[20]+  Done                    ( time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0.8 100 0.001 50 > /app/optimized_tracer.json 2> /app/optimized_tracer.err ) 2> /app/optimized_tracer.time
+0 1 100 0.041732204359964324 0.1047242645466467 -0.007460465717579606
+0 1 120 0.04173220436361924 0.1047242703898827 -0.0074605025478821346
+0 1 140 0.04173220436518893 0.10472427369643751 -0.007460513384922461
+0 1 160 0.0417322043721029 0.10472427850811106 -0.007460567606406077
+0 1 180 0.04173220437388361 0.1047242806901542 -0.007460586423138184
+0 1 200 0.0417322043739022 0.10472428091190432 -0.00746058634958855
+0 1 224 0.04173220437401084 0.10472428114860681 -0.007460585444888743
+0 0.2 100 0.009128570364842171 0.021677710963265012 -0.12334454296697661
+0 0.2 120 0.009128570369463176 0.02167771199630991 -0.12334453095521897
+0 0.2 140 0.009128570371075301 0.021677712393619975 -0.12334452676864145
+0 0.2 160 0.009128570372724194 0.021677712440850913 -0.12334452877117934
+0 0.2 180 0.009128570372854031 0.021677712554213233 -0.12334452621040591
+0 0.2 200 0.009128570373336397 0.021677712560446403 -0.12334452666308138
+0 0.2 224 0.009128570373384713 0.02167771259160753 -0.12334452579603357
+collision grid 1200 1771
+collision grid 1300 1771
+collision grid 1400 1771
+collision grid 1500 1771
+collision grid 1600 1771
+collision grid 1700 1771
+scattering seconds 45.24861347908154
+radial seconds 53.36355805606581
+vector seconds 70.04878213210031
+tensor relative increment 9.84604175968684e-10
+{"viscosity":13.632021936129624,"thermal_conductivity":0.5178030104695724,"binary_diffusion":1.3061037869865968,"thermal_diffusion_factor":-0.4665084403318966}
+
+real	1m10.825s
+user	0m58.136s
+sys	0m0.823s
+[?2004hroot@6d9ebe23d9ab:/app# tail -20 /app/tracer224.log; jobs -l; python3 - <<'PY'
+[?2004l[?2004h> import json,math,os,stat
+[?2004l[?2004h> keys={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+[?2004l[?2004h> for f in ['finaltest1.json','finaltest2.json','finaltest3.json','copytest_new.json','optimized_tracer.json']:
+[?2004l[?2004h>  obj=json.load(open('/app/'+f));assert set(obj)==keys and all(type(v) in (int,float) and math.isfinite(v) for v in obj.values());print(f,'schema OK')
+[?2004l[?2004h> p='/app/output/transport.py';st=os.lstat(p);assert stat.S_ISREG(st.st_mode) and st.st_size<=20971520;print('deliverable',st.st_size,'bytes')
+[?2004l[?2004h> PY
+[?2004l0 0.2 120 0.009128570369463176 0.02167771199630991 -0.12334453095521897
+0 0.2 140 0.009128570371075301 0.021677712393619975 -0.12334452676864145
+0 0.2 160 0.009128570372724194 0.021677712440850913 -0.12334452877117934
+0 0.2 180 0.009128570372854031 0.021677712554213233 -0.12334452621040591
+0 0.2 200 0.009128570373336397 0.021677712560446403 -0.12334452666308138
+0 0.2 224 0.009128570373384713 0.02167771259160753 -0.12334452579603357
+0.8 50 100 0.5178030017812421 1.3061016236196912 -0.46650511901986885
+0.8 50 120 0.5178030070394414 1.3061029337255208 -0.4665071295553661
+0.8 50 140 0.5178030093921845 1.3061035197311914 -0.4665080290070948
+0.8 50 160 0.5178030104710357 1.3061037869902723 -0.4665084403333558
+0.8 50 180 0.5178030109782391 1.3061039116453868 -0.4665086329462059
+0.8 50 200 0.517803011225677 1.3061039719954455 -0.46650872655388403
+0.8 50 224 0.5178030113701058 1.3061040070615135 -0.466508781068093
+0.8 0.2 100 0.0223342383310256 0.05796152825795011 -0.3975100632071014
+0.8 0.2 120 0.022334238412803326 0.05796154722266841 -0.397510742985986
+0.8 0.2 140 0.022334238447219903 0.05796155527588986 -0.3975110303587805
+0.8 0.2 160 0.022334238463077624 0.05796155901478555 -0.3975111632722854
+0.8 0.2 180 0.02233423847090531 0.05796156087253345 -0.3975112290967275
+0.8 0.2 200 0.0223342384749851 0.057961561846370906 -0.3975112635031276
+0.8 0.2 224 0.022334238477517396 0.05796156245411521 -0.3975112849169202
+[19]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/tracer224.py > /app/tracer224.log 2>&1
+finaltest1.json schema OK
+finaltest2.json schema OK
+finaltest3.json schema OK
+copytest_new.json schema OK
+optimized_tracer.json schema OK
+deliverable 185940 bytes
+[?2004hroot@6d9ebe23d9ab:/app# (time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0.13 72 0.041 0.29 > /app/randomtest1.json 2> /app/randomtest1.err) 2> /app/randomtest1.time &
+[?2004l[1] 1947
+[?2004hroot@6d9ebe23d9ab:/app# (time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0.52 12.5 0.83 4.7 > /app/randomtest2.json 2> /app/randomtest2.err) 2> /app/randomtest2.time &
+[?2004l[2] 1949
+[?2004hroot@6d9ebe23d9ab:/app# cat /app/randomtest1.json /app/randomtest2.json; tail -8 /app/randomtest1.err; tail -8 /app/randomtest2.err; cat /app/randomtest1.time /app/randomtest2.time
+[?2004lcollision grid 600 1359
+collision grid 700 1359
+collision grid 800 1359
+collision grid 900 1359
+collision grid 1000 1359
+collision grid 1100 1359
+collision grid 1200 1359
+collision grid 1300 1359
+collision grid 900 1542
+collision grid 1000 1542
+collision grid 1100 1542
+collision grid 1200 1542
+collision grid 1300 1542
+collision grid 1400 1542
+collision grid 1500 1542
+scattering seconds 31.008683802792802
+[?2004hroot@6d9ebe23d9ab:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read();start=s.index('\ndef build(N):');end=s.index('\ndef groups(',start);s=s[:start]+s[end:];open(p,'w').write(s)
+[?2004l[?2004h> print('removed unused coefficient-file builder')
+[?2004l[?2004h> PY
+[?2004lremoved unused coefficient-file builder
+[?2004hroot@6d9ebe23d9ab:/app# cat > /app/strict_random.py <<'PY'
+[?2004l[?2004h> import importlib.util,sys,time,numpy as np
+[?2004l[?2004h> spec=importlib.util.spec_from_file_location('tr','/app/output/transport.py');tr=importlib.util.module_from_spec(spec);spec.loader.exec_module(tr)
+[?2004l[?2004h> A,R,X,T=map(float,sys.argv[1:]);N=224 if R>25 else 128;Nv=20
+[?2004l[?2004h> C=tr.CrossSections(A,1e-4,T*(4*N+100)*1.05,32,.00625,16)
+[?2004l[?2004h> t,w=tr.knot_nodes(C.grid,T,N,12);q0=C.evaluate(np.maximum(t*T,1e-4));Q=np.concatenate([q0,np.tile(q0[-1],(2*N+1-32,1))])
+[?2004l[?2004h> J=tr.radial_stable(t,w,Q,N,1);J2=tr.radial_stable(t,w,Q,Nv,2);G,norm=tr.groups(N,R);B=tr.vmat(G,J,N,R,X,T);res=tr.vector_result(B,norm,N,R,X,T)
+[?2004l[?2004h> B2=tr.matrix(tr.TENSOR_WEIGHTS,J2,Nv,2,R,X,T);S=np.zeros(40);S[0]=2.5*X;S[20]=2.5*(1-X);visc=2*T/5*S@tr.solve(B2,S,assume_a='pos')
+[?2004l[?2004h> print(tr.json.dumps(dict(viscosity=visc,thermal_conductivity=res[0],binary_diffusion=res[1],thermal_diffusion_factor=res[2])))
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6d9ebe23d9ab:/app# (time python3 /app/strict_random.py 0.13 72 0.041 0.29 > /app/strict_random1.json 2> /app/strict_random1.err) 2> /app/strict_random1.time &
+[?2004l[3] 1975
+[?2004hroot@6d9ebe23d9ab:/app# (time python3 /app/strict_random.py 0.52 12.5 0.83 4.7 > /app/strict_random2.json 2> /app/strict_random2.err) 2> /app/strict_random2.time &
+[?2004l[4] 1977
+[?2004hroot@6d9ebe23d9ab:/app# date; cat /app/randomtest1.json /app/randomtest2.json; cat /app/randomtest1.time /app/randomtest2.time; tail -8 /app/randomtest1.err; tail -8 /app/randomtest2.err; tail -6 /app/strict_random1.err; tail -6 /app/strict_random2.err; jobs -l
+[?2004lTue Nov  3 01:35:37 UTC 2026
+[2]   Done                    ( time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0.52 12.5 0.83 4.7 > /app/randomtest2.json 2> /app/randomtest2.err ) 2> /app/randomtest2.time
+{"viscosity":0.6835314823412143,"thermal_conductivity":1.1408822830443224,"binary_diffusion":0.36145266219269906,"thermal_diffusion_factor":-0.5103904674652862}
+
+real	0m38.811s
+user	0m34.771s
+sys	0m0.687s
+collision grid 800 1359
+collision grid 900 1359
+collision grid 1000 1359
+collision grid 1100 1359
+collision grid 1200 1359
+collision grid 1300 1359
+scattering seconds 33.10189341194928
+radial seconds 43.75195998698473
+collision grid 1200 1542
+collision grid 1300 1542
+collision grid 1400 1542
+collision grid 1500 1542
+scattering seconds 31.008683802792802
+radial seconds 33.50072847190313
+vector seconds 38.09184253192507
+tensor relative increment 6.8460221935850996e-09
+collision grid 0 2577
+collision grid 100 2577
+collision grid 200 2577
+collision grid 300 2577
+collision grid 0 2944
+collision grid 100 2944
+collision grid 200 2944
+collision grid 300 2944
+[1]   1947 Running                 ( time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0.13 72 0.041 0.29 > /app/randomtest1.json 2> /app/randomtest1.err ) 2> /app/randomtest1.time &
+[3]-  1975 Running                 ( time python3 /app/strict_random.py 0.13 72 0.041 0.29 > /app/strict_random1.json 2> /app/strict_random1.err ) 2> /app/strict_random1.time &
+[4]+  1977 Running                 ( time python3 /app/strict_random.py 0.52 12.5 0.83 4.7 > /app/strict_random2.json 2> /app/strict_random2.err ) 2> /app/strict_random2.time &
+[?2004hroot@6d9ebe23d9ab:/app# for p in 1976 1978; do grep -E 'State|VmRSS|Threads' /proc/$p/status 2>/dev/null; done
+[?2004lState:	R (running)
+VmRSS:	   86280 kB
+Threads:	64
+State:	R (running)
+VmRSS:	   86312 kB
+Threads:	64
+[?2004hroot@6d9ebe23d9ab:/app# kill 1976 1978 2>/dev/null
+[?2004l[1]   Done                    ( time env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 /app/output/transport.py 0.13 72 0.041 0.29 > /app/randomtest1.json 2> /app/randomtest1.err ) 2> /app/randomtest1.time
+[?2004hroot@6d9ebe23d9ab:/app# (time OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python3 /app/strict_random.py 0.13 72 0.041 0.29 > /app/strict_random1.json 2> /app/strict_random1.err) 2> /app/strict_random1.time &
+[?2004l[5] 2162
+[?2004hroot@6d9ebe23d9ab:/app# (time OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python3 /app/strict_random.py 0.52 12.5 0.83 4.7 > /app/strict_random2.json 2> /app/strict_random2.err) 2> /app/strict_random2.time &
+[?2004l[6] 2163
+[?2004hroot@6d9ebe23d9ab:/app# cat /app/randomtest1.json; tail -10 /app/randomtest1.err; cat /app/randomtest1.time; rm -rf /app/output/__pycache__; ls -la /app/output
+[?2004l{"viscosity":0.3099439983701387,"thermal_conductivity":0.019478316630062328,"binary_diffusion":0.034060522962951416,"thermal_diffusion_factor":-0.13400398629842414}
+collision grid 800 1359
+collision grid 900 1359
+collision grid 1000 1359
+collision grid 1100 1359
+collision grid 1200 1359
+collision grid 1300 1359
+scattering seconds 33.10189341194928
+radial seconds 43.75195998698473
+vector seconds 69.84227537084371
+tensor relative increment 4.073640225144004e-08
+
+real	1m10.583s
+user	0m55.502s
+sys	0m1.245s
+total 196
+drwxr-xr-x 1 root root   4096 Nov  3 01:36 .
+drwxr-xr-x 1 root root   4096 Nov  3 01:35 ..
+-rw-r--r-- 1 root root 185528 Nov  3 01:35 transport.py
+[?2004hroot@6d9ebe23d9ab:/app# tail -8 /app/strict_random1.err; tail -8 /app/strict_random2.err; cat /app/strict_random1.json /app/strict_random2.json; cat /app/strict_random1.time /app/strict_random2.time; jobs -l
+[?2004lcollision grid 1800 2577
+collision grid 1900 2577
+collision grid 2000 2577
+collision grid 2100 2577
+collision grid 2200 2577
+collision grid 2300 2577
+collision grid 2400 2577
+collision grid 2500 2577
+[3]   Exit 143                ( time python3 /app/strict_random.py 0.13 72 0.041 0.29 > /app/strict_random1.json 2> /app/strict_random1.err ) 2> /app/strict_random1.time
+[4]   Exit 143                ( time python3 /app/strict_random.py 0.52 12.5 0.83 4.7 > /app/strict_random2.json 2> /app/strict_random2.err ) 2> /app/strict_random2.time
+collision grid 2200 2944
+collision grid 2300 2944
+collision grid 2400 2944
+collision grid 2500 2944
+collision grid 2600 2944
+collision grid 2700 2944
+collision grid 2800 2944
+collision grid 2900 2944
+Terminated
+
+real	1m37.337s
+user	1m10.841s
+sys	0m12.650s
+Terminated
+
+real	1m37.336s
+user	1m12.236s
+sys	0m11.503s
+[5]-  2162 Running                 ( time OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python3 /app/strict_random.py 0.13 72 0.041 0.29 > /app/strict_random1.json 2> /app/strict_random1.err ) 2> /app/strict_random1.time &
+[6]+  2163 Running                 ( time OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python3 /app/strict_random.py 0.52 12.5 0.83 4.7 > /app/strict_random2.json 2> /app/strict_random2.err ) 2> /app/strict_random2.time &
+[?2004hroot@6d9ebe23d9ab:/app# date; cat /app/strict_random1.json /app/strict_random2.json; tail -6 /app/strict_random1.err; tail -6 /app/strict_random2.err; jobs -l
+[?2004lTue Nov  3 01:39:23 UTC 2026
+[6]+  Done                    ( time OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python3 /app/strict_random.py 0.52 12.5 0.83 4.7 > /app/strict_random2.json 2> /app/strict_random2.err ) 2> /app/strict_random2.time
+{"viscosity": 0.6835314823389456, "thermal_conductivity": 1.140882283049555, "binary_diffusion": 0.3614526622162664, "thermal_diffusion_factor": -0.5103904676447093}
+collision grid 2000 2577
+collision grid 2100 2577
+collision grid 2200 2577
+collision grid 2300 2577
+collision grid 2400 2577
+collision grid 2500 2577
+collision grid 2400 2944
+collision grid 2500 2944
+collision grid 2600 2944
+collision grid 2700 2944
+collision grid 2800 2944
+collision grid 2900 2944
+[5]+  2162 Running                 ( time OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python3 /app/strict_random.py 0.13 72 0.041 0.29 > /app/strict_random1.json 2> /app/strict_random1.err ) 2> /app/strict_random1.time &
+[?2004hroot@6d9ebe23d9ab:/app# python3 - <<'PY'
+[?2004l[?2004h> import json,math,os,stat,pathlib
+[?2004l[?2004h> p=pathlib.Path('/app/output/transport.py');compile(p.read_text(),str(p),'exec');assert stat.S_ISREG(os.lstat(p).st_mode)
+[?2004l[?2004h> for i in [1,2]:
+[?2004l[?2004h>  a='/app/randomtest%d.json'%i;b='/app/strict_random%d.json'%i
+[?2004l[?2004h>  if os.path.getsize(b):
+[?2004l[?2004h>   final=json.load(open(a));strict=json.load(open(b))
+[?2004l[?2004h>   for k,v in final.items():
+[?2004l[?2004h>    diff=abs(v-strict[k]);tol=max(2e-5*abs(strict[k]),1e-6 if k=='thermal_diffusion_factor' else 0)
+[?2004l[?2004h>    print(i,k,'relative difference',diff/max(abs(strict[k]),1e-300),'fraction of tolerance',diff/tol)
+[?2004l[?2004h>    assert diff<tol
+[?2004l[?2004h> print('syntax and regular-file checks passed')
+[?2004l[?2004h> PY
+[?2004l2 viscosity relative difference 3.3191459492958622e-12 fraction of tolerance 1.659572974647931e-07
+2 thermal_conductivity relative difference 4.586540817932924e-12 fraction of tolerance 2.2932704089664617e-07
+2 binary_diffusion relative difference 6.520166326034919e-11 fraction of tolerance 3.2600831630174594e-06
+2 thermal_diffusion_factor relative difference 3.5154093656500415e-10 fraction of tolerance 1.7577046828250206e-05
+syntax and regular-file checks passed
+[?2004hroot@6d9ebe23d9ab:/app# cat /app/strict_random1.json; tail -5 /app/strict_random1.err; cat /app/strict_random1.time; jobs -l
+[?2004l{"viscosity": 0.30994399930442357, "thermal_conductivity": 0.01947831668779831, "binary_diffusion": 0.03406052297417246, "thermal_diffusion_factor": -0.13400398670359787}
+[5]+  Done                    ( time OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python3 /app/strict_random.py 0.13 72 0.041 0.29 > /app/strict_random1.json 2> /app/strict_random1.err ) 2> /app/strict_random1.time
+collision grid 2100 2577
+collision grid 2200 2577
+collision grid 2300 2577
+collision grid 2400 2577
+collision grid 2500 2577
+
+real	2m42.404s
+user	2m29.807s
+sys	0m12.193s
+	0m12.650s
+[?2004hroot@6d9ebe23d9ab:/app# python3 - <<'PY'
+[?2004l[?2004h> import pathlib,json,math,stat,os
+[?2004l[?2004h> p=pathlib.Path('/app/output/transport.py');compile(p.read_text(),str(p),'exec')
+[?2004l[?2004h> assert stat.S_ISREG(os.lstat(p).st_mode) and p.stat().st_size<20971520
+[?2004l[?2004h> for i in [1,2]:
+[?2004l[?2004h>  f=pathlib.Path('/app/strict_random%d.json'%i)
+[?2004l[?2004h>  if not f.stat().st_size: continue
+[?2004l[?2004h>  a=json.load(open('/app/randomtest%d.json'%i));b=json.load(f.open())
+[?2004l[?2004h>  assert set(a)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+[?2004l[?2004h>  for k,v in a.items():
+[?2004l[?2004h>   tol=max(2e-5*abs(b[k]),1e-6 if k=='thermal_diffusion_factor' else 0)
+[?2004l[?2004h>   print(i,k,'error / tolerance',abs(v-b[k])/tol)
+[?2004l[?2004h>   assert math.isfinite(v) and abs(v-b[k])<tol
+[?2004l[?2004h> print('deliverable bytes:',p.stat().st_size)
+[?2004l[?2004h> PY
+[?2004l1 viscosity error / tolerance 0.00015071833521321685
+1 thermal_conductivity error / tolerance 0.0001482057807839797
+1 binary_diffusion error / tolerance 1.647221467368088e-05
+1 thermal_diffusion_factor error / tolerance 0.00015117972900248586
+2 viscosity error / tolerance 1.659572974647931e-07
+2 thermal_conductivity error / tolerance 2.2932704089664617e-07
+2 binary_diffusion error / tolerance 3.2600831630174594e-06
+2 thermal_diffusion_factor error / tolerance 1.7577046828250206e-05
+deliverable bytes: 185528
+[?2004hroot@6d9ebe23d9ab:/app# rm -rf /app/output/__pycache__; ls -la /app/output
+[?2004ltotal 196
+drwxr-xr-x 1 root root   4096 Nov  3 01:40 .
+drwxr-xr-x 1 root root   4096 Nov  3 01:35 ..
+-rw-r--r-- 1 root root 185528 Nov  3 01:35 transport.py
+[?2004hroot@6d9ebe23d9ab:/app# 

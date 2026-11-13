@@ -1,0 +1,1390 @@
+#### step 2 06:07:56
+MSG: Analysis: We need inspect the experiment notes and session data before designing a physical and statistical reduction. No work has been done yet.
+Plan: Read NOTES.md and inspect session file layouts and metadata to identify camera calibration, clock calibration, and pendulum dynamics.
+CMD: cat /app/data/NOTES.md
+
+CMD: find /app/data -maxdepth 4 -type f | sort
+
+CMD: cat /app/data/sessions/e1/session.json; cat /app/data/sessions/e2/session.json
+
+OBS: ",
+  "pivots": {
+    "a": {
+      "kind": "knife_edge"
+    },
+    "b": {
+      "kind": "knife_edge"
+    }
+  },
+  "pivot_separation_m": 0.99962,
+  "centre_of_mass": {
+    "from_pivot_a_m": 0.20078,
+    "balanced_on": "2026-10-20",
+    "weight_marks_m": {
+      "heavy": 0.405,
+      "light": 0.64
+    }
+  },
+  "weights": {
+    "heavy": {
+      "mass_kg": 0.815,
+      "mark_m": 0.405
+    },
+    "light": {
+      "mass_kg": 0.24,
+      "mark_m": 0.64
+    }
+  },
+  "bar_mass_kg": 4.862,
+  "runs": {
+    "a1": "a",
+    "a2": "a",
+    "b1": "b",
+    "b2": "b",
+    "b3": "b"
+  }
+}
+root@2e812d06c5e9:/app#
+
+
+#### step 3 06:08:23
+MSG: Analysis: The reduction must correct the centre of mass for moved weights, infer the camera's oblique projection from nonlinear motion, calibrate the camera clock including missing sensor frames, and account for damping and rolling pins. The notes do not specify a damping formula, so the measured trajectories need inspection before choosing a fit.
+Plan: Inspect CSV examples and numerical statistics, then build diagnostic utilities in a scratch directory. The statistics will reveal sampling, noise, clock stalls, and typical periods and damping.
+CMD: head -15 /app/data/sessions/e1/runs/a1.csv; head -20 /app/data/sessions/e1/sync/a1.csv; tail -5 /app/data/sessions/e1/runs/a1.csv; wc -l /app/data/sessions/*/{runs,sync}/*.csv
+
+CMD: mkdir -p /app/output /app/work; python3 - <<'PY'
+import numpy as np, scipy
+print(np.__version__,scipy.__version__)
+for ses in ['e1','e2']:
+ import json
+ from pathlib import Path
+ p=Path('/app/data/sessions')/ses
+ for r in json.load(open(p/'session.json'))['runs']:
+  dat=np.loadtxt(p/'runs'/f'{r}.csv',delimiter=',',comments='#',skiprows=4)
+  print(ses,r,dat.shape,dat[:2],np.min(dat[:,1]),np.max(dat[:,1]),np.mean(dat[:,2]))
+PY
+
+OBS: wing exception:
+
+Traceback (most recent call last):
+  File "<stdin>", line 8, in <module>
+  File "/usr/local/lib/python3.12/site-packages/numpy/lib/_npyio_impl.py", line 1397, in loadtxt
+    arr = _read(fname, dtype=dtype, comment=comment, delimiter=delimiter,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/numpy/lib/_npyio_impl.py", line 1048, in _read
+    arr = _load_from_filelike(
+          ^^^^^^^^^^^^^^^^^^^^
+ValueError: could not convert string 'frame_counter' to float64 at row 0, column 1.
+root@2e812d06c5e9:/app#
+
+
+#### step 4 06:08:57
+MSG: Analysis: The files contain four metadata lines followed by the CSV header. A general orthographic projection is a three-parameter projective transformation of the bar angle. A rolling pin also changes both the gravitational lever arm and the angle-dependent inertia, so simply using an equal-period Kater formula would be inadequate.
+Plan: Create reusable data loading and clock diagnostics. Estimate frame rate from the GPS frame records and locate step changes due to stalls; inspect extrema and amplitude decay to guide the motion fit.
+CMD: cat > /app/work/explore.py <<'PY'
+import numpy as np, json
+from pathlib import Path
+from scipy.signal import find_peaks, savgol_filter
+
+def load(p,r):
+ path=p/'runs'/f'{r}.csv'
+ with open(path) as f:
+  lines=f.readlines()
+ unit=[x.split(':')[1].strip() for x in lines if x.startswith('# unit')][0]
+ n=next(i for i,x in enumerate(lines) if not x.startswith('#'))
+ d=np.loadtxt(lines[n+1:],delimiter=',')
+ c=np.unwrap(d[:,0]*2*np.pi/65536)*65536/(2*np.pi)
+ y=d[:,1]*(np.pi/180 if unit=='deg' else 1)
+ s=np.loadtxt(p/'sync'/f'{r}.csv',delimiter=',',skiprows=1)
+ sc=np.unwrap(s[:,1]*2*np.pi/65536)*65536/(2*np.pi)
+ sc+=round((c[0]-sc[0])/65536)*65536
+ return c,y,d[:,2]>0,s[:,0]-s[0,0],sc
+
+if __name__=='__main__':
+ for ses in ['e1','e2']:
+  p=Path('/app/data/sessions')/ses
+  for r in json.load(open(p/'session.json'))['runs']:
+   c,y,ok,st,sc=load(p,r)
+   df=np.diff(sc)/np.diff(st)
+   fps=np.median(df)
+   # exclude stall intervals to estimate rate
+   good=df>fps-1.5
+   coef=np.polyfit(st,sc,1)
+   print(ses,r,'range',y.min(),y.max(),'fps approx',fps,'sync slope',coef[0])
+   print('sync residual',np.round(sc-(sc[0]+fps*st),1))
+   yy=np.interp(c,c[ok],y[ok]); sm=savgol_filter(yy,61,3)
+   pk,_=find_peaks(sm,distance=200,prominence=.03)
+   print('peaks',[(round((c[i]-c[0])/fps,3),round(sm[i],4)) for i in pk[:5]],'last',[(round((c[i]-c[0])/fps,3),round(sm[i],4)) for i in pk[-3:]])
+PY
+python3 /app/work/explore.py
+
+OBS: iff(sc)/np.diff(st)
+>    fps=np.median(df)
+>    # exclude stall intervals to estimate rate
+>    good=df>fps-1.5
+>    coef=np.polyfit(st,sc,1)
+>    print(ses,r,'range',y.min(),y.max(),'fps approx',fps,'sync slope',coef[0])
+>    print('sync residual',np.round(sc-(sc[0]+fps*st),1))
+>    yy=np.interp(c,c[ok],y[ok]); sm=savgol_filter(yy,61,3)
+>    pk,_=find_peaks(sm,distance=200,prominence=.03)
+>    print('peaks',[(round((c[i]-c[0])/fps,3),round(sm[i],4)) for i in pk[:5]],'last',[(round((c[i]-c[0])/fps,3),round(sm[i],4)) for i in pk[-3:]])
+> PY
+root@2e812d06c5e9:/app# python3 /app/work/explore.py
+
+
+
+#### step 5 06:09:20
+MSG: Analysis: The exploratory script is running. The next step is to extract clock steps and characterize the waveform. For a rolling pin of radius r, with centre of mass h below the rest line, the angular inertia is k²+h²+2r(h+r)(1−cos θ), and the restoring torque is proportional to (h+r)sin θ.
+Plan: Wait for the diagnostic output, then implement accurate clock-rate estimation and trajectory fitting with a shared camera projection.
+CMD: 
+OBS: 1.  1.  1.  1.  1.  1.  1.  1.  1.  1.  2.  2.  2.  2.  2.  2.  2.
+  2.  2. -1. -1. -1. -1. -1. -1. -1. -1. -1.  0.  0. -0.  0.  0.  0.  0.
+  0.  0.  0.  0.  0.  0.  0.  0.  0.  1.  1.  1.  1.  1.  1.  1.  1.  1.
+  1.  1.  1.  1.]
+peaks [(np.float64(2.942), np.float64(0.4145)), (np.float64(4.917), np.float64(0.3953)), (np.float64(6.896), np.float64(0.3776)), (np.float64(8.871), np.float64
+(0.361)), (np.float64(10.846), np.float64(0.3455))] last [(np.float64(75.639), np.float64(0.1083)), (np.float64(77.602), np.float64(0.1049)), (np.float64(79.56)
+, np.float64(0.1018))]
+root@2e812d06c5e9:/app#
+
+
+#### step 6 06:10:39
+MSG: Analysis: The GPS data show clean linear clock drift with a small number of downward steps from lost sensor frames. The oscillations decay smoothly, with amplitude-dependent damping. A shared three-parameter camera projection can be inferred by fitting the nonlinear pendulum trajectories across all runs; this also separates true release angles from image angles.
+Plan: Implement clock calibration and a smoothed-derivative dynamics fit to obtain initial camera, frequency, and damping estimates. Exclude the GPS intervals containing stalls in this first fit so their unknown exact positions cannot bias it.
+CMD: cat > /app/work/fitfirst.py <<'PY'
+import numpy as np, json, sys, time
+from pathlib import Path
+from scipy.signal import savgol_filter
+from scipy.optimize import least_squares
+from explore import load
+
+def clock(c,st,sc):
+ ds=np.diff(st); dc=np.diff(sc)
+ f=np.median(dc/ds)
+ for _ in range(3):
+  jumps=np.where(dc-f*ds < -1.6)[0]
+  seg=np.searchsorted(jumps+1,np.arange(len(st)),side='right')
+  X=np.column_stack([st]+[(seg==i).astype(float) for i in range(len(jumps)+1)])
+  coef=np.linalg.lstsq(X,sc,rcond=None)[0]; f=coef[0]
+ loss=np.round(f*ds[jumps]-dc[jumps]).astype(int)
+ corr=np.zeros(len(sc)); corr[jumps+1]=loss; corr=np.cumsum(corr)
+ f,off=np.polyfit(st,sc+corr,1)
+ # obtain tight bounds from frame quantization
+ lo=-np.inf; hi=np.inf
+ for i in range(len(st)):
+  for j in range(i+1,len(st)):
+   dt=st[j]-st[i]; dx=(sc+corr)[j]-(sc+corr)[i]
+   lo=max(lo,(dx-1)/dt); hi=min(hi,(dx+1)/dt)
+ if lo<hi: f=(lo+hi)/2
+ t=(c-c[0])/f
+ keep=np.ones(len(c),bool)
+ regions=[]
+ for j,l in zip(jumps,loss):
+  cl=sc[j]; ch=sc[j+1]
+  keep &= ~((c>=cl-30)&(c<=ch+30))
+  t[c>=(cl+ch)/2]+=l/f
+  regions.append((cl,ch,l))
+ return t,keep,f,regions
+
+def inverse(y,a,b,roll):
+ z=y-roll; s=np.sin(z); c=np.cos(z); u=a*c-b*s
+ D=s*s+u*u; Dp=2*s*c+2*u*(-a*s-b*c)
+ return np.arctan2(s,u),a/D,-a*Dp/D**2
+
+def setup(p):
+ meta=json.load(open(p/'session.json'))
+ h=meta['centre_of_mass']['from_pivot_a_m']
+ for w,v in meta['weights'].items(): h+=v['mass_kg']*(v['mark_m']-meta['centre_of_mass']['weight_marks_m'][w])/meta['bar_mass_kg']
+ hs={'a':h,'b':meta['pivot_separation_m']-h}
+ radii={pv:meta['pivots'][pv].get('pin_diameter_m',0)/2 for pv in ['a','b']}
+ out=[]
+ for run,pv in meta['runs'].items():
+  c,y,ok,st,sc=load(p,run); t,keep,f,regions=clock(c,st,sc)
+  yy=np.interp(c,c[ok],y[ok]); n=101
+  sm=savgol_filter(yy,n,7); v=savgol_filter(yy,n,7,deriv=1,delta=1/f); ac=savgol_filter(yy,n,7,deriv=2,delta=1/f)
+  mask=keep & (t>2) & (t<t[-1]-.4)
+  # do not use neighborhoods of gaps/stalls
+  for cl,ch,l in regions: mask &= ~((c>=cl-60)&(c<=ch+60))
+  ix=np.where(mask)[0][::8]
+  out.append(dict(run=run,pv=pv,h=hs[pv],r=radii[pv],c=c,y=y,ok=ok,t=t,f=f,regions=regions,sm=sm[ix],v=v[ix],ac=ac[ix]))
+ return meta,out
+
+def firstfit(meta,runs):
+ nr=len(runs)
+ # roll, a, b, then (w2,linear,quadratic,constant) per run
+ x=[0,1,0]
+ for d in runs:
+  y=d['sm']; nzero=np.sum(np.diff(np.sign(y-np.mean(y)))!=0)
+  T=2*(d['t'][-1]-2)/nzero
+  x.extend([(2*np.pi/T)**2,.025,.02,0])
+ def resid(x):
+  roll,a,b=x[:3]; out=[]
+  for i,d in enumerate(runs):
+   w2,l,q,k=x[3+4*i:7+4*i]
+   th,j,jp=inverse(d['sm'],a,b,roll); v=j*d['v']; ac=j*d['ac']+jp*d['v']**2
+   eps=2*d['r']*w2/9.81
+   rr=ac+(w2*np.sin(th)+.5*eps*np.sin(th)*v*v)/(1+eps*(1-np.cos(th)))+l*v+q*v*np.abs(v)+k*np.tanh(v/.04)
+   out.append(rr)
+  return np.concatenate(out)
+ lo=[-.08,.75,-.5]+[5,-.1,-.1,-.1]*nr; hi=[.08,1.2,.5]+[16,.2,.2,.1]*nr
+ fit=least_squares(resid,x,bounds=(lo,hi),x_scale='jac',ftol=1e-10,xtol=1e-10,gtol=1e-10)
+ print('initial',fit.x[:3], 'rms',np.std(fit.fun),file=sys.stderr)
+ for i,d in enumerate(runs):print(d['run'],d['f'],fit.x[3+4*i:7+4*i], 'period',2*np.pi/np.sqrt(fit.x[3+4*i]),file=sys.stderr)
+ return fit.x
+if __name__=='__main__':
+ meta,runs=setup(Path(sys.argv[1])); x=firstfit(meta,runs)
+ np.savez('/app/work/first_'+Path(sys.argv[1]).name+'.npz',x=x)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/fitfirst.py /app/data/sessions/e1
+
+OBS: r; hi=[.08,1.2,.5]+[16,.2,.2,.1]*nr
+>  fit=least_squares(resid,x,bounds=(lo,hi),x_scale='jac',ftol=1e-10,xtol=1e-10,gtol=1e-10)
+>  print('initial',fit.x[:3], 'rms',np.std(fit.fun),file=sys.stderr)
+>  for i,d in enumerate(runs):print(d['run'],d['f'],fit.x[3+4*i:7+4*i], 'period',2*np.pi/np.sqrt(fit.x[3+4*i]),file=sys.stderr)
+>  return fit.x
+> if __name__=='__main__':
+>  meta,runs=setup(Path(sys.argv[1])); x=firstfit(meta,runs)
+>  np.savez('/app/work/first_'+Path(sys.argv[1]).name+'.npz',x=x)
+> PY
+root@2e812d06c5e9:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/fitfirst.py /app/data/sessions/e1
+
+
+
+#### step 7 06:10:53
+MSG: Analysis: The initial model uses the exact projection inverse and accounts for the pin's varying inertia. It also includes linear, quadratic, and nearly Coulomb damping as diagnostics. After these initial estimates, fitting measured angles directly rather than differentiated data will substantially improve precision.
+Plan: Run the same initialization on the second session and inspect the resulting damping terms and camera estimates. Then implement direct ODE fits with sparse per-run parameters and a shared camera.
+CMD: 
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/work/fitfirst.py /app/data/sessions/e2
+
+OBS: e-02  3.14021880e-02 -1.00115313e-03] period 1.813378281224531
+a3 241.1834537131945 [ 1.20347387e+01 -2.15587721e-02  7.87592183e-02  6.89757424e-03] period 1.811179674839768
+b1 239.13628976085442 [ 1.01420515e+01  1.33736416e-02  3.90929561e-02 -1.33531150e-03] period 1.9729540120220583
+b2 240.44449410922596 [10.21908165  0.07525225 -0.01762278 -0.01241986] period 1.9655040083811584
+b3 238.8716540837337 [ 1.01834786e+01 -7.46224547e-03  4.24527196e-02  1.08024799e-02] period 1.9689368660672772
+root@2e812d06c5e9:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/fitfirst.py /app/data/sessions/e2
+
+
+
+#### step 8 06:11:24
+MSG: Analysis: The derivative-based fit is not yet accurate: it reached a camera bound and returned inconsistent frequencies. Interpolation over tracker-loss bursts can strongly corrupt numerical second derivatives. The actual clock estimates are precise and sensible.
+Plan: Exclude every derivative window touching a lost tracker frame, allow the full physically possible camera scale range, and rerun initialization. This should provide clean starting values for direct angle fitting.
+CMD: python3 - <<'PY'
+p='/app/work/fitfirst.py'
+s=open(p).read().replace("mask=keep & (t>2) & (t<t[-1]-.4)","mask=keep & (t>2) & (t<t[-1]-.4) & (np.convolve((~ok).astype(int),np.ones(n,dtype=int),mode='same')==0)")
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/fitfirst.py /app/data/sessions/e1; OPENBLAS_NUM_THREADS=1 python3 /app/work/fitfirst.py /app/data/sessions/e2
+
+OBS: .50201219e-03] period 1.8100383593564207
+a2 239.40684908934884 [1.20544991e+01 1.48010218e-02 2.56773153e-02 1.86317639e-03] period 1.8096945727295852
+a3 241.1834537131945 [ 1.20587275e+01  2.34481230e-02  1.87976870e-02 -2.43215253e-04] period 1.8093772606702858
+b1 239.13628976085442 [1.02512799e+01 1.88160966e-02 2.21079889e-02 3.17598756e-04] period 1.962414853731905
+b2 240.44449410922596 [ 1.02563515e+01  2.51296708e-02  1.88852967e-02 -5.36645455e-04] period 1.961929605743981
+b3 238.8716540837337 [ 1.02561690e+01  3.33662779e-02  1.34818147e-02 -3.73169146e-03] period 1.9619470618236832
+
+
+
+#### step 9 06:12:19
+MSG: Analysis: Excluding tracker-loss neighborhoods yields plausible camera and damping estimates. The remaining derivative noise is too large for the requested tolerances, so these estimates will only initialize a direct trajectory fit. The motion appears compatible with linear plus quadratic damping, with any constant-friction term small.
+Plan: Implement a direct angle fit using numerical integration, shared camera parameters, and independent run frequencies, damping, and release times. Fit only trustworthy samples outside the short intervals containing stalls initially; the resulting trajectories can then pinpoint the exact stall boundaries.
+CMD: cat > /app/work/direct.py <<'PY'
+import numpy as np, sys, time
+from pathlib import Path
+from scipy.integrate import odeint
+from scipy.optimize import least_squares
+from fitfirst import setup,firstfit,inverse
+
+def project(th,a,b,roll):
+ return roll+np.arctan2(a*np.sin(th),np.cos(th)+b*np.sin(th))
+
+def trajectory(times,x,camera,held,r,mode=0):
+ roll,a,b=camera; w2,l,q,k,t0=x
+ theta0=inverse(np.array([held]),a,b,roll)[0][0]
+ eps=2*r*w2/9.81
+ def rhs(y,t):
+  th,v=y; mass=1+eps*(1-np.cos(th))
+  damp=l*v+q*v*abs(v)+k*np.tanh(v/.03)
+  return v,(-w2*np.sin(th)-eps/2*np.sin(th)*v*v-damp)/(mass if mode==0 else 1)- (eps*(1-np.cos(th))*(w2*np.sin(th)+eps/2*np.sin(th)*v*v)/mass if mode==1 else 0)
+ # mode 1 equals damping outside inertia
+ u=times-t0; moving=u>0
+ tout=np.r_[0,u[moving]]
+ states=odeint(rhs,[theta0,0],tout,rtol=2e-9,atol=2e-10,mxstep=5000)
+ theta=np.full(times.shape,theta0); theta[moving]=states[1:,0]
+ return project(theta,a,b,roll)
+
+def fit(meta,runs,initial,mode=0):
+ nr=len(runs)
+ x=list(initial[:3])
+ for i,d in enumerate(runs):
+  t,y,ok=d['t'],d['y'],d['ok']; held=np.median(y[(t<.4)&ok]); d['held']=held
+  first=np.where(ok & (abs(y-held)>.002)&(t>.4))[0][0]
+  t0=t[first]-.04
+  t0=np.clip(t0,.5,1.5)
+  d['ix']=np.where(ok & (np.arange(len(t))%16==0))[0]
+  for cl,ch,n in d['regions']:
+   d['ix']=d['ix'][~((d['c'][d['ix']]>=cl-3)&(d['c'][d['ix']]<=ch+3))]
+  w,l,q,k=initial[3+4*i:7+4*i]
+  x.extend([w,max(.003,l),max(.003,q),0,t0])
+ lo=[-.05,.78,-.35]+[8,0,0,-.03,.45]*nr
+ hi=[.05,1.11,.35]+[14,.1,.1,.03,1.55]*nr
+ x=np.clip(x,np.array(lo)+1e-6,np.array(hi)-1e-6)
+ sizes=[len(d['ix']) for d in runs]; offsets=np.r_[0,np.cumsum(sizes)]
+ cache={'x':None,'pred':None}; neval=0
+ def predone(x,i):
+  d=runs[i]; ix=d['ix']
+  return trajectory(d['t'][ix],x[3+5*i:8+5*i],x[:3],d['held'],d['r'],mode)
+ def resid(x):
+  nonlocal neval
+  pred=[predone(x,i) for i in range(nr)]; cache['x']=x.copy();cache['pred']=pred
+  neval+=1
+  rr=np.concatenate([pred[i]-runs[i]['y'][runs[i]['ix']] for i in range(nr)])
+  if neval%5==1:print('fit',neval,'rms',np.std(rr),'cam',x[:3],file=sys.stderr)
+  return rr
+ def jac(x):
+  if cache['x'] is None or np.any(cache['x']!=x):resid(x)
+  pred=cache['pred']; J=np.zeros((offsets[-1],len(x)))
+  for j in range(len(x)):
+   dx=1e-5 if j<3 else (1e-5 if (j-3)%5==4 else 1e-5)
+   xx=x.copy();xx[j]+=dx
+   for i in (range(nr) if j<3 else [(j-3)//5]):
+    J[offsets[i]:offsets[i+1],j]=(predone(xx,i)-pred[i])/dx
+  return J
+ start=time.time()
+ f=least_squares(resid,x,jac=jac,bounds=(lo,hi),x_scale='jac',ftol=2e-10,xtol=2e-10,gtol=2e-9,max_nfev=60)
+ print('DONE',time.time()-start,f.x,'rms',np.std(f.fun),file=sys.stderr)
+ for i,d in enumerate(runs):
+  print(d['run'],f.x[3+5*i:8+5*i], 'T',2*np.pi/np.sqrt(f.x[3+5*i]), 'rms',np.std(f.fun[offsets[i]:offsets[i+1]]),file=sys.stderr)
+ return f.x
+if __name__=='__main__':
+ p=Path(sys.argv[1]);meta,runs=setup(p)
+ init=np.load('/app/work/first_'+p.name+'.npz')['x']
+ x=fit(meta,runs,init,int(sys.argv[2]) if len(sys.argv)>2 else 0)
+ np.savez('/app/work/direct_'+p.name+'.npz',x=x)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/direct.py /app/data/sessions/e1 > /app/work/e1.log 2>&1
+
+OBS: ime()-start,f.x,'rms',np.std(f.fun),file=sys.stderr)
+>  for i,d in enumerate(runs):
+>   print(d['run'],f.x[3+5*i:8+5*i], 'T',2*np.pi/np.sqrt(f.x[3+5*i]), 'rms',np.std(f.fun[offsets[i]:offsets[i+1]]),file=sys.stderr)
+>  return f.x
+> if __name__=='__main__':
+>  p=Path(sys.argv[1]);meta,runs=setup(p)
+>  init=np.load('/app/work/first_'+p.name+'.npz')['x']
+>  x=fit(meta,runs,init,int(sys.argv[2]) if len(sys.argv)>2 else 0)
+>  np.savez('/app/work/direct_'+p.name+'.npz',x=x)
+> PY
+root@2e812d06c5e9:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/direct.py /app/data/sessions/e1 > /app/work/e1.log 2>&1
+
+
+
+#### step 10 06:12:48
+MSG: Analysis: The direct fit is running with approximately 1,300 good samples per run. Its Jacobian exploits the fact that each run has independent motion parameters, so there is no need to integrate unrelated runs when perturbing one run parameter. Clock quantization provides narrow frame-rate bounds.
+Plan: Inspect fit convergence and run the second session. If the residual reaches tracker noise, calculate gravity and gyration from the two pivot frequencies; otherwise inspect residual structure and refine the damping model.
+CMD: 
+CMD: tail -20 /app/work/e1.log
+
+OBS: New Terminal Output:
+
+root@2e812d06c5e9:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/direct.py /app/data/sessions/e1 > /app/work/e1.log 2>&1
+tail -20 /app/work/e1.log
+
+
+
+#### step 11 06:13:10
+MSG: Analysis: The process has not returned to the shell yet, so the queued log inspection will execute after the fit finishes.
+Plan: Allow a short additional wait to see convergence and runtime.
+CMD: 
+OBS: 620e+00] T 1.80953778843162 rms 0.0005598517815520986
+a3 [ 1.20569234e+01  2.22616873e-02  1.99901153e-02 -2.26689569e-05
+  6.72388809e-01] T 1.8095126218890238 rms 0.0004971678439285891
+b1 [1.02583366e+01 2.21299733e-02 2.00208183e-02 2.97360362e-05
+ 1.09125704e+00] T 1.961739770750905 rms 0.00036950264377726605
+b2 [ 1.02577276e+01  2.26951288e-02  1.94684665e-02 -7.55023198e-05
+  9.40244043e-01] T 1.9617979971122361 rms 0.00048189899546286635
+b3 [1.02582209e+01 2.21080834e-02 2.00381945e-02 4.16077520e-05
+ 1.36881632e+00] T 1.9617508290089627 rms 0.000346941304402264
+root@2e812d06c5e9:/app#
+
+
+#### step 12 06:13:28
+MSG: Analysis: The direct model reaches sub-milliradian residuals and consistent periods. The fitted damping is very close to common linear and quadratic terms, and the constant-friction term is effectively zero. Several runs still have larger residuals, likely because the catch-held image angle was fixed from a short median instead of fitted using all of its frames.
+Plan: Inspect the complete fit result, run e2, and then let each held angle be fitted as a nuisance parameter while dropping unnecessary constant friction. This should improve release-angle accuracy and residuals.
+CMD: head -15 /app/work/e1.log; OPENBLAS_NUM_THREADS=1 python3 /app/work/direct.py /app/data/sessions/e2 > /app/work/e2.log 2>&1
+
+OBS: .19468691e-05  8.30683287e-01
+  1.20565881e+01  2.35699809e-02  1.89929590e-02 -3.63402180e-04
+  1.21190620e+00  1.20569234e+01  2.22616873e-02  1.99901153e-02
+ -2.26689569e-05  6.72388809e-01  1.02583366e+01  2.21299733e-02
+  2.00208183e-02  2.97360362e-05  1.09125704e+00  1.02577276e+01
+  2.26951288e-02  1.94684665e-02 -7.55023198e-05  9.40244043e-01
+  1.02582209e+01  2.21080834e-02  2.00381945e-02  4.16077520e-05
+  1.36881632e+00] rms 0.00044178819959107715
+a1 [ 1.20568007e+01  2.22335941e-02  1.99995710e-02 -1.19468691e-05
+  8.30683287e-01] T 1.8095218337674408 rms 0.00034809629094343015
+
+
+
+#### step 13 06:14:16
+MSG: Analysis: The first session fit takes about 35 seconds, well within the runtime limit. Camera parameters are physically plausible. We should improve the clock algorithm for the smallest allowed two-frame stalls and refine the held-angle estimates before finalizing.
+Plan: Let e2 finish, then inspect reconstructed GPS residuals and stall losses in both sessions. This will verify that the inferred integer losses satisfy a single quantized clock model.
+CMD: 
+CMD: tail -20 /app/work/e2.log; python3 - <<'PY'
+import sys
+sys.path.insert(0,'/app/work')
+from fitfirst import *
+for sn in ['e1','e2']:
+ m,rr=setup(Path('/app/data/sessions')/sn)
+ for d in rr:
+  c,y,ok,st,sc=load(Path('/app/data/sessions')/sn,d['run'])
+  cor=np.zeros_like(sc)
+  for cl,ch,n in d['regions']: cor[sc>=ch]+=n
+  z=sc+cor-d['f']*st
+  print(sn,d['run'],'steps',[(int(a),int(b),int(n)) for a,b,n in d['regions']],'residual width',np.ptp(z))
+PY
+
+OBS: 7e-05
+  1.02093700e+00] T 1.8066661446335652 rms 0.0003608449258439971
+a2 [ 1.20956689e+01  2.18531128e-02  2.08858223e-02 -2.28217869e-05
+  7.10639193e-01] T 1.8066121331606373 rms 0.0003502874741006853
+b1 [ 1.03041864e+01  2.19733444e-02  2.08967586e-02 -9.43171567e-05
+  1.33182801e+00] T 1.9573703899653683 rms 0.00034909972248056736
+b2 [1.03048501e+01 2.08314157e-02 2.19478818e-02 1.83114619e-04
+ 5.79627965e-01] T 1.9573073630987872 rms 0.0004904761929578134
+b3 [ 1.03043389e+01  2.20701787e-02  2.07491271e-02 -8.20941707e-05
+  9.58284619e-01] T 1.9573559139030425 rms 0.0003550666995987106
+
+
+
+#### step 14 06:14:39
+MSG: Analysis: Both sessions converge to closely matching per-pivot periods. The data support linear plus quadratic damping. The upcoming clock check will determine whether the stall losses were exactly identified.
+Plan: Wait for the clock diagnostics, then refine the direct fit with a fitted held angle and all usable catch-held frames.
+CMD: 
+CMD: cp /app/work/direct.py /app/work/refine.py; python3 - <<'PY'
+p='/app/work/refine.py';s=open(p).read()
+s=s.replace('w2,l,q,k,t0=x','w2,l,q,held,t0=x').replace('damp=l*v+q*v*abs(v)+k*np.tanh(v/.03)','damp=l*v+q*v*abs(v)')
+s=s.replace('x=list(initial[:3])','x=list(initial[:3])')
+s=s.replace("w,l,q,k=initial[3+4*i:7+4*i]\n  x.extend([w,max(.003,l),max(.003,q),0,t0])","w,l,q,k,t0=initial[3+5*i:8+5*i]\n  x.extend([w,max(.003,l),max(.003,q),held,t0])")
+s=s.replace("lo=[-.05,.78,-.35]+[8,0,0,-.03,.45]*nr\n hi=[.05,1.11,.35]+[14,.1,.1,.03,1.55]*nr","lo=[-.05,.78,-.35]+sum(([8,0,0,d['held']-.01,.45] for d in runs),[])\n hi=[.05,1.11,.35]+sum(([14,.1,.1,d['held']+.01,1.55] for d in runs),[])")
+s=s.replace("np.arange(len(t))%16==0","(np.arange(len(t))%8==0) | (t<1.6)")
+s=s.replace("'/app/work/first_'","'/app/work/direct_'").replace("'/app/work/direct_'+p.name+'.npz',x=x","'/app/work/refine_'+p.name+'.npz',x=x")
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/refine.py /app/data/sessions/e1 > /app/work/refine_e1.log 2>&1
+
+OBS: ,-.35]+[8,0,0,-.03,.45]*nr\n hi=[.05,1.11,.35]+[14,.1,.1,.03,1.55]*nr","lo=[-.05,.78,-.35]+sum(([8,0,0,d['held']-.01,.45] for d in ru
+ns),[])\n hi=[.05,1.11,.35]+sum(([14,.1,.1,d['held']+.01,1.55] for d in runs),[])")
+> s=s.replace("np.arange(len(t))%16==0","(np.arange(len(t))%8==0) | (t<1.6)")
+> s=s.replace("'/app/work/first_'","'/app/work/direct_'").replace("'/app/work/direct_'+p.name+'.npz',x=x","'/app/work/refine_'+p.name+'.npz',x=x")
+> open(p,'w').write(s)
+> PY
+root@2e812d06c5e9:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/refine.py /app/data/sessions/e1 > /app/work/refine_e1.log 2>&1
+
+
+
+#### step 15 06:16:00
+MSG: Analysis: The GPS consistency check exposed a real issue: estimating a stall's lost count from only its two bounding LED records can be off by one because of frame quantization. Several runs have corrected residual widths larger than one frame, and e2/b2 has a missed small stall. We must infer integer losses from the intercepts of whole uninterrupted clock segments instead.
+Plan: Replace clock calibration with a segmented linear regression, estimate each loss from segment intercept differences, and iteratively detect smaller remaining steps. Verify every corrected GPS series fits within one frame of a single uniform clock.
+CMD: 
+CMD: cat > /app/work/clocktest.py <<'PY'
+import numpy as np
+from scipy.optimize import minimize_scalar
+import sys
+sys.path.insert(0,'/app/work')
+from explore import load
+from pathlib import Path
+import json
+
+def calibrate(st,sc):
+ ds=np.diff(st);dc=np.diff(sc)
+ one=dc[ds==1]; k=np.max(one)
+ f=np.mean(one[one>=k-1])
+ # deliberately over-detect, then discard zero-sized breaks
+ breaks=np.where(dc-f*ds < -.8)[0]
+ for it in range(12):
+  seg=np.searchsorted(breaks+1,np.arange(len(st)),side='right')
+  X=np.column_stack([st]+[(seg==i).astype(float) for i in range(len(breaks)+1)])
+  coef=np.linalg.lstsq(X,sc,rcond=None)[0]; f=coef[0]
+  loss=np.round(-np.diff(coef[1:])).astype(int)
+  breaks=breaks[loss>0]; loss=loss[loss>0]
+  corr=np.zeros(len(sc));corr[breaks+1]=loss;corr=np.cumsum(corr)
+  f0,off=np.polyfit(st,sc+corr,1)
+  new=np.where(np.diff(sc+corr)-f0*ds < -1.02)[0]
+  if len(new):breaks=np.unique(np.r_[breaks,new]);continue
+  f=f0
+  z=sc+corr-f*st
+  if np.ptp(z)<=1.1:break
+  # additional negative jump in the residuals
+  new=np.where(np.diff(z)<-.93)[0]
+  if len(np.setdiff1d(new,breaks))==0:break
+  breaks=np.unique(np.r_[breaks,new])
+ # constraints of LED first-frame quantization
+ dx=(sc+corr)[None,:]-(sc+corr)[:,None];dt=st[None,:]-st[:,None]; ix=dt>0
+ lo=np.max((dx[ix]-1)/dt[ix]);hi=np.min((dx[ix]+1)/dt[ix])
+ if lo<=hi: f=(lo+hi)/2
+ print('width',np.ptp(sc+corr-f*st),'bounds',lo,hi,'loss',loss,'breaks',breaks)
+ return f,breaks,loss
+for sn in ['e1','e2']:
+ p=Path('/app/data/sessions')/sn
+ for r in json.load(open(p/'session.json'))['runs']:
+  c,y,ok,st,sc=load(p,r)
+  print(sn,r,end=' ');calibrate(st,sc)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/clocktest.py
+
+OBS:   6
+9 12 15 17 20 22 25 28 31 34 37 39 41 44 47 50 53 54 57 60 63
+ 65 68 70 73]
+e2 b1 width 0.9915254237203044 bounds 240.28571428571428 240.28813559322046 loss [8] breaks [46]
+e2 b2 width 1.0913936421275139e-11 bounds 239.98717948717953 240.01282051282055 loss [ 1  1  1  1  1  1  1  1  4  1  1  2  1  1  1  1  1  1  1  1  1  1  2  1
+ 13  1  1  1  1  1  1  1  1  1] breaks [ 1  3  5  8 10 12 14 16 18 19 21 23 25 28 30 32 34 35 37 40 42 44 46 49
+ 51 53 55 57 60 62 64 66 68 71]
+e2 b3 width 0.9857142857144936 bounds 241.05555555555554 241.05714285714308 loss [3] breaks [37]
+root@2e812d06c5e9:/app#
+
+
+#### step 16 06:16:18
+MSG: Analysis: The deliberately permissive step detector overfit normal one-frame LED quantization as fake stalls. The physically stated minimum stall size is two frames, so clock segmentation must reject one-frame inferred losses and start from only unambiguous steps. Whole-segment intercepts nevertheless correctly recover five frames for e1/a2 and three for the first e1/a3 stall.
+Plan: Use the conservative detector, infer losses from segment intercept differences, and add only residual jumps whose inferred size is at least two. Inspect all adjacent GPS differences near potential stalls.
+CMD: python3 - <<'PY'
+p='/app/work/clocktest.py';s=open(p).read().replace('dc-f*ds < -.8','dc-f*ds < -1.6').replace('breaks=breaks[loss>0]; loss=loss[loss>0]','breaks=breaks[loss>=2]; loss=loss[loss>=2]').replace('np.diff(sc+corr)-f0*ds < -1.02','np.diff(sc+corr)-f0*ds < -1.05');open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/clocktest.py; tail -20 /app/work/refine_e1.log
+
+OBS: aks [64]
+e1 b3 width 0.9787234042523778 bounds 238.8709677419355 238.87234042553192 loss [11  3] breaks [37 74]
+e2 a1 width 1.0072898239814094 bounds 239.00000000000364 238.99999999999878 loss [5] breaks [28]
+e2 a2 width 0.990740740741785 bounds 240.6470588235295 240.64814814814812 loss [] breaks []
+e2 b1 width 0.9915254237203044 bounds 240.28571428571428 240.28813559322046 loss [8] breaks [46]
+e2 b2 width 0.9857142857144936 bounds 239.54285714285714 239.54545454545453 loss [ 4 12] breaks [18 51]
+e2 b3 width 0.9857142857144936 bounds 241.05555555555554 241.05714285714308 loss [3] breaks [37]
+
+
+
+#### step 17 06:16:55
+MSG: Analysis: Whole-segment regression fixes most off-by-one clock losses, but nearly integer frame rates and small two-frame stalls remain ambiguous. A globally constrained clock solution is preferable: each LED record must lie within one frame of its GPS second, the accumulated losses must increase only at up to three stalls, and every increase must be between two and fifteen frames.
+Plan: Implement this clock model as a small mixed-integer linear optimization using scipy's built-in solver. Then derive tight feasible frame-rate bounds for the selected integer losses and rerun the trajectory refinement with corrected timestamps.
+CMD: cat > /app/work/milpclock.py <<'PY'
+import numpy as np
+from scipy.optimize import milp, Bounds, LinearConstraint
+from scipy.sparse import lil_matrix
+
+def calibrate(st,sc):
+ n=len(st); k=n-1
+ # f, phase, cumulative loss per LED, binary stall indicators
+ nv=2+n+k
+ A=lil_matrix((n+2*k+1,nv));low=[];high=[]
+ for i in range(n):
+  A[i,0]=-st[i];A[i,1]=-1;A[i,2+i]=1
+  low.append(-sc[i]);high.append(1-sc[i])
+ for i in range(k):
+  j=n+2*i
+  A[j,2+i+1]=1;A[j,2+i]=-1;A[j,2+n+i]=-2
+  low.append(0);high.append(np.inf)
+  A[j+1,2+i+1]=1;A[j+1,2+i]=-1;A[j+1,2+n+i]=-15
+  low.append(-np.inf);high.append(0)
+ A[-1,2+n:]=1;low.append(0);high.append(3)
+ lo=np.r_[238.56,sc[0]-1,np.zeros(n),np.zeros(k)]
+ hi=np.r_[241.44,sc[0],np.full(n,45),np.ones(k)];hi[2]=0
+ integ=np.r_[0,0,np.ones(n+k)]
+ obj=np.r_[0,0,np.zeros(n),np.ones(k)]
+ fit=milp(obj,integrality=integ,bounds=Bounds(lo,hi),constraints=LinearConstraint(A.tocsr(),low,high),options={'time_limit':20,'mip_rel_gap':0})
+ if fit.x is None:raise RuntimeError('clock fit failed')
+ corr=np.round(fit.x[2:2+n]); jumps=np.where(np.diff(corr)>0)[0];loss=np.diff(corr)[jumps].astype(int)
+ dx=(sc+corr)[None,:]-(sc+corr)[:,None];dt=st[None,:]-st[:,None];ix=dt>0
+ fl=np.max((dx[ix]-1-1e-7)/dt[ix]);fh=np.min((dx[ix]+1+1e-7)/dt[ix]);f=(fl+fh)/2
+ return f,jumps,loss,fl,fh
+if __name__=='__main__':
+ import sys,json,time
+ sys.path.insert(0,'/app/work')
+ from explore import load
+ from pathlib import Path
+ for sn in ['e1','e2']:
+  p=Path('/app/data/sessions')/sn
+  for r in json.load(open(p/'session.json'))['runs']:
+   c,y,ok,st,sc=load(p,r);start=time.time()
+   print(sn,r,calibrate(st,sc),'elapsed',time.time()-start,flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/milpclock.py
+
+OBS: ,json,time
+>  sys.path.insert(0,'/app/work')
+>  from explore import load
+>  from pathlib import Path
+>  for sn in ['e1','e2']:
+>   p=Path('/app/data/sessions')/sn
+>   for r in json.load(open(p/'session.json'))['runs']:
+>    c,y,ok,st,sc=load(p,r);start=time.time()
+>    print(sn,r,calibrate(st,sc),'elapsed',time.time()-start,flush=True)
+> PY
+root@2e812d06c5e9:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/milpclock.py
+e1 a1 (np.float64(240.7437689965957), array([], dtype=int64), array([], dtype=int64), np.float64(240.74285713999998), np.float64(240.74468085319143)) elapsed 0.
+0457005500793457
+
+
+
+#### step 18 06:17:25
+MSG: Analysis: The constrained clock solver is fast on the first run and explicitly enforces the hardware and GPS timing rules. Some nearly integer clock rates may permit more than one quantized solution; their rate differences are small, but we will inspect them before choosing a final calibration strategy.
+Plan: Collect the remaining clock solutions and replace the provisional clock routine with the constrained solver. Rerun the refined motion fit and verify the inferred gravity, gyration, and release angles are stable.
+CMD: 
+CMD: cp /app/work/fitfirst.py /app/work/fitfirst_old.py; python3 - <<'PY'
+p='/app/work/fitfirst.py';s=open(p).read();i=s.index(' ds=np.diff(st)');j=s.index(' t=(c-c[0])/f',i)
+s=s[:i]+' from milpclock import calibrate\n f,jumps,loss,fl,fh=calibrate(st,sc)\n'+s[j:];open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/refine.py /app/data/sessions/e1 > /app/work/correct_e1.log 2>&1; OPENBLAS_NUM_THREADS=1 python3 /app/work/refine.py /app/data/sessions/e2 > /app/work/correct_e2.log 2>&1
+
+OBS: 241.05714286000023)) elapsed 0.023404836654663086
+root@2e812d06c5e9:/app# cp /app/work/fitfirst.py /app/work/fitfirst_old.py; python3 - <<'PY'
+> p='/app/work/fitfirst.py';s=open(p).read();i=s.index(' ds=np.diff(st)');j=s.index(' t=(c-c[0])/f',i)
+> s=s[:i]+' from milpclock import calibrate\n f,jumps,loss,fl,fh=calibrate(st,sc)\n'+s[j:];open(p,'w').write(s)
+> PY
+root@2e812d06c5e9:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/refine.py /app/data/sessions/e1 > /app/work/correct_e1.log 2>&1; OPENBLAS_NUM_THREADS=1 python3
+ /app/work/refine.py /app/data/sessions/e2 > /app/work/correct_e2.log 2>&1
+
+
+
+#### step 19 06:17:58
+MSG: Analysis: The constrained solver found feasible clocks quickly, but e2/b2 has a competing two-stall solution that may hide a small stall by changing the oscillator rate. GPS frame quantization can occasionally admit such alternatives, so the angle trajectory should also be used to distinguish them.
+Plan: Wait for the corrected motion fits and inspect their residuals. If e2/b2 remains systematically worse, use local trajectory continuity across suspicious GPS intervals to recover the missing stall.
+CMD: 
+CMD: tail -20 /app/work/correct_e1.log; tail -20 /app/work/correct_e2.log
+
+OBS: New Terminal Output:
+
+ /app/work/refine.py /app/data/sessions/e2 > /app/work/correct_e2.log 2>&1
+tail -20 /app/work/correct_e1.log; tail -20 /app/work/correct_e2.log
+
+
+
+#### step 20 06:18:29
+MSG: Analysis: The motion fits are still running. The exact frame-rate bounds expose an artificial solution for e2/a1: its feasible clock rate is almost a single point at exactly 239 Hz. A probabilistic clock calibration should favor solutions with nonzero feasible ranges rather than minimizing stall count alone.
+Plan: Inspect clock residuals under the likely alternative integer-loss solutions, and evaluate candidate calibrations using their quantization likelihood and the motion fit residual.
+CMD: 
+CMD: tail -20 /app/work/correct_e1.log; tail -20 /app/work/correct_e2.log; python3 - <<'PY'
+import sys,numpy as np
+sys.path.insert(0,'/app/work')
+from explore import load
+from pathlib import Path
+for r in ['a1','b2']:
+ c,y,ok,t,s=load(Path('/app/data/sessions/e2'),r)
+ print(r)
+ print(list(zip(t,np.round(s-s[0]-np.median(np.diff(s)/np.diff(t))*t,2))))
+ if r=='b2':
+  for j in [18,23,24,25,46,47,48,51]:print(j,t[j:j+2],s[j:j+2])
+PY
+
+OBS: 42579e-01] rms 0.00045907348490305293
+a1 [12.09609894  0.02164638  0.02110438  0.56949345  1.02124392] T 1.8065800215129402 rms 0.0007470672753443848
+a2 [12.09575327  0.02178873  0.02091006 -0.33656596  0.710576  ] T 1.8066058353460674 rms 0.00034934965110483877
+b1 [10.30444349  0.02175656  0.02096721 -0.69177949  1.33172874] T 1.9573459761837066 rms 0.0003524275416372998
+b2 [10.30446208  0.02180211  0.02086313  0.26291096  0.58025393] T 1.957344210397157 rms 0.00035423778493575895
+b3 [10.30452313  0.02174229  0.02099097  0.43508874  0.95824258] T 1.9573384120711905 rms 0.0003545748796837561
+
+
+
+#### step 21 06:18:56
+MSG: Analysis: Corrected e1 residuals are now at the tracker noise floor. In e2 only a1 is noticeably worse, consistent with the implausibly zero-width GPS clock solution. The constrained optimization needs a statistical preference for clocks with a broad feasible GPS phase/rate region, rather than for fewer stalls alone.
+Plan: Inspect the detailed GPS records, then enumerate nearby integer stall-loss alternatives and choose the solution with the largest feasible clock phase/rate area. This naturally rejects exact-boundary clock solutions.
+CMD: 
+CMD: cat > /app/work/clockarea.py <<'PY'
+import numpy as np
+from scipy.integrate import quad
+from scipy.optimize import minimize_scalar
+from itertools import product
+from milpclock import calibrate as initialclock
+
+def area(st,z):
+ dx=z[None,:]-z[:,None];dt=st[None,:]-st[:,None];mask=dt>0
+ lo=max(238.56,np.max((dx[mask]-1)/dt[mask])); hi=min(241.44,np.min((dx[mask]+1)/dt[mask]))
+ if hi<=lo+1e-10:return 0,(lo+hi)/2
+ def width(f):return max(0,1-np.ptp(z-f*st))
+ # piecewise linear width, quadrature adequate at this scale
+ aa=quad(width,lo,hi,epsabs=1e-12,limit=100)[0]
+ ff=quad(lambda f:(f-lo)*width(f),lo,hi,epsabs=1e-13,limit=100)[0]/aa+lo
+ return aa,ff
+
+def calibrate(st,sc):
+ f,breaks,loss,fl,fh=initialclock(st,sc)
+ # unambiguous discontinuities plus moderate candidate jumps
+ ds=np.diff(st);dc=np.diff(sc)
+ candidate=np.where(dc-f*ds < -1.05)[0]
+ candidate=np.unique(np.r_[candidate,breaks])
+ # reject clock-quantization-only steps by minimum stall >=2
+ # keep to at most 3 potential intervals
+ best=(0,f,breaks,loss)
+ options=[]
+ for j in candidate:
+  rough=int(round(f*ds[j]-dc[j])); options.append(sorted(set([0]+[v for v in range(rough-1,rough+2) if 2<=v<=15])))
+ if len(candidate)>8:return f,breaks,loss
+ for ls in product(*options):
+  ls=np.array(ls); bb=candidate[ls>0];ll=ls[ls>0]
+  if len(bb)>3:continue
+  corr=np.zeros(len(sc));corr[bb+1]=ll;corr=np.cumsum(corr)
+  aa,ff=area(st,sc+corr)
+  if aa>best[0]:best=(aa,ff,bb,ll)
+ return best[1:]
+if __name__=='__main__':
+ import sys,json,time
+ sys.path.insert(0,'/app/work')
+ from explore import load
+ from pathlib import Path
+ for sn in ['e1','e2']:
+  p=Path('/app/data/sessions')/sn
+  for r in json.load(open(p/'session.json'))['runs']:
+   c,y,ok,st,sc=load(p,r);start=time.time()
+   print(sn,r,calibrate(st,sc),'elapsed',time.time()-start,flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/clockarea.py
+
+OBS:  c,y,ok,st,sc=load(p,r);start=time.time()
+>    print(sn,r,calibrate(st,sc),'elapsed',time.time()-start,flush=True)
+> PY
+root@2e812d06c5e9:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/clockarea.py
+e1 a1 (np.float64(240.74380378164378), array([], dtype=int64), array([], dtype=float64)) elapsed 0.06525039672851562
+e1 a2 (np.float64(239.42368272029208), array([43]), array([5])) elapsed 0.020077228546142578
+e1 a3 (np.float64(241.2000184569963), array([33, 57]), array([3, 9])) elapsed 0.022345542907714844
+e1 b1 (np.float64(239.1363143860635), array([22]), array([7])) elapsed 0.020725488662719727
+
+
+
+#### step 22 06:19:17
+MSG: Analysis: The clock likelihood calculation is recovering the same clear stall counts for e1. In e2/b2, the detailed records show that the apparent extra drops across missing GPS seconds can be ordinary quantization of a slightly sub-240 Hz clock; the motion fit confirms the two-stall solution is good. e2/a1 needs the six-frame alternative rather than the degenerate five-frame clock.
+Plan: Finish the clock-likelihood diagnostics, switch to its calibrations, then integrate the entire reduction into a standalone script. Also test using stronger sampling and exact rolling-pin physics to assess the final numerical stability.
+CMD: 
+CMD: python3 - <<'PY'
+p='/app/work/fitfirst.py';s=open(p).read().replace('from milpclock import calibrate','from clockarea import calibrate').replace('f,jumps,loss,fl,fh=calibrate(st,sc)','f,jumps,loss=calibrate(st,sc)');open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/refine.py /app/data/sessions/e2 > /app/work/area_e2.log 2>&1
+
+OBS: 39770508
+e2 b2 (np.float64(239.54392998297058), array([18, 51]), array([ 4, 12])) elapsed 0.028794288635253906
+e2 b3 (np.float64(241.05643406209188), array([37]), array([3])) elapsed 0.025446176528930664
+root@2e812d06c5e9:/app# python3 - <<'PY'
+> p='/app/work/fitfirst.py';s=open(p).read().replace('from milpclock import calibrate','from clockarea import calibrate').replace('f,jumps,loss,fl,fh=calibrate(
+st,sc)','f,jumps,loss=calibrate(st,sc)');open(p,'w').write(s)
+> PY
+root@2e812d06c5e9:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/refine.py /app/data/sessions/e2 > /app/work/area_e2.log 2>&1
+
+
+
+#### step 23 06:19:59
+MSG: Analysis: The likelihood-based GPS fit selects six lost frames for e2/a1 and a nondegenerate rate, while keeping the two-stall e2/b2 solution that matches its motion. The physical fits already reach the tracker noise floor in the other runs. The final program can avoid fitting stall positions by excluding the GPS intervals containing them.
+Plan: Collect the refined e2 result and compute gravity and radius of gyration from the recovered pivot frequencies and corrected centre-of-mass position. Then package all routines into the required single file with no dependencies on scratch files.
+CMD: 
+CMD: tail -20 /app/work/area_e2.log; python3 - <<'PY'
+import sys,numpy as np
+sys.path.insert(0,'/app/work')
+from fitfirst import setup
+from pathlib import Path
+for sn in ['e1','e2']:
+ m,rr=setup(Path('/app/data/sessions')/sn);x=np.load('/app/work/refine_'+sn+'.npz')['x']
+ w={p:np.mean([x[3+5*i] for i,d in enumerate(rr) if d['pv']==p]) for p in ['a','b']}
+ h={d['pv']:d['h'] for d in rr};r={d['pv']:d['r'] for d in rr}
+ g=(h['b']**2-h['a']**2)/((h['b']+r['b'])/w['b']-(h['a']+r['a'])/w['a'])
+ k=(g*(h['a']+r['a'])/w['a']-h['a']**2)**.5
+ from fitfirst import inverse
+ print(sn,'g',g,'k',k,'T', {p:2*np.pi/np.sqrt(w[p]) for p in w},'angles',[(d['run'],abs(inverse(np.array([x[6+5*i]]),x[1],x[2],x[0])[0][0])) for i,d in enumerate(rr)])
+PY
+
+OBS: 170e-01] rms 0.0003523997220471024
+a1 [12.09535827  0.02175344  0.02098654  0.56940207  1.02087377] T 1.8066353342003227 rms 0.00035543147973922075
+a2 [12.09569723  0.02178239  0.02093619 -0.33655341  0.71059553] T 1.8066100200229738 rms 0.00034925220078854685
+b1 [10.30431444  0.0217535   0.0209916  -0.6917628   1.33177595] T 1.9573582327361263 rms 0.00034956150398024173
+b2 [10.30439973  0.02180824  0.02086073  0.26292026  0.58026717] T 1.9573501325807532 rms 0.0003544116486320843
+b3 [10.30443548  0.02176389  0.02097148  0.4350984   0.95828117] T 1.9573467370698463 rms 0.00035325118496457654
+
+
+
+#### step 24 06:20:46
+MSG: Analysis: The refined fits now reach the tracker noise floor in both example sessions. The recovered release angles, periods, gravity, and gyration can be calculated directly from the fitted camera and run frequencies. The reduction still needs to be packaged and tested as the exact standalone checker interface.
+Plan: Build a single-file reduce.py combining loading, quantized clock calibration, initial dynamics estimation, direct trajectory fitting, and the physical inversion. Make thread usage and runtime deterministic, then run both example sessions with the final program.
+CMD: 
+CMD: cat > /app/work/build.py <<'PY'
+from pathlib import Path
+parts=['''#!/usr/bin/env python3
+"""Reduce an orthographically tracked reversible-pendulum release session.
+
+GPS LED records calibrate elapsed time.  The shared camera is fitted as an
+orthographic angle homography; each run has its own undamped frequency,
+release time/amplitude, and linear and quadratic dissipation coefficients.
+Rolling pivots are treated as rolling rigid bodies, not stationary hinges.
+"""
+import os
+# Limit BLAS to one worker; integration and fitting use the other CPU budget
+# without oversubscribing the very small linear algebra operations.
+for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ[_v] = "1"
+import warnings
+warnings.filterwarnings("ignore")
+''']
+s=Path('/app/work/explore.py').read_text();parts.append(s[:s.index("if __name__")])
+s=Path('/app/work/milpclock.py').read_text();s=s[:s.index("if __name__")].replace('def calibrate(st,sc):','def integer_clock(st,sc):');parts.append(s)
+s=Path('/app/work/clockarea.py').read_text();s=s[:s.index("if __name__")].replace('from milpclock import calibrate as initialclock\n','').replace('initialclock(st,sc)','integer_clock(st,sc)').replace('def calibrate(st,sc):','def calibrate_clock(st,sc):');parts.append(s)
+s=Path('/app/work/fitfirst.py').read_text();s=s[:s.index("if __name__")].replace('from explore import load\n','').replace(' from clockarea import calibrate\n','').replace('f,jumps,loss=calibrate(st,sc)','f,jumps,loss=calibrate_clock(st,sc)');parts.append(s)
+s=Path('/app/work/refine.py').read_text();s=s[:s.index("if __name__")].replace('from fitfirst import setup,firstfit,inverse\n','');s=s.replace("w,l,q,k,t0=initial[3+5*i:8+5*i]\n  x.extend([w,max(.003,l),max(.003,q),held,t0])","w,l,q,k=initial[3+4*i:7+4*i]\n  x.extend([w,max(.003,l),max(.003,q),held,t0])")
+s=s.replace("ftol=2e-10,xtol=2e-10,gtol=2e-9,max_nfev=60","ftol=2e-8,xtol=2e-8,gtol=2e-8,max_nfev=35")
+parts.append(s)
+parts.append('''
+def main():
+    meta, runs = setup(Path(sys.argv[1]))
+    initial = firstfit(meta, runs)
+    x = fit(meta, runs, initial)
+    w = {p: float(np.mean([x[3+5*i] for i,d in enumerate(runs) if d['pv']==p])) for p in ('a','b')}
+    h = {d['pv']: d['h'] for d in runs}
+    r = {d['pv']: d['r'] for d in runs}
+    # omega^2 = g(h+r)/(k^2+h^2).  h is measured from the
+    # rest contact line, whereas h+r is the pin-centre-to-COM distance.
+    g = (h['b']**2-h['a']**2)/((h['b']+r['b'])/w['b']-(h['a']+r['a'])/w['a'])
+    k2 = g*(h['a']+r['a'])/w['a']-h['a']**2
+    result = {
+        'g_m_s2': float(g),
+        'small_amplitude_period_s': {p: float(2*np.pi/np.sqrt(w[p])) for p in ('a','b')},
+        'radius_of_gyration_m': float(np.sqrt(k2)),
+        'run_periods_s': {d['run']: float(2*np.pi/np.sqrt(x[3+5*i])) for i,d in enumerate(runs)},
+        'release_amplitude_rad': {d['run']: float(abs(inverse(np.array([x[6+5*i]]),x[1],x[2],x[0])[0][0])) for i,d in enumerate(runs)}
+    }
+    print(json.dumps(result, allow_nan=False, separators=(',',':')))
+
+if __name__ == '__main__':
+    main()
+''')
+Path('/app/output/reduce.py').write_text('\n'.join(parts))
+PY
+python3 /app/work/build.py
+python3 /app/output/reduce.py /app/data/sessions/e1 > /app/work/final_e1.json 2> /app/work/final_e1.log; python3 /app/output/reduce.py /app/data/sessions/e2 > /app/work/final_e2.json 2> /app/work/final_e2.log
+
+OBS: amplitude_rad': {d['run']: float(abs(inverse(np.array([x[6+5*i]]),x[1],x[2],x[0])[0][0])) for i,d in enumerate(runs)}
+>     }
+>     print(json.dumps(result, allow_nan=False, separators=(',',':')))
+>
+> if __name__ == '__main__':
+>     main()
+> ''')
+> Path('/app/output/reduce.py').write_text('\n'.join(parts))
+> PY
+root@2e812d06c5e9:/app# python3 /app/work/build.py
+root@2e812d06c5e9:/app# python3 /app/output/reduce.py /app/data/sessions/e1 > /app/work/final_e1.json 2> /app/work/final_e1.log; python3 /app/output/reduce.py /
+app/data/sessions/e2 > /app/work/final_e2.json 2> /app/work/final_e2.log
+
+
+
+#### step 25 06:21:22
+MSG: Analysis: The standalone program is now running on both example sessions. Preliminary physical results are plausible: approximately 9.79184 m/s² and 0.35170 m gyration for e1, and 9.81264 m/s² and 0.35010 m for e2. These are obtained from the session data, not stored constants.
+Plan: Inspect the standalone outputs and runtime, then exercise the implementation with independently generated trajectories covering extreme camera views, both rolling pivots, varying releases, clock wraps, stalls, and tracker gaps. This will test generalization beyond the supplied examples.
+CMD: 
+CMD: cat /app/work/final_e1.json /app/work/final_e2.json; tail -5 /app/work/final_e1.log; tail -5 /app/work/final_e2.log; wc -c /app/output/reduce.py
+
+OBS: New Terminal Output:
+
+app/data/sessions/e2 > /app/work/final_e2.json 2> /app/work/final_e2.log
+cat /app/work/final_e1.json /app/work/final_e2.json; tail -5 /app/work/final_e1.log; tail -5 /app/work/final_e2.log; wc -c /app/output/reduce.py
+
+
+
+#### step 26 06:22:00
+MSG: Analysis: The standalone tests are still in progress. The camera parameter bounds cover the rig's allowed orientations, and the direct fit estimates true release angles rather than treating image angles as calibrated. We should explicitly test high tilt/yaw and simultaneous rolling pivots.
+Plan: Wait for both example reductions and then generate a synthetic session from the rigid-body equations with known parameters to measure reduction errors quantitatively.
+CMD: 
+CMD: cat /app/work/final_e1.json /app/work/final_e2.json; head -8 /app/work/final_e1.log; head -8 /app/work/final_e2.log
+
+OBS: 09854363 [1.20922020e+01 3.73970102e-03 3.82459348e-02 4.36737113e-03] period 1.8068711016328105
+b1 240.28724288892838 [1.03001273e+01 2.30759949e-02 1.99000281e-02 3.42294540e-04] period 1.957756041371388
+b2 239.54392998297058 [1.03048679e+01 1.29480038e-02 2.77085592e-02 2.04497905e-03] period 1.9573056731826664
+b3 241.05643406209188 [ 1.03030014e+01  2.22071510e-02  2.09188627e-02 -3.36131886e-04] period 1.957482950152805
+fit 1 rms 0.011278592766595251 cam [-0.00930441  0.98498881 -0.02572233]
+fit 6 rms 0.0003523997453960051 cam [-0.00929724  0.97574864 -0.02534249]
+root@2e812d06c5e9:/app#
+
+
+#### step 27 06:22:46
+MSG: Analysis: The standalone outputs satisfy the required JSON shape and run successfully on both example sessions. Their trajectory residuals are consistent with tracker noise, and the program file is only about 10 KB. We still need an independent stress test, especially for extreme camera geometry and two rolling pivots.
+Plan: Generate a synthetic session from independently written rigid-body equations with known gravity, gyration and release angles, realistic sensor stalls and tracker losses, and extreme allowed camera orientation. Run the final program and compare every reported value with the known input.
+CMD: cat > /app/work/synth.py <<'PY'
+import json,numpy as np
+from pathlib import Path
+from scipy.integrate import solve_ivp
+import sys
+seed=int(sys.argv[1]) if len(sys.argv)>1 else 1
+rng=np.random.default_rng(seed)
+p=Path('/app/work/synthetic'+str(seed));p.mkdir(exist_ok=True);(p/'runs').mkdir(exist_ok=True);(p/'sync').mkdir(exist_ok=True)
+meta=json.load(open('/app/data/sessions/e1/session.json'))
+meta['pivots']={v:{'kind':'pin','pin_diameter_m':.004} for v in ['a','b']}
+meta['runs']={'a1':'a','a2':'a','b1':'b','b2':'b'}
+json.dump(meta,open(p/'session.json','w'))
+h=meta['centre_of_mass']['from_pivot_a_m']-.815*.02/4.862
+hs={'a':h,'b':meta['pivot_separation_m']-h}
+g=9.8065;k=.3521;roll=.028 if seed%2 else -.025
+yaw=np.deg2rad(35 if seed%2 else -32);pitch=np.deg2rad(25)
+a=np.cos(yaw)/np.cos(pitch);b=-np.sin(yaw)*np.tan(pitch)
+truth={'g_m_s2':g,'radius_of_gyration_m':k,'small_amplitude_period_s':{},'run_periods_s':{},'release_amplitude_rad':{}}
+for i,(run,piv) in enumerate(meta['runs'].items()):
+ H=hs[piv];r=.002;J=k*k+H*H
+ w2=g*(H+r)/J
+ T=2*np.pi/np.sqrt(w2);truth['small_amplitude_period_s'][piv]=T;truth['run_periods_s'][run]=T
+ th0=[.2,-.899,.65,-.33][i];truth['release_amplitude_rad'][run]=abs(th0)
+ fps=rng.uniform(238.57,241.43);N=int(70*fps);start=64000
+ raw=np.arange(N);stalls=np.sort(rng.choice(np.arange(2000,N-2000),3,replace=False))
+ losses=rng.integers(2,16,3)
+ trueframe=raw.copy()
+ for s,l in zip(stalls,losses):trueframe[s:]+=l
+ phase=rng.uniform(0,1);tt=(trueframe+phase)/fps;t0=rng.uniform(.5,1.5)
+ l=.022;q=.019
+ def dyn(t,z):
+  th,v=z;I=J+2*r*(H+r)*(1-np.cos(th))
+  return [v,(-g*(H+r)*np.sin(th)-r*(H+r)*np.sin(th)*v*v-J*(l*v+q*v*abs(v)))/I]
+ sol=solve_ivp(dyn,(0,tt[-1]-t0),[th0,0],rtol=1e-10,atol=1e-12,dense_output=True)
+ th=np.full(N,th0);ix=tt>t0;th[ix]=sol.sol(tt[ix]-t0)[0]
+ y=roll+np.arctan2(a*np.sin(th),np.cos(th)+b*np.sin(th))+rng.normal(0,.00035,N)
+ ok=np.ones(N,bool)
+ for s in rng.integers(0,N-25,int(N*.04/12)):ok[s:s+rng.integers(3,22)]=False
+ for z in range(1,N):
+  if not ok[z]:y[z]=y[z-1]
+ unit='deg' if i%2 else 'rad'
+ with open(p/'runs'/f'{run}.csv','w') as f:
+  f.write(f'# run: {run}\n# tracker: synth\n# unit: {unit}\n# nominal_fps: 240\nframe_counter,theta,tracker_ok\n')
+  for z in range(N):f.write(f'{(start+z)%65536},{y[z]*(180/np.pi if unit=="deg" else 1):.8f},{int(ok[z])}\n')
+ with open(p/'sync'/f'{run}.csv','w') as f:
+  f.write('gps_s,frame_counter\n')
+  for sec in range(1,int(tt[-1])):
+   if rng.uniform()<.08:continue
+   j=np.searchsorted(tt,sec)
+   f.write(f'{40000+sec},{(start+j)%65536}\n')
+ print(run,'fps',fps,'stall loss',losses)
+json.dump(truth,open(p/'truth.json','w'))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/synth.py 1
+python3 /app/output/reduce.py /app/work/synthetic1 > /app/work/synthetic1/result.json 2> /app/work/synth1.log
+
+OBS: frame_counter,theta,tracker_ok\n')
+>   for z in range(N):f.write(f'{(start+z)%65536},{y[z]*(180/np.pi if unit=="deg" else 1):.8f},{int(ok[z])}\n')
+>  with open(p/'sync'/f'{run}.csv','w') as f:
+>   f.write('gps_s,frame_counter\n')
+>   for sec in range(1,int(tt[-1])):
+>    if rng.uniform()<.08:continue
+>    j=np.searchsorted(tt,sec)
+>    f.write(f'{40000+sec},{(start+j)%65536}\n')
+>  print(run,'fps',fps,'stall loss',losses)
+> json.dump(truth,open(p/'truth.json','w'))
+> PY
+root@2e812d06c5e9:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/synth.py 1
+a1 fps 240.03380984664273 stall loss [15  5  6]
+
+
+
+#### step 28 06:23:20
+MSG: Analysis: The independent synthetic test is running. It uses maximum yaw/tilt, two 4 mm rolling pivots, mixed angle units, a hardware counter wrap, and three stalls per run. The standalone example tests succeeded with exactly the requested JSON members.
+Plan: Wait for the synthetic reduction, then compare relative errors with the task tolerances. If necessary, adjust integration or fitting precision; otherwise test the opposite camera orientation and the read-only execution interface.
+CMD: 
+CMD: tail -18 /app/work/synth1.log; python3 - <<'PY'
+import json
+p='/app/work/synthetic1/'
+a=json.load(open(p+'result.json'));b=json.load(open(p+'truth.json'))
+for k in a:
+ if isinstance(a[k],dict):
+  for v in a[k]:print(k,v,(a[k][v]/b[k][v]-1))
+ else:print(k,a[k],a[k]/b[k]-1)
+PY
+
+OBS: ),
+           ^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/json/__init__.py", line 346, in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/json/decoder.py", line 338, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/json/decoder.py", line 356, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+root@2e812d06c5e9:/app#
+
+
+#### step 29 06:23:40
+MSG: Analysis: The independent stress test exposed a clock-calibration failure before the motion fit. This must be diagnosed rather than assuming the examples cover all cases. Possible causes include closely spaced stalls in one GPS interval or numerical issues in the integer clock solver.
+Plan: Inspect each synthetic run's GPS clock solution and stall locations, print the optimization status, and determine whether the generated data obey the notes' clock constraints. Then improve the calibration to handle the identified edge case.
+CMD: python3 - <<'PY'
+import sys,importlib.util,numpy as np
+s=importlib.util.spec_from_file_location('reduce','/app/output/reduce.py');m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+p=m.Path('/app/work/synthetic1')
+for r in ['a1','a2','b1','b2']:
+ c,y,ok,st,sc=m.load(p,r)
+ print(r,'diff',[(st[i],st[i+1],sc[i+1]-sc[i]) for i in range(len(st)-1) if sc[i+1]-sc[i]<238*(st[i+1]-st[i])])
+ try:print(m.calibrate_clock(st,sc))
+ except Exception as e:print(e)
+PY
+
+CMD: cp /app/output/reduce.py /app/work/debugreduce.py; sed -i "s/if fit.x is None:raise RuntimeError('clock fit failed')/if fit.x is None:raise RuntimeError(str(fit))/" /app/work/debugreduce.py; python3 /app/work/debugreduce.py /app/work/synthetic1 > /app/work/debug1.out 2> /app/work/debug1.log
+
+OBS: float64(228.0))]
+(np.float64(241.12895567197074), array([36, 48, 53]), array([ 3, 13,  3]))
+b2 diff [(np.float64(13.0), np.float64(14.0), np.float64(236.0)), (np.float64(48.0), np.float64(49.0), np.float64(229.0))]
+(np.float64(240.09811172305146), array([13, 48]), array([ 5, 11]))
+root@2e812d06c5e9:/app# cp /app/output/reduce.py /app/work/debugreduce.py; sed -i "s/if fit.x is None:raise RuntimeError('clock fit failed')/if fit.x is None:ra
+ise RuntimeError(str(fit))/" /app/work/debugreduce.py; python3 /app/work/debugreduce.py /app/work/synthetic1 > /app/work/debug1.out 2> /app/work/debug1.log
+
+
+
+#### step 30 06:23:55
+MSG: Analysis: The failure comes from two sensor stalls falling between the same pair of observed GPS seconds. The notes do not prohibit this, but the current clock solver caps the accumulated loss in an LED interval at fifteen frames. The synthetic a2 interval contains twenty lost frames. The correction is to allow an interval to contain multiple stalls while keeping the total stall count at three.
+Plan: Generalize the integer clock model and candidate enumeration to allow summed losses up to forty-five frames in one LED interval, with the required minimum number of stalls. Then rerun the independent stress test.
+CMD: python3 - <<'PY'
+p='/app/output/reduce.py';s=open(p).read().replace('np.full(n,45),np.ones(k)','np.full(n,45),np.full(k,3)')
+s=s.replace('if 2<=v<=15','if 2<=v<=45').replace('if len(bb)>3:continue','if sum((int(v)+14)//15 for v in ll)>3:continue')
+open(p,'w').write(s)
+PY
+python3 /app/output/reduce.py /app/work/synthetic1 > /app/work/synthetic1/result.json 2> /app/work/synth1.log
+
+OBS: ut:
+
+ise RuntimeError(str(fit))/" /app/work/debugreduce.py; python3 /app/work/debugreduce.py /app/work/synthetic1 > /app/work/debug1.out 2> /app/work/debug1.log
+root@2e812d06c5e9:/app# python3 - <<'PY'
+> p='/app/output/reduce.py';s=open(p).read().replace('np.full(n,45),np.ones(k)','np.full(n,45),np.full(k,3)')
+> s=s.replace('if 2<=v<=15','if 2<=v<=45').replace('if len(bb)>3:continue','if sum((int(v)+14)//15 for v in ll)>3:continue')
+> open(p,'w').write(s)
+> PY
+root@2e812d06c5e9:/app# python3 /app/output/reduce.py /app/work/synthetic1 > /app/work/synthetic1/result.json 2> /app/work/synth1.log
+
+
+
+#### step 31 06:24:40
+MSG: Analysis: The clock model now permits multiple stalls in a single observed GPS interval while enforcing at most three actual stalls overall. Such an interval can be excluded from the angle fit without knowing the individual stall positions, provided its total lost-frame count is correct.
+Plan: Inspect the synthetic result and its relative errors, then run another independent synthetic session with the opposite extreme camera orientation. Also check the final script for accidental scratch dependencies and verify it works from an otherwise empty working directory.
+CMD: 
+CMD: tail -18 /app/work/synth1.log; python3 - <<'PY'
+import json
+p='/app/work/synthetic1/'
+a=json.load(open(p+'result.json'));b=json.load(open(p+'truth.json'))
+for k in a:
+ if isinstance(a[k],dict):
+  for v in a[k]:print(k,v,a[k][v]/b[k][v]-1)
+ else:print(k,a[k],a[k]/b[k]-1)
+PY
+
+OBS: 3561225207586944
+g_m_s2 9.80643583123775 -6.543492810928697e-06
+small_amplitude_period_s a -2.3083637876730734e-06
+small_amplitude_period_s b 2.073575263050742e-06
+radius_of_gyration_m 0.3520974006370827 -7.382456453597364e-06
+run_periods_s a1 -5.236894632387745e-07
+run_periods_s a2 -4.093028556750866e-06
+run_periods_s b1 -7.646485105095024e-07
+run_periods_s b2 4.911823203279653e-06
+release_amplitude_rad a1 -0.00012955644590306736
+release_amplitude_rad a2 -1.309918999259363e-05
+release_amplitude_rad b1 7.81658655661932e-05
+release_amplitude_rad b2 -6.62265199762313e-05
+root@2e812d06c5e9:/app#
+
+
+#### step 32 06:25:09
+MSG: Analysis: The independent extreme-view test passes every requested tolerance by a wide margin. Gravity and gyration errors are about 7e-6 relative, period errors are below 5e-6, and release-angle errors are below 1.3e-4. It also verified the fix for multiple stalls in one GPS interval.
+Plan: Run the opposite extreme camera orientation and verify execution in a clean directory with the minimal environment used by the checker. Make the GPS candidate threshold slightly more inclusive for the minimum two-frame stalls.
+CMD: python3 - <<'PY'
+p='/app/output/reduce.py';s=open(p).read().replace('dc-f*ds < -1.05','dc-f*ds < -1.000001');open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/synth.py 2
+mkdir -p /app/work/emptycwd /app/work/emptyhome /app/work/emptytmp
+cd /app/work/emptycwd
+env -i HOME=/app/work/emptyhome TMPDIR=/app/work/emptytmp PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 /usr/bin/time -f 'elapsed=%e max_rss_kb=%M' python3 /app/output/reduce.py /app/work/synthetic2 > /app/work/synthetic2/result.json 2> /app/work/synth2.log
+
+OBS: New Terminal Output:
+
+root@2e812d06c5e9:/app# python3 - <<'PY'
+> p='/app/output/reduce.py';s=open(p).read().replace('dc-f*ds < -1.05','dc-f*ds < -1.000001');open(p,'w').write(s)
+> PY
+root@2e812d06c5e9:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/synth.py 2
+
+
+
+#### step 33 06:25:47
+MSG: Analysis: The first independent stress test passed comfortably, and the second is being generated and reduced under the checker's minimal environment. The program does not depend on example-session paths or scratch files and writes only its JSON result to standard output.
+Plan: Wait for the second stress test, compare all numbers against its known physical parameters, and inspect resource usage. If it passes, perform a final syntax and output-file check.
+CMD: 
+CMD: tail -15 /app/work/synth2.log; python3 - <<'PY'
+import json
+p='/app/work/synthetic2/'
+a=json.load(open(p+'result.json'));b=json.load(open(p+'truth.json'))
+for k in a:
+ if isinstance(a[k],dict):
+  for v in a[k]:print(k,v,a[k][v]/b[k][v]-1)
+ else:print(k,a[k],a[k]/b[k]-1)
+PY
+
+OBS: ^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/json/__init__.py", line 346, in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/json/decoder.py", line 338, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/json/decoder.py", line 356, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+root@2e812d06c5e9:/app/work/emptycwd#
+
+
+#### step 34 06:26:10
+MSG: Analysis: The second synthetic session was generated successfully, but the test wrapper failed because this development container has no /usr/bin/time. The reduction itself was not started; this is unrelated to the program. We will rerun it directly under the minimal environment.
+Plan: Run the second stress test without the unavailable timing executable, using Python's standard-library clock and resource counters to report runtime and memory afterward.
+CMD: env -i HOME=/app/work/emptyhome TMPDIR=/app/work/emptytmp PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 python3 - <<'PY'
+import subprocess,time,resource
+start=time.monotonic()
+with open('/app/work/synthetic2/result.json','w') as out,open('/app/work/synth2.log','w') as err:
+ p=subprocess.run(['python3','/app/output/reduce.py','/app/work/synthetic2'],stdout=out,stderr=err)
+print('exit',p.returncode,'seconds',time.monotonic()-start,'max_rss_kb',resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
+PY
+
+OBS: New Terminal Output:
+
+root@2e812d06c5e9:/app/work/emptycwd# env -i HOME=/app/work/emptyhome TMPDIR=/app/work/emptytmp PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 python3 - <<'PY'
+> import subprocess,time,resource
+> start=time.monotonic()
+> with open('/app/work/synthetic2/result.json','w') as out,open('/app/work/synth2.log','w') as err:
+>  p=subprocess.run(['python3','/app/output/reduce.py','/app/work/synthetic2'],stdout=out,stderr=err)
+> print('exit',p.returncode,'seconds',time.monotonic()-start,'max_rss_kb',resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
+> PY
+
+
+
+#### step 35 06:26:46
+MSG: Analysis: The second stress reduction is now running correctly under the minimal checker-like environment. The first synthetic test and both real examples already passed interface checks and converged to noise-level trajectory residuals.
+Plan: Inspect the second test's errors and resources, then perform a final source audit and JSON-schema validation. Keep only the requested standalone regular file in /app/output.
+CMD: 
+CMD: tail -14 /app/work/synth2.log; python3 - <<'PY'
+import json
+p='/app/work/synthetic2/'
+a=json.load(open(p+'result.json'));b=json.load(open(p+'truth.json'))
+for k in a:
+ if isinstance(a[k],dict):
+  for v in a[k]:print(k,v,a[k][v]/b[k][v]-1)
+ else:print(k,a[k],a[k]/b[k]-1)
+PY
+ls -la /app/output; grep -nE '/app|np.save|open\(' /app/output/reduce.py
+
+OBS: ude_rad a1 -0.0025057443718558003
+release_amplitude_rad a2 -0.0014478447796518745
+release_amplitude_rad b1 -0.0018292536378049506
+release_amplitude_rad b2 -0.002363393855541296
+root@2e812d06c5e9:/app/work/emptycwd# ls -la /app/output; grep -nE '/app|np.save|open\(' /app/output/reduce.py
+total 28
+drwxr-xr-x 1 root root  4096 Oct 28 06:23 .
+drwxr-xr-x 1 root root  4096 Oct 28 06:08 ..
+drwxr-xr-x 2 root root  4096 Oct 28 06:23 __pycache__
+-rw-r--r-- 1 root root 10454 Oct 28 06:25 reduce.py
+23: with open(path) as f:
+125: meta=json.load(open(p/'session.json'))
+root@2e812d06c5e9:/app/work/emptycwd#
+
+
+#### step 36 06:27:11
+MSG: Analysis: The opposite-view test revealed release-angle errors slightly beyond tolerance, despite acceptable period errors. Its a2 clock estimate differs from the known oscillator rate and its trajectory residual is above the noise floor, which can bias the shared camera calibration. We need verify whether the synthetic generator respected the rule that a stall never swallows an LED's first lit frame, and then address any genuine clock ambiguity.
+Plan: Inspect the synthetic sensor-stall positions relative to GPS seconds and enumerate feasible clock-loss alternatives. This distinguishes generator violations from a reduction weakness and will guide a joint timing/motion refinement if needed.
+CMD: cp /app/work/synth.py /app/work/synthdebug.py; python3 - <<'PY'
+p='/app/work/synthdebug.py';s=open(p).read().replace("print(run,'fps',fps,'stall loss',losses)","print(run,'fps',fps,'stall loss',losses,'stall gaps',[(tt[s-1],tt[s]) for s in stalls])")
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/synthdebug.py 2
+python3 - <<'PY'
+import importlib.util,numpy as np
+spec=importlib.util.spec_from_file_location('r','/app/output/reduce.py');m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+p=m.Path('/app/work/synthetic2')
+for run in ['a1','a2','b1','b2']:
+ c,y,ok,st,sc=m.load(p,run);print(run,'chosen',m.calibrate_clock(st,sc))
+ f,br,ls,*_=m.integer_clock(st,sc)
+ print('candidates',[(i,st[i],st[i+1],f*(st[i+1]-st[i])-(sc[i+1]-sc[i])) for i in range(len(st)-1) if f*(st[i+1]-st[i])-(sc[i+1]-sc[i])>1.000001])
+PY
+
+OBS: New Terminal Output:
+
+root@2e812d06c5e9:/app/work/emptycwd# cp /app/work/synth.py /app/work/synthdebug.py; python3 - <<'PY'
+> p='/app/work/synthdebug.py';s=open(p).read().replace("print(run,'fps',fps,'stall loss',losses)","print(run,'fps',fps,'stall loss',losses,'stall gaps',[(tt[s-1
+],tt[s]) for s in stalls])")
+> open(p,'w').write(s)
+> PY
+root@2e812d06c5e9:/app/work/emptycwd# OPENBLAS_NUM_THREADS=1 python3 /app/work/synthdebug.py 2
+
+
+
+#### step 37 06:27:20
+MSG: Analysis: The diagnostic generator is running and will show whether any synthetic stall crosses an integer GPS second. A clock ambiguity in one run can propagate into all release angles because camera projection is shared, so the reduction must reject a clock whose motion residual is systematically worse.
+Plan: Wait for the diagnostic timing output and clock alternatives. If the data satisfy the notes, enumerate nearby feasible clock solutions and use angle residuals to choose among them before the final shared-camera fit.
+CMD: 
+OBS: 12,  4, 10]))
+candidates [(10, np.float64(10.0), np.float64(11.0), np.float64(11.142857142222226)), (11, np.float64(11.0), np.float64(12.0), np.float64(4.142857142222226)), (
+16, np.float64(16.0), np.float64(17.0), np.float64(10.142857142222226))]
+b2 chosen (np.float64(239.75477750480493), array([45, 55, 56]), array([6, 5, 7]))
+candidates [(45, np.float64(46.0), np.float64(48.0), np.float64(6.500000002604111)), (55, np.float64(58.0), np.float64(59.0), np.float64(4.750000001302055)), (5
+6, np.float64(59.0), np.float64(60.0), np.float64(7.750000001302055))]
+root@2e812d06c5e9:/app/work/emptycwd#
+
+
+#### step 38 06:28:02
+MSG: Analysis: The second synthetic session obeys the stall timing rules. Its a2 GPS records admit two feasible integer-loss solutions: the clock-only likelihood preferred four lost frames for one stall, while the known data contain three. The resulting phase error biased the shared camera and release angles. We will resolve these occasional clock ambiguities using the measured motion rather than GPS records alone.
+Plan: Retain all nearby feasible GPS clock solutions, perform a short per-run motion fit for each alternative with the shared camera held fixed, select the lowest-residual timing solution, and refit the shared camera and runs once. This directly tests the extra or missing elapsed frame time against the continuous pendulum trajectory.
+CMD: cp /app/output/reduce.py /app/work/prejoint.py; python3 - <<'PY'
+p='/app/output/reduce.py';s=open(p).read()
+s=s.replace('def calibrate_clock(st,sc):','def clock_candidates(st,sc):').replace('best=(0,f,breaks,loss)','best=(0,f,breaks,loss)\n solutions=[]').replace('if len(candidate)>8:return f,breaks,loss','if len(candidate)>8:return [(1,f,breaks,loss)]').replace('if aa>best[0]:best=(aa,ff,bb,ll)','if aa>0:solutions.append((aa,ff,bb,ll))\n  if aa>best[0]:best=(aa,ff,bb,ll)').replace('return best[1:]','return sorted(solutions,key=lambda v:-v[0]) or [best]')
+s=s.replace('def clock(c,st,sc):','def calibrate_clock(st,sc):\n return clock_candidates(st,sc)[0][1:]\n\ndef clock(c,st,sc):')
+s=s.replace("w,l,q,k=initial[3+4*i:7+4*i]\n  x.extend([w,max(.003,l),max(.003,q),held,t0])","if len(initial)==3+5*nr:\n   w,l,q,held,t0=initial[3+5*i:8+5*i]\n  else:\n   w,l,q,k=initial[3+4*i:7+4*i]\n  x.extend([w,max(.003,l),max(.003,q),held,t0])")
+s=s.replace('def main():','''def resolve_clocks(folder,runs,x):
+    changed=False
+    for i,d in enumerate(runs):
+        c,y,ok,st,sc=load(folder,d['run'])
+        choices=clock_candidates(st,sc)
+        choices=[v for v in choices if v[0]>=choices[0][0]*1e-4][:16]
+        if len(choices)<2: continue
+        # Identical angle samples for every candidate. Intervals where the
+        # GPS detector brackets a stall are omitted, not interpolated in time.
+        ix=np.where(ok & ((np.arange(len(c))%12==0) | (d['t']<1.6)))[0]
+        for _,f,bb,ll in choices:
+            for j in bb:
+                ix=ix[~((c[ix]>=sc[j]-3)&(c[ix]<=sc[j+1]+3))]
+        best=None
+        for aa,f,bb,ll in choices:
+            tt=(c-c[0])/f
+            for j,n in zip(bb,ll): tt[c>=(sc[j]+sc[j+1])/2]+=n/f
+            xx=x[3+5*i:8+5*i].copy()
+            xx[0]*=(f/d['f'])**2
+            held=xx[3]
+            def residual(par):
+                return trajectory(tt[ix],par,x[:3],held,d['r'])-y[ix]
+            opt=least_squares(residual,xx,bounds=([8,0,0,held-.01,.45],[14,.1,.1,held+.01,1.55]),x_scale='jac',diff_step=1e-5,max_nfev=15,ftol=1e-7,xtol=1e-7,gtol=1e-7)
+            cost=float(np.mean(opt.fun**2))
+            if best is None or cost<best[0]: best=(cost,f,bb,ll,tt,opt.x)
+        cost,f,bb,ll,tt,xx=best
+        if abs(f-d['f'])>1e-8:
+            changed=True
+            print('motion clock',d['run'],f,ll,'rms',cost**.5,file=sys.stderr)
+            d['t']=tt;d['f']=f
+            d['regions']=[(sc[j],sc[j+1],int(n)) for j,n in zip(bb,ll)]
+            x[3+5*i:8+5*i]=xx
+    return changed
+
+def main():''')
+s=s.replace('x = fit(meta, runs, initial)','x = fit(meta, runs, initial)\n    if resolve_clocks(Path(sys.argv[1]),runs,x):\n        x = fit(meta,runs,x)')
+open(p,'w').write(s)
+PY
+python3 /app/output/reduce.py /app/work/synthetic2 > /app/work/synthetic2/result.json 2> /app/work/joint2.log
+
+OBS: True
+>             print('motion clock',d['run'],f,ll,'rms',cost**.5,file=sys.stderr)
+>             d['t']=tt;d['f']=f
+>             d['regions']=[(sc[j],sc[j+1],int(n)) for j,n in zip(bb,ll)]
+>             x[3+5*i:8+5*i]=xx
+>     return changed
+>
+> def main():''')
+> s=s.replace('x = fit(meta, runs, initial)','x = fit(meta, runs, initial)\n    if resolve_clocks(Path(sys.argv[1]),runs,x):\n        x = fit(meta,runs,x)')
+> open(p,'w').write(s)
+> PY
+root@2e812d06c5e9:/app/work/emptycwd# python3 /app/output/reduce.py /app/work/synthetic2 > /app/work/synthetic2/result.json 2> /app/work/joint2.log
+
+
+
+#### step 39 06:28:34
+MSG: Analysis: The reduction now tests GPS timing alternatives against the measured continuous motion and refits the shared camera after changing a run's timing. This addresses the genuine ambiguity found by the opposite-view stress test without hard-coding any example values.
+Plan: Inspect whether the motion-based selection recovers the three-frame stall and restores release-angle accuracy. Then rerun both example sessions and the first synthetic stress test to ensure the added ambiguity resolution does not regress them.
+CMD: 
+CMD: tail -20 /app/work/joint2.log; python3 - <<'PY'
+import json
+p='/app/work/synthetic2/'
+a=json.load(open(p+'result.json'));b=json.load(open(p+'truth.json'))
+for k in a:
+ if isinstance(a[k],dict):
+  for v in a[k]:print(k,v,a[k][v]/b[k][v]-1)
+ else:print(k,a[k],a[k]/b[k]-1)
+PY
+python3 /app/output/reduce.py /app/data/sessions/e1 > /app/work/joint_e1.json 2> /app/work/joint_e1.log; python3 /app/output/reduce.py /app/data/sessions/e2 > /app/work/joint_e2.json 2> /app/work/joint_e2.log
+
+OBS: run_periods_s a1 -2.8632584838650388e-06
+run_periods_s a2 -4.0972630794833265e-06
+run_periods_s b1 3.2566661478661274e-07
+run_periods_s b2 9.640871713623156e-06
+release_amplitude_rad a1 1.3250162328670712e-05
+release_amplitude_rad a2 3.663971107203956e-05
+release_amplitude_rad b1 1.7356685106273417e-05
+release_amplitude_rad b2 8.993470631879497e-05
+root@2e812d06c5e9:/app/work/emptycwd# python3 /app/output/reduce.py /app/data/sessions/e1 > /app/work/joint_e1.json 2> /app/work/joint_e1.log; python3 /app/outp
+ut/reduce.py /app/data/sessions/e2 > /app/work/joint_e2.json 2> /app/work/joint_e2.log
+
+
+
+#### step 40 06:29:04
+MSG: Analysis: The motion-based clock selection fixed the opposite-view test. All reported quantities now pass comfortably: periods are within 1e-5 relative and release angles within 9e-5. Several closely spaced stalls are observationally indistinguishable inside omitted GPS intervals, but their total elapsed-time correction is correctly recovered.
+Plan: Finish regression testing both real examples, rerun the first synthetic test with the final clock logic, and validate the exact output schema. Remove development bytecode from /app/output so only reduce.py is submitted.
+CMD: 
+CMD: cat /app/work/joint_e1.json /app/work/joint_e2.json; grep 'motion clock' /app/work/joint_e*.log; python3 /app/output/reduce.py /app/work/synthetic1 > /app/work/synthetic1/result.json 2> /app/work/joint1.log
+
+OBS: New Terminal Output:
+
+ut/reduce.py /app/data/sessions/e2 > /app/work/joint_e2.json 2> /app/work/joint_e2.log
+cat /app/work/joint_e1.json /app/work/joint_e2.json; grep 'motion clock' /app/work/joint_e*.log; python3 /app/output/reduce.py /app/work/synthetic1 > /app/work/
+synthetic1/result.json 2> /app/work/joint1.log
+
+
+
+#### step 41 06:29:45
+MSG: Analysis: The regression tests are still running. The corrected program handles ordinary and ambiguous GPS timing, mixed units, camera obliquity, rolling pivots, moved weights, damping, tracker loss, and counter wrapping. Independent known-parameter tests demonstrate errors well below the requested tolerances after motion-based clock resolution.
+Plan: Wait for the regression runs, then inspect schema and numerical finiteness, check the file is regular and self-contained, and remove only development bytecode from the output directory.
+CMD: 
+CMD: cat /app/work/joint_e1.json /app/work/joint_e2.json; tail -5 /app/work/joint1.log; python3 - <<'PY'
+import json,math,os,stat
+keys={'g_m_s2','small_amplitude_period_s','radius_of_gyration_m','run_periods_s','release_amplitude_rad'}
+for p in ['/app/work/joint_e1.json','/app/work/joint_e2.json','/app/work/synthetic1/result.json','/app/work/synthetic2/result.json']:
+ with open(p) as f: obj=json.load(f)
+ assert set(obj)==keys
+ assert set(obj['small_amplitude_period_s'])=={'a','b'}
+ assert set(obj['run_periods_s'])==set(obj['release_amplitude_rad'])
+ def check(v):
+  if isinstance(v,dict):
+   for vv in v.values():check(vv)
+  else:assert isinstance(v,(float,int)) and math.isfinite(v) and v>0
+ check(obj)
+ print(p,'valid')
+ if 'synthetic' in p:
+  truth=json.load(open(os.path.dirname(p)+'/truth.json'))
+  for k,v in obj.items():
+   tol={'g_m_s2':4e-4,'radius_of_gyration_m':1e-3,'release_amplitude_rad':2e-3}.get(k,1e-4)
+   pairs=[(v,truth[k])] if not isinstance(v,dict) else [(vv,truth[k][name]) for name,vv in v.items()]
+   assert all(abs(a/b-1)<tol for a,b in pairs),(p,k)
+  print('all synthetic tolerances passed')
+assert stat.S_ISREG(os.lstat('/app/output/reduce.py').st_mode)
+compile(open('/app/output/reduce.py').read(),'/app/output/reduce.py','exec')
+PY
+rm -rf /app/output/__pycache__
+ls -l /app/output
+
+OBS:   0.52988598] T 1.9582155084649446 rms 0.00034456834389309104
+b2 [10.29517741  0.02200667  0.01897775 -0.24832605  0.86645578] T 1.9582266242283877 rms 0.0003561225207586944
+/app/work/joint_e1.json valid
+/app/work/joint_e2.json valid
+/app/work/synthetic1/result.json valid
+all synthetic tolerances passed
+/app/work/synthetic2/result.json valid
+all synthetic tolerances passed
+root@2e812d06c5e9:/app/work/emptycwd# rm -rf /app/output/__pycache__
+root@2e812d06c5e9:/app/work/emptycwd# ls -l /app/output
+total 16
+-rw-r--r-- 1 root root 12341 Oct 28 06:28 reduce.py
+root@2e812d06c5e9:/app/work/emptycwd#
+
+
+#### step 42 06:30:21
+MSG: Analysis: Created /app/output/reduce.py as a standalone regular file. It calibrates GPS elapsed time including stalls, fits camera projection and damped pendulum motion, accounts for rolling pivots and moved weights, and emits exactly the required JSON object. Both supplied sessions run successfully. Two independent synthetic stress sessions passed every numerical tolerance, including extreme camera views, rolling pivots, tracker gaps, counter wraps, and ambiguous clock corrections. Output schema and file constraints were validated.
+Plan: No further changes are needed. The output directory contains only reduce.py.
+CMD: 
+OBS: Current terminal state:
+New Terminal Output:
+
+root@2e812d06c5e9:/app/work/emptycwd#
+
+
+Are you sure you want to mark the task as complete? This will trigger your solution to be graded and you won't be able to make any further corrections. If so, include "task_complete": true in your JSON response again.
+
+#### step 43 06:30:31
+MSG: Analysis: The implementation and validation are complete. /app/output/reduce.py is a self-contained regular file, both provided sessions execute successfully, and independent stress tests passed all specified tolerances.
+Plan: Submit the existing reduce.py for grading.
+CMD: 
+OBS: New Terminal Output:
+
+root@2e812d06c5e9:/app/work/emptycwd#
+
+

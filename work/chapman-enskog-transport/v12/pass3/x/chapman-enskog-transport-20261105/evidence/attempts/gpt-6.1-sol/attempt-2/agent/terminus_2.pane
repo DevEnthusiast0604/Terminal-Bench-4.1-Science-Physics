@@ -1,0 +1,1937 @@
+[?2004hroot@e65e3822b05e:/app# asciinema rec --stdin /logs/agent/recording.cast
+[?2004l[0;32masciinema: recording asciicast to /logs/agent/recording.cast[0m
+[0;32masciinema: press <ctrl-d> or type "exit" when you're done[0m
+[?2004hroot@e65e3822b05e:/app# clear
+[?2004l[H[J[3J[?2004hroot@e65e3822b05e:/app# mkdir -p /app/output
+[?2004l[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> import sys, numpy, scipy
+[?2004l[?2004h> print(sys.version)
+[?2004l[?2004h> print('numpy',numpy.__version__,'scipy',scipy.__version__)
+[?2004l[?2004h> PY
+[?2004l3.12.14 (main, Sep  1 2026, 00:10:15) [GCC 12.2.0]
+numpy 2.3.3 scipy 1.18.1
+[?2004hroot@e65e3822b05e:/app# 
+[?2004l[?2004hroot@e65e3822b05e:/app# ls -la /app/output
+[?2004ltotal 8
+drwxr-xr-x 2 root root 4096 Nov  3 00:51 .
+drwxr-xr-x 1 root root 4096 Nov  3 00:51 ..
+[?2004hroot@e65e3822b05e:/app# which python3
+[?2004l/usr/local/bin/python3
+[?2004hroot@e65e3822b05e:/app# mkdir -p /app/dev
+[?2004l[?2004hroot@e65e3822b05e:/app# cat > /app/dev/brackets.py <<'PY'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from scipy.special import roots_genlaguerre, roots_legendre, eval_genlaguerre, gammaln, lpmv
+[?2004l[?2004h> from scipy.linalg import solve
+[?2004l[?2004h> 
+[?2004l[?2004h> def laguerres(n,alpha,x):
+[?2004l[?2004h>     out=np.empty((n,)+np.shape(x)); out[0]=1
+[?2004l[?2004h>     if n>1: out[1]=1+alpha-x
+[?2004l[?2004h>     for j in range(1,n-1): out[j+1]=((2*j+1+alpha-x)*out[j]-(j+alpha)*out[j-1])/(j+1)
+[?2004l[?2004h>     return out
+[?2004l[?2004h> 
+[?2004l[?2004h> class Brackets:
+[?2004l[?2004h>     def __init__(self,m1,m2,N,q):
+[?2004l[?2004h>         self.N=N;self.q=q;self.m1=m1;self.m2=m2
+[?2004l[?2004h>         self.L=2*(N-1)+q
+[?2004l[?2004h>         t,wt=roots_legendre(self.L+2)
+[?2004l[?2004h>         y,wy=roots_genlaguerre(N+q+1,.5)
+[?2004l[?2004h>         self.t=t;self.w=np.sqrt(y);self.wy=wy*2/np.sqrt(np.pi)
+[?2004l[?2004h>         self.norm=np.sqrt(np.exp(gammaln(np.arange(N)+q+1.5)-gammaln(np.arange(N)+1)-gammaln(q+1.5)))
+[?2004l[?2004h>         self.H=[]
+[?2004l[?2004h>         for m in range(q+1):
+[?2004l[?2004h>             hh=np.zeros((self.L+1,len(t)))
+[?2004l[?2004h>             for l in range(m,self.L+1):
+[?2004l[?2004h>                 hh[l]=lpmv(m,l,t)*np.sqrt((2*l+1)*np.exp(gammaln(l-m+1)-gammaln(l+m+1)))*wt/2
+[?2004l[?2004h>             self.H.append(hh)
+[?2004l[?2004h>     def parts(self,e,mass,other,sgn):
+[?2004l[?2004h>         al=np.sqrt(mass/(mass+other));be=sgn*np.sqrt(other/(mass+other))
+[?2004l[?2004h>         z=al*self.w[:,None]+be*np.sqrt(e)*self.t[None,:]
+[?2004l[?2004h>         x=be*np.sqrt(e)*np.sqrt(1-self.t**2)[None,:]
+[?2004l[?2004h>         c2=z*z+x*x
+[?2004l[?2004h>         la=laguerres(self.N,self.q+.5,c2)/self.norm[:,None,None]
+[?2004l[?2004h>         if self.q==1: fs=[z,x]
+[?2004l[?2004h>         else: fs=[z*z-c2/3,x*z,x*x]
+[?2004l[?2004h>         return [np.einsum('nwt,lt->lwn',la*f,h,optimize=True) for f,h in zip(fs,self.H)]
+[?2004l[?2004h>     def matrix(self,e,Q,selfpair=False):
+[?2004l[?2004h>         aa=self.parts(e,self.m1,self.m2,1)
+[?2004l[?2004h>         bb=self.parts(e,self.m2,self.m1,-1)
+[?2004l[?2004h>         factors=[1/3,1/3] if self.q==1 else [1/5,4/15,1/15]
+[?2004l[?2004h>         out=np.zeros((self.N if selfpair else 2*self.N,)*2)
+[?2004l[?2004h>         for a,b,fac in zip(aa,bb,factors):
+[?2004l[?2004h>             cc=a+b if selfpair else np.concatenate([a,b],axis=2)
+[?2004l[?2004h>             out+=fac*np.einsum('lwn,lwm,l,w->nm',cc,cc,Q,self.wy,optimize=True)
+[?2004l[?2004h>         return out
+[?2004l[?2004h>     def integrated(self,moments,selfpair=False):
+[?2004l[?2004h>         # moments[l,p] = integral e exp(-e) Q_l(e) L_p^1(e)/sqrt(p+1) de
+[?2004l[?2004h>         e,we=roots_genlaguerre(self.L+1,1)
+[?2004l[?2004h>         la=laguerres(self.L+1,1,e)/np.sqrt(np.arange(self.L+1))[:,None] if False else laguerres(self.L+1,1,e)/np.sqrt(np.arange(self.L+1)+1)[:,None]
+[?2004l[?2004h>         qq=moments@la
+[?2004l[?2004h>         out=0
+[?2004l[?2004h>         for j in range(len(e)):out=out+we[j]*self.matrix(e[j],qq[:,j],selfpair)
+[?2004l[?2004h>         mu=self.m1*self.m2/(self.m1+self.m2)
+[?2004l[?2004h>         return out*2/np.sqrt(np.pi)*np.sqrt(2/mu)
+[?2004l[?2004h> 
+[?2004l[?2004h> def transport(m1,m2,x,T,Cv,Cs,N):
+[?2004l[?2004h>     xs=np.array([x,1-x]); ms=np.array([m1,m2]);
+[?2004l[?2004h>     bd=np.zeros(2*N);bt=bd.copy();bv=bd.copy()
+[?2004l[?2004h>     bd[::N]=np.array([1,-1])*np.sqrt(T/(2*ms))
+[?2004l[?2004h>     bt[1::N]=-xs*1.25*np.sqrt(2*T/ms)/np.sqrt(2.5)
+[?2004l[?2004h>     bv[::N]=2/3*xs
+[?2004l[?2004h>     null=np.zeros(2*N);null[::N]=np.sqrt(ms)
+[?2004l[?2004h>     Cv=Cv*np.sqrt(T);Cs=Cs*np.sqrt(T)
+[?2004l[?2004h>     # fix momentum gauge, equivalent to invert on its orthogonal complement
+[?2004l[?2004h>     vv=null/np.linalg.norm(null)
+[?2004l[?2004h>     ac=solve(Cv+np.outer(vv,vv)*np.trace(Cv)/(2*N),np.stack([bd,bt],axis=1),assume_a='pos')
+[?2004l[?2004h>     d=bd@ac[:,0];dt=bd@ac[:,1];h=bt@ac[:,1]
+[?2004l[?2004h>     visc=T/2*bv@solve(Cs,bv,assume_a='pos')
+[?2004l[?2004h>     return [visc,h-dt*dt/d,x*(1-x)*d,dt/(x*(1-x)*d)]
+[?2004l[?2004h> 
+[?2004l[?2004h> def test(N):
+[?2004l[?2004h>     m1,m2=1.,2.;x=.4;T=1
+[?2004l[?2004h>     cc=[]
+[?2004l[?2004h>     for q in [1,2]:
+[?2004l[?2004h>         out=np.zeros((2*N,2*N))
+[?2004l[?2004h>         for ma,mb,xx,sl in [(m1,m1,x*x/2,slice(0,N)),(m2,m2,(1-x)**2/2,slice(N,2*N)),(m1,m2,x*(1-x),slice(0,2*N))]:
+[?2004l[?2004h>             br=Brackets(ma,mb,N,q)
+[?2004l[?2004h>             mom=np.zeros((br.L+1,br.L+1));mom[1:,0]=np.pi # hard spheres diameter1
+[?2004l[?2004h>             mat=br.integrated(mom,ma==mb and sl.stop-sl.start==N)
+[?2004l[?2004h>             out[sl,sl]+=xx*mat
+[?2004l[?2004h>         cc.append(out)
+[?2004l[?2004h>     null=np.zeros(2*N);null[::N]=np.sqrt([m1,m2])
+[?2004l[?2004h>     print(N,'null',np.linalg.norm(cc[0]@null),'eig',np.linalg.eigvalsh(cc[0])[:2],transport(m1,m2,x,T,*cc,N))
+[?2004l[?2004h> 
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>     for n in range(2,9):test(n)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 /app/dev/brackets.py
+[?2004l2 null 4.652682298944613e-16 eig [3.46944695e-18 7.93612753e-01] [np.float64(0.15058004406533299), np.float64(0.5133296515392637), np.float64(0.18812619954899146), np.float64(-0.27070521169543676)]
+3 null 6.672464515432847e-16 eig [-1.11022302e-16  7.46426726e-01] [np.float64(0.15071717673884505), np.float64(0.5253415876785301), np.float64(0.18867903535582561), np.float64(-0.2886415774055885)]
+4 null 3.4134775860623777e-16 eig [2.96962975e-16 7.30189456e-01] [np.float64(0.1507346899263936), np.float64(0.5265400647328735), np.float64(0.18878367008459332), np.float64(-0.29150473902096)]
+5 null 6.760718586116116e-16 eig [-5.70077991e-16  7.22607733e-01] [np.float64(0.15073788639132588), np.float64(0.5267432640449442), np.float64(0.18880980609683484), np.float64(-0.2921513014048096)]
+6 null 8.892830887099866e-16 eig [-2.17057277e-16  7.18474134e-01] [np.float64(0.15073862581981898), np.float64(0.5267896375418274), np.float64(0.18881758967716797), np.float64(-0.2923302918213985)]
+7 null 4.935120989199412e-16 eig [9.37842594e-16 7.16001774e-01] [np.float64(0.1507388286550476), np.float64(0.5268024942957383), np.float64(0.18882021111533606), np.float64(-0.2923872167020365)]
+8 null 2.721130079443944e-15 eig [-4.60855738e-17  7.14429835e-01] [np.float64(0.15073889195277348), np.float64(0.5268065886036164), np.float64(0.18882117892431727), np.float64(-0.29240727430554997)]
+[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+[?2004l[?2004h> import sys;sys.path.insert(0,'/app/dev')
+[?2004l[?2004h> from brackets import *
+[?2004l[?2004h> for q in [1,2]:
+[?2004l[?2004h>  b=Brackets(1,1,2,q);mo=np.zeros((b.L+1,b.L+1));mo[1:,0]=np.pi
+[?2004l[?2004h>  print('q',q,'mat',b.integrated(mo,True)/2)
+[?2004l[?2004h>  e=1; pp=b.parts(e,1,1,1)
+[?2004l[?2004h>  print('parts',[(p[:,0,0]) for p in pp])
+[?2004l[?2004h> for N in [2,5,10]:
+[?2004l[?2004h>  m1=m2=1;x=.4;cc=[]
+[?2004l[?2004h>  for q in [1,2]:
+[?2004l[?2004h>   b=Brackets(1,1,N,q);mo=np.zeros((b.L+1,b.L+1));mo[1:,0]=np.pi
+[?2004l[?2004h>   out=np.zeros((2*N,2*N));out[:N,:N]=x*x/2*b.integrated(mo,True);out[N:,N:]=(1-x)**2/2*b.integrated(mo,True);out+=x*(1-x)*b.integrated(mo,False);cc.append(out)
+[?2004l[?2004h>  print(N,transport(1,1,x,1,*cc,N))
+[?2004l[?2004h> print('HS viscosity',5/(16*np.sqrt(np.pi)),'conductivity',75/(64*np.sqrt(np.pi)))
+[?2004l[?2004h> PY
+[?2004lq 1 mat [[6.60748984e-31 5.64843288e-16]
+ [5.64843288e-16 1.89061744e+00]]
+parts [array([ 5.11627832e-01,  4.08248290e-01, -3.43724788e-16, -1.77863274e-16]), array([ 0.00000000e+00, -5.77350269e-01,  4.49508533e-17,  6.59588338e-17])]
+q 2 mat [[ 1.89061744 -0.25264438]
+ [-0.25264438  2.30700342]]
+parts [array([ 1.43799602e-01,  2.52806120e-01,  1.49071198e-01, -1.52850626e-16,
+       -1.26293570e-17]), array([ 0.00000000e+00, -2.68141383e-01, -1.82574186e-01,  5.34580474e-17,
+        1.02030663e-16]), array([ 0.00000000e+00,  0.00000000e+00,  3.65148372e-01, -1.34642082e-17,
+       -1.84311651e-17])]
+2 [np.float64(0.11928513266015882), np.float64(0.6611596682200277), np.float64(0.2152188713102433), np.float64(1.6147484896593038e-17)]
+5 [np.float64(0.11942338350049367), np.float64(0.6777775569049491), np.float64(0.21557834230022999), np.float64(3.143153619719216e-16)]
+10 [np.float64(0.11942411581808457), np.float64(0.6778327561915027), np.float64(0.21558115558190374), np.float64(-7.981125602325778e-16)]
+HS viscosity 0.17630924485867386 conductivity 0.6611596682200269
+[?2004hroot@e65e3822b05e:/app# sed -i 's/visc=T\/2\*bv/visc=3*T\/4*bv/' /app/dev/brackets.py
+[?2004l[?2004hroot@e65e3822b05e:/app# which gcc
+[?2004l[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> import scipy.integrate._ivp.dop853_coefficients as c
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> np.set_printoptions(precision=18,linewidth=160)
+[?2004l[?2004h> with open('/app/dev/dop.h','w') as f:
+[?2004l[?2004h>  for name,arr in [('dc',c.C[:12]),('da',c.A[:12,:12]),('db',c.B),('de3',c.E3),('de5',c.E5)]:
+[?2004l[?2004h>   f.write('static const double '+name+''.join('[%d]'%s for s in arr.shape)+' = '+str(arr.tolist()).replace('[','{').replace(']','}')+';\n')
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# command -v cc; ls /usr/bin/*gcc* /usr/local/bin/*gcc* 2>/dev/null
+[?2004l[?2004hroot@e65e3822b05e:/app# cat > /app/dev/scatter.py <<'PY'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from scipy.integrate import solve_ivp
+[?2004l[?2004h> from scipy.special import spherical_jn,spherical_yn,roots_legendre
+[?2004l[?2004h> from time import perf_counter
+[?2004l[?2004h> 
+[?2004l[?2004h> class Scatter:
+[?2004l[?2004h>  def __init__(self,a,L,mu):
+[?2004l[?2004h>   self.a=a;self.b=1-a;self.c=8*np.pi**2*mu/L**2
+[?2004l[?2004h>  def potential(self,r):
+[?2004l[?2004h>   z=(self.b/(r-self.a))**6
+[?2004l[?2004h>   return 4*z*(z-1)
+[?2004l[?2004h>  def phases(self,E,h=.003,R=15,extra=10):
+[?2004l[?2004h>   E=np.atleast_1d(E);k=np.sqrt(self.c*E)
+[?2004l[?2004h>   lm=int(np.ceil(k.max()*3.5))+extra
+[?2004l[?2004h>   l=np.arange(lm+1);ll=l*(l+1)
+[?2004l[?2004h>   r0=self.a+.4*self.b;rb=self.a+.8*self.b
+[?2004l[?2004h>   z=np.zeros((2,len(E),len(l)));z[1]=1
+[?2004l[?2004h>   def rhs(r,z):
+[?2004l[?2004h>    z=z.reshape(2,len(E),len(l));q=ll[None,:]/r**2+self.c*(self.potential(r)-E[:,None])
+[?2004l[?2004h>    return np.stack([z[1],q*z[0]]).ravel()
+[?2004l[?2004h>   for end in self.a+self.b*np.array([.43,.47,.52,.58,.65,.72,.8]):
+[?2004l[?2004h>    sol=solve_ivp(rhs,(r0,end),z.ravel(),method='DOP853',rtol=2e-10,atol=1e-12)
+[?2004l[?2004h>    z=sol.y[:,-1].reshape(z.shape);z/=np.maximum(abs(z[0]),abs(z[1]))[None,:,:];r0=end
+[?2004l[?2004h>   # two accurately initialized points
+[?2004l[?2004h>   sol=solve_ivp(rhs,(rb,rb+h),z.ravel(),method='DOP853',rtol=2e-11,atol=1e-13)
+[?2004l[?2004h>   prev=z[0].copy();cur=sol.y[:,-1].reshape(z.shape)[0].copy()
+[?2004l[?2004h>   def qq(r):return (ll[None,:]/r**2+self.c*(self.potential(r)-E[:,None]))*(h*h/12)
+[?2004l[?2004h>   qp=qq(rb);qc=qq(rb+h)
+[?2004l[?2004h>   steps=int(np.ceil((R-rb)/h));R=rb+steps*h
+[?2004l[?2004h>   for i in range(2,steps+2):
+[?2004l[?2004h>    r=rb+i*h;qn=qq(r)
+[?2004l[?2004h>    nex=(2*(1+5*qc)*cur-(1-qp)*prev)/(1-qn)
+[?2004l[?2004h>    prev,cur=cur,nex;qp,qc=qc,qn
+[?2004l[?2004h>    if i%80==0:
+[?2004l[?2004h>     norm=np.maximum(abs(cur),abs(prev));norm=np.maximum(norm,1e-100)
+[?2004l[?2004h>     cur/=norm;prev/=norm
+[?2004l[?2004h>   # prev at R, cur at R+h
+[?2004l[?2004h>   t0=k[:,None]*R;t1=k[:,None]*(R+h)
+[?2004l[?2004h>   j0=t0*spherical_jn(l,t0);j1=t1*spherical_jn(l,t1)
+[?2004l[?2004h>   y0=t0*spherical_yn(l,t0);y1=t1*spherical_yn(l,t1)
+[?2004l[?2004h>   A=prev*y1-cur*y0;B=prev*j1-cur*j0
+[?2004l[?2004h>   norm=np.hypot(A,B);A/=norm;B/=norm
+[?2004l[?2004h>   delta=np.arctan2(B,A)
+[?2004l[?2004h>   # tail correction with first-order variable-phase integration
+[?2004l[?2004h>   # integrate finite range in r with oscillation-resolving Gaussian quadrature
+[?2004l[?2004h>   rn,wn=roots_legendre(12)
+[?2004l[?2004h>   edges=np.linspace(R,max(4*R,60),int(np.ceil((max(4*R,60)-R)*k.max()/3))+1)
+[?2004l[?2004h>   correction=np.zeros_like(delta)
+[?2004l[?2004h>   for left,right in zip(edges[:-1],edges[1:]):
+[?2004l[?2004h>    rs=(left+right)/2+(right-left)/2*rn
+[?2004l[?2004h>    ts=k[:,None,None]*rs[None,:,None]
+[?2004l[?2004h>    jr=ts*spherical_jn(l,ts);yr=ts*spherical_yn(l,ts)
+[?2004l[?2004h>    ff=A[:,None,:]*jr-B[:,None,:]*yr
+[?2004l[?2004h>    correction-=self.c/k[:,None]*np.sum((self.potential(rs)*wn*(right-left)/2)[None,:,None]*ff**2,axis=1)
+[?2004l[?2004h>   delta+=correction
+[?2004l[?2004h>   return delta,A,B
+[?2004l[?2004h>  def cross(self,E,M,kind=0,h=.003,R=15):
+[?2004l[?2004h>   d,A,B=self.phases(E,h,R)
+[?2004l[?2004h>   l=np.arange(d.shape[1]);k=np.sqrt(self.c*np.atleast_1d(E))
+[?2004l[?2004h>   n=len(l)+(M+1)//2+2
+[?2004l[?2004h>   t,wt=roots_legendre(n)
+[?2004l[?2004h>   P=np.empty((max(M+1,len(l)),n));P[0]=1
+[?2004l[?2004h>   if len(P)>1:P[1]=t
+[?2004l[?2004h>   for j in range(1,len(P)-1):P[j+1]=((2*j+1)*t*P[j]-j*P[j-1])/(j+1)
+[?2004l[?2004h>   coef=(2*l+1)[None,:]*np.exp(1j*d)*np.sin(d)/k[:,None]
+[?2004l[?2004h>   if kind==0:ds=abs(coef@P[:len(l)])**2
+[?2004l[?2004h>   else:
+[?2004l[?2004h>    ds=(1+kind)*abs(coef[:,::2]@P[:len(l):2])**2+(1-kind)*abs(coef[:,1::2]@P[1:len(l):2])**2
+[?2004l[?2004h>   Q=2*np.pi*ds@((1-P[:M+1])*wt).T
+[?2004l[?2004h>   return Q,A,B
+[?2004l[?2004h> 
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  s=Scatter(0,1.5,.5)
+[?2004l[?2004h>  for h in [.006,.003,.0015]:
+[?2004l[?2004h>   st=perf_counter();d,A,B=s.phases([.03,.1,.2,.5,1,2],h,R=12)
+[?2004l[?2004h>   print(h,perf_counter()-st,d[:,:8])
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 /app/dev/scatter.py
+[?2004l0.006 0.14930738089606166 [[ 1.97510723e+00  2.79319862e+00  2.98953280e+00  2.16302351e-02
+   4.13159444e-03  1.35962963e-03  5.58959950e-04  2.64724140e-04]
+ [ 1.00732661e+00  2.05273559e+00  2.54677899e+00  6.78392924e-01
+   5.23004821e-02  1.54881056e-02  6.25254429e-03  2.94742169e-03]
+ [ 2.02850734e-01  1.35220525e+00  2.04896788e+00  2.02312268e+00
+   2.95485423e-01  6.71502048e-02  2.55903160e-02  1.18876288e-02]
+ [-1.20623785e+00  5.87360647e-02  1.00165141e+00  1.57242084e+00
+   1.55606847e+00  6.11925830e-01  1.86377931e-01  7.86867031e-02]
+ [-2.60812722e+00 -1.27195295e+00 -1.78119768e-01  6.54715516e-01
+   1.18444652e+00  1.29966539e+00  8.50165141e-01  3.67875556e-01]
+ [ 1.87813579e+00 -3.01191907e+00 -1.79978230e+00 -7.75910127e-01
+   4.68383256e-02  6.46023225e-01  9.80605958e-01  9.87479599e-01]]
+0.003 0.15805491292849183 [[ 1.97510718e+00  2.79319860e+00  2.98953278e+00  2.16301824e-02
+   4.13158366e-03  1.35961454e-03  5.58893147e-04  2.64655125e-04]
+ [ 1.00732658e+00  2.05273557e+00  2.54677897e+00  6.78392907e-01
+   5.23004657e-02  1.54881010e-02  6.25251525e-03  2.94741679e-03]
+ [ 2.02850713e-01  1.35220523e+00  2.04896787e+00  2.02312265e+00
+   2.95485404e-01  6.71502023e-02  2.55902964e-02  1.18876279e-02]
+ [-1.20623788e+00  5.87360405e-02  1.00165138e+00  1.57242081e+00
+   1.55606846e+00  6.11925822e-01  1.86377916e-01  7.86866987e-02]
+ [-2.60812728e+00 -1.27195301e+00 -1.78119821e-01  6.54715464e-01
+   1.18444648e+00  1.29966536e+00  8.50165106e-01  3.67875528e-01]
+ [ 1.87813555e+00 -3.01191931e+00 -1.79978253e+00 -7.75910349e-01
+   4.68381129e-02  6.46023027e-01  9.80605780e-01  9.87479427e-01]]
+0.0015 0.2152741509489715 [[ 1.97510716e+00  2.79319859e+00  2.98953278e+00  2.16301560e-02
+   4.13157826e-03  1.35960700e-03  5.58859743e-04  2.64620607e-04]
+ [ 1.00732656e+00  2.05273556e+00  2.54677897e+00  6.78392905e-01
+   5.23004575e-02  1.54880987e-02  6.25250075e-03  2.94741433e-03]
+ [ 2.02850708e-01  1.35220523e+00  2.04896786e+00  2.02312264e+00
+   2.95485396e-01  6.71502013e-02  2.55902867e-02  1.18876275e-02]
+ [-1.20623788e+00  5.87360378e-02  1.00165137e+00  1.57242081e+00
+   1.55606845e+00  6.11925821e-01  1.86377910e-01  7.86866979e-02]
+ [-2.60812728e+00 -1.27195302e+00 -1.78119824e-01  6.54715459e-01
+   1.18444647e+00  1.29966536e+00  8.50165100e-01  3.67875525e-01]
+ [ 1.87813553e+00 -3.01191932e+00 -1.79978255e+00 -7.75910363e-01
+   4.68380979e-02  6.46023013e-01  9.80605769e-01  9.87479414e-01]]
+[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/dev/scatter.py'
+[?2004l[?2004h> s=open(p).read().replace('for i in range(2,steps+2):','saved={}\n  for i in range(2,steps+3):').replace('   if i%80==0:','   if i>=steps-2: saved[i]=cur.copy()\n   if i%80==0 and i<steps-2:')
+[?2004l[?2004h> a=s.index('  # prev at R, cur at R+h');b=s.index('  norm=np.hypot(A,B)',a)
+[?2004l[?2004h> s=s[:a]+'''  u=saved[steps]
+[?2004l[?2004h>   du=(saved[steps-2]-8*saved[steps-1]+8*saved[steps+1]-saved[steps+2])/(12*h)
+[?2004l[?2004h>   t0=k[:,None]*R
+[?2004l[?2004h>   j0=t0*spherical_jn(l,t0);y0=t0*spherical_yn(l,t0)
+[?2004l[?2004h>   dj=k[:,None]*(spherical_jn(l,t0)+t0*spherical_jn(l,t0,True))
+[?2004l[?2004h>   dy=k[:,None]*(spherical_yn(l,t0)+t0*spherical_yn(l,t0,True))
+[?2004l[?2004h>   A=u*dy-du*y0;B=u*dj-du*j0
+[?2004l[?2004h> '''+s[b:]
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 /app/dev/scatter.py
+[?2004l0.006 0.18926477897912264 [[ 1.97510714e+00  2.79319859e+00  2.98953278e+00  2.16301297e-02
+   4.13157291e-03  1.35959938e-03  5.58826260e-04  2.64586049e-04]
+ [ 1.00732656e+00  2.05273557e+00  2.54677898e+00  6.78392918e-01
+   5.23004495e-02  1.54880964e-02  6.25248625e-03  2.94741197e-03]
+ [ 2.02850719e-01  1.35220524e+00  2.04896787e+00  2.02312265e+00
+   2.95485389e-01  6.71502004e-02  2.55902774e-02  1.18876275e-02]
+ [-1.20623786e+00  5.87360580e-02  1.00165139e+00  1.57242082e+00
+   1.55606847e+00  6.11925827e-01  1.86377908e-01  7.86867019e-02]
+ [-2.60812722e+00 -1.27195295e+00 -1.78119769e-01  6.54715501e-01
+   1.18444651e+00  1.29966539e+00  8.50165129e-01  3.67875544e-01]
+ [ 1.87813581e+00 -3.01191905e+00 -1.79978229e+00 -7.75910142e-01
+   4.68382929e-02  6.46023229e-01  9.80605964e-01  9.87479576e-01]]
+0.003 0.17703202506527305 [[ 1.97510714e+00  2.79319858e+00  2.98953277e+00  2.16301296e-02
+   4.13157291e-03  1.35959939e-03  5.58826257e-04  2.64586052e-04]
+ [ 1.00732655e+00  2.05273556e+00  2.54677897e+00  6.78392904e-01
+   5.23004494e-02  1.54880964e-02  6.25248621e-03  2.94741192e-03]
+ [ 2.02850705e-01  1.35220523e+00  2.04896786e+00  2.02312263e+00
+   2.95485387e-01  6.71502002e-02  2.55902770e-02  1.18876272e-02]
+ [-1.20623788e+00  5.87360377e-02  1.00165137e+00  1.57242080e+00
+   1.55606845e+00  6.11925820e-01  1.86377904e-01  7.86866977e-02]
+ [-2.60812728e+00 -1.27195301e+00 -1.78119821e-01  6.54715459e-01
+   1.18444647e+00  1.29966536e+00  8.50165098e-01  3.67875525e-01]
+ [ 1.87813555e+00 -3.01191931e+00 -1.79978253e+00 -7.75910350e-01
+   4.68381073e-02  6.46023023e-01  9.80605780e-01  9.87479421e-01]]
+0.0015 0.20126269198954105 [[ 1.97510714e+00  2.79319858e+00  2.98953277e+00  2.16301296e-02
+   4.13157291e-03  1.35959939e-03  5.58826247e-04  2.64586052e-04]
+ [ 1.00732655e+00  2.05273556e+00  2.54677897e+00  6.78392903e-01
+   5.23004494e-02  1.54880964e-02  6.25248622e-03  2.94741192e-03]
+ [ 2.02850704e-01  1.35220523e+00  2.04896786e+00  2.02312263e+00
+   2.95485387e-01  6.71502002e-02  2.55902770e-02  1.18876272e-02]
+ [-1.20623788e+00  5.87360365e-02  1.00165137e+00  1.57242080e+00
+   1.55606845e+00  6.11925820e-01  1.86377904e-01  7.86866974e-02]
+ [-2.60812728e+00 -1.27195302e+00 -1.78119824e-01  6.54715456e-01
+   1.18444646e+00  1.29966536e+00  8.50165096e-01  3.67875524e-01]
+ [ 1.87813553e+00 -3.01191932e+00 -1.79978255e+00 -7.75910363e-01
+   4.68380957e-02  6.46023010e-01  9.80605769e-01  9.87479411e-01]]
+[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+[?2004l[?2004h> import sys;sys.path.insert(0,'/app/dev');from scatter import *
+[?2004l[?2004h> s=Scatter(.2,.8,1)
+[?2004l[?2004h> for size,emax in [(64,2),(64,10),(128,30)]:
+[?2004l[?2004h>  es=np.linspace(.001,emax,size);st=perf_counter();q,*_=s.cross(es,24,1/9,h=.003,R=12)
+[?2004l[?2004h>  print(size,emax,perf_counter()-st,q[[0,-1],:5])
+[?2004l[?2004h> PY
+[?2004l64 2 4.885460325051099 [[ 0.          9.24299252  9.53354196  9.24299252  9.20813372]
+ [ 0.         19.69628761  6.02137467 19.69628761  8.48525924]]
+64 10 41.39315826725215 [[ 0.          9.24299252  9.53354196  9.24299252  9.20813372]
+ [ 0.         14.86700866  3.19995678 14.86700866  3.70703592]]
+/app/dev/scatter.py:44: RuntimeWarning: invalid value encountered in add
+  dy=k[:,None]*(spherical_yn(l,t0)+t0*spherical_yn(l,t0,True))
+/app/dev/scatter.py:45: RuntimeWarning: overflow encountered in multiply
+  A=u*dy-du*y0;B=u*dj-du*j0
+/app/dev/scatter.py:46: RuntimeWarning: invalid value encountered in divide
+  norm=np.hypot(A,B);A/=norm;B/=norm
+^Ccp /app/dev/scatter.py /app/dev/scatter_old.py
+python3 - <<'PY'
+p='/app/dev/scatter.py';s=open(p).read();a=s.index('  # tail correction');b=s.index('  return delta,A,B',a);s=s[:a]+s[b:];s=s.replace('  lm=int(np.ceil(k.max()*3.5))+extra','  h=min(h,.025/k.max(),.005*self.b)\n  lm=int(np.ceil(k.max()*3.5))+extra');s=s.replace('R=15','R=40');open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+import sys;sys.path.insert(0,'/app/dev');from scatter import *
+s=Scatter(.2,.8,1)
+for size,emax in [(64,2),(64,10),(128,30)]:
+ es=np.linspace(.001,emax,size);st=perf_counter();q,*_=s.cross(es,24,1/9)
+ print(size,emax,perf_counter()-st,q[[0,-1],:5],flush=True)
+s=Scatter(0,1.5,.5)
+for R in [30,40,60]:
+ st=perf_counter();q,*_=s.cross([.001,.01,.03,.1,.2,.5,1,2],24,0,R=R)
+ print('R',R,perf_counter()-st,q[:,:4],flush=True)
+PY
+Traceback (most recent call last):
+  File "<stdin>", line 4, in <module>
+  File "/app/dev/scatter.py", line 62, in cross
+    d,A,B=self.phases(E,h,R)
+          ^^^^^^^^^^^^^^^^^^
+  File "/app/dev/scatter.py", line 56, in phases
+    jr=ts*spherical_jn(l,ts);yr=ts*spherical_yn(l,ts)
+                                   ^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/scipy/special/_spherical_bessel.py", line 31, in wrapper
+    return xpx.apply_where(z.real >= 0, (n, z),
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/scipy/_external/array_api_extra/_lib/_funcs.py", line 162, in apply_where
+    return _apply_where(cond, f1, f2, fill_value, *args_, kwkeys=kwkeys, xp=xp)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/scipy/_external/array_api_extra/_lib/_funcs.py", line 188, in _apply_where
+    temp1 = f1(
+            ^^^
+  File "/usr/local/lib/python3.12/site-packages/scipy/special/_spherical_bessel.py", line 32, in <lambda>
+    lambda n, z: fun(n, z, derivative),
+                 ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/scipy/special/_spherical_bessel.py", line 216, in spherical_yn
+    return _spherical_yn(n, z)
+           ^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+
+[?2004hroot@e65e3822b05e:/app# cp /app/dev/scatter.py /app/dev/scatter_old.py
+[?2004l[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/dev/scatter.py';s=open(p).read();a=s.index('  # tail correction');b=s.index('  return delta,A,B',a);s=s[:a]+s[b:];s=s.replace('  lm=int(np.ceil(k.max()*3.5))+extra','  h=min(h,.025/k.max(),.005*self.b)\n  lm=int(np.ceil(k.max()*3.5))+extra');s=s.replace('R=15','R=40');open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+[?2004l[?2004h> import sys;sys.path.insert(0,'/app/dev');from scatter import *
+[?2004l[?2004h> s=Scatter(.2,.8,1)
+[?2004l[?2004h> for size,emax in [(64,2),(64,10),(128,30)]:
+[?2004l[?2004h>  es=np.linspace(.001,emax,size);st=perf_counter();q,*_=s.cross(es,24,1/9)
+[?2004l[?2004h>  print(size,emax,perf_counter()-st,q[[0,-1],:5],flush=True)
+[?2004l[?2004h> s=Scatter(0,1.5,.5)
+[?2004l[?2004h> for R in [30,40,60]:
+[?2004l[?2004h>  st=perf_counter();q,*_=s.cross([.001,.01,.03,.1,.2,.5,1,2],24,0,R=R)
+[?2004l[?2004h>  print('R',R,perf_counter()-st,q[:,:4],flush=True)
+[?2004l[?2004h> PY
+[?2004l64 2 1.1373334638774395 [[ 0.          9.2429985   9.53354471  9.2429985   9.20814337]
+ [ 0.         19.69628077  6.02137446 19.69628077  8.4852588 ]]
+64 10 3.216095716226846 [[ 0.          9.24299854  9.53354475  9.24299854  9.20814341]
+ [ 0.         14.86543111  3.19995611 14.86543111  3.70702946]]
+128 30 19.00664685619995 [[0.         9.2429985  9.53354473 9.2429985  9.20814337]
+ [0.         9.41099985 2.74598237 9.41099985 3.04963975]]
+R 30 0.24883171590045094 [[ 0.         25.90088833 26.29704275 26.33515788]
+ [ 0.         21.33371337 25.48323879 27.76387083]
+ [ 0.         16.70278434 24.35457819 28.91540132]
+ [ 0.         38.10970928 35.35938237 39.82545928]
+ [ 0.         20.87334315 26.06782217 33.26841582]
+ [ 0.         10.73726778 15.35346156 18.81495283]
+ [ 0.          5.9271451   8.63362557 10.77022859]
+ [ 0.          3.9951383   5.31453937  6.43856942]]
+R 40 0.29611874371767044 [[ 0.         25.90035875 26.29724399 26.33550883]
+ [ 0.         21.33372472 25.48324868 27.76387661]
+ [ 0.         16.70278515 24.35457743 28.91540024]
+ [ 0.         38.10971005 35.35938186 39.82546015]
+ [ 0.         20.87334317 26.06782222 33.26841581]
+ [ 0.         10.73726778 15.35346157 18.81495282]
+ [ 0.          5.92714511  8.63362557 10.7702286 ]
+ [ 0.          3.9951383   5.31453937  6.43856942]]
+R 60 0.39993012277409434 [[ 0.         25.90043041 26.29721215 26.33557169]
+ [ 0.         21.3337225  25.48324909 27.76387573]
+ [ 0.         16.70278499 24.35457769 28.91540032]
+ [ 0.         38.10971    35.35938183 39.82546016]
+ [ 0.         20.87334317 26.06782223 33.26841581]
+ [ 0.         10.73726778 15.35346157 18.81495282]
+ [ 0.          5.92714511  8.63362558 10.7702286 ]
+ [ 0.          3.9951383   5.31453937  6.43856943]]
+[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/dev/brackets.py';s=open(p).read().replace('[1/5,4/15,1/15]','[3/20,1/5,1/20]').replace('bv[::N]=2/3*xs','bv[::N]=xs/2').replace('visc=3*T/4*bv','visc=T*bv');open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 /app/dev/brackets.py
+[?2004l2 null 4.652682298944613e-16 eig [3.46944695e-18 7.93612753e-01] [np.float64(0.22587006609799953), np.float64(0.5133296515392637), np.float64(0.18812619954899146), np.float64(-0.27070521169543676)]
+3 null 6.672464515432847e-16 eig [-1.11022302e-16  7.46426726e-01] [np.float64(0.22607576510826755), np.float64(0.5253415876785301), np.float64(0.18867903535582561), np.float64(-0.2886415774055885)]
+4 null 3.4134775860623777e-16 eig [2.96962975e-16 7.30189456e-01] [np.float64(0.2261020348895904), np.float64(0.5265400647328735), np.float64(0.18878367008459332), np.float64(-0.29150473902096)]
+5 null 6.760718586116116e-16 eig [-5.70077991e-16  7.22607733e-01] [np.float64(0.22610682958698874), np.float64(0.5267432640449442), np.float64(0.18880980609683484), np.float64(-0.2921513014048096)]
+6 null 8.892830887099866e-16 eig [-2.17057277e-16  7.18474134e-01] [np.float64(0.22610793872972854), np.float64(0.5267896375418274), np.float64(0.18881758967716797), np.float64(-0.2923302918213985)]
+7 null 4.935120989199412e-16 eig [9.37842594e-16 7.16001774e-01] [np.float64(0.22610824298257143), np.float64(0.5268024942957383), np.float64(0.18882021111533606), np.float64(-0.2923872167020365)]
+8 null 2.721130079443944e-15 eig [-4.60855738e-17  7.14429835e-01] [np.float64(0.22610833792916016), np.float64(0.5268065886036164), np.float64(0.18882117892431727), np.float64(-0.29240727430554997)]
+[?2004hroot@e65e3822b05e:/app# cat > /app/dev/driver.py <<'PY'
+[?2004l[?2004h> import sys,time
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from scipy.special import roots_legendre
+[?2004l[?2004h> from scatter import Scatter
+[?2004l[?2004h> from brackets import Brackets,laguerres,transport
+[?2004l[?2004h> 
+[?2004l[?2004h> species={'pH2':(1.,1.),'oH2':(1.,1/9),'HD':(1.5,-1/6),'oD2':(2.,1/6),'pD2':(2.,1/9)}
+[?2004l[?2004h> 
+[?2004l[?2004h> class Integrator:
+[?2004l[?2004h>  def __init__(self,a,L,mu,T,M,kind,tol=2e-7):
+[?2004l[?2004h>   self.s=Scatter(a,L,mu);self.T=T;self.M=M;self.kind=kind;self.tol=tol;self.calls=0
+[?2004l[?2004h>   self.rn,self.wn=roots_legendre(16)
+[?2004l[?2004h>  def evaluate(self,edges):
+[?2004l[?2004h>   edges=np.array(edges);left=edges[:,0];right=edges[:,1]
+[?2004l[?2004h>   e=((left+right)[:,None]/2+(right-left)[:,None]/2*self.rn).ravel()
+[?2004l[?2004h>   w=((right-left)[:,None]/2*self.wn).ravel()
+[?2004l[?2004h>   order=np.argsort(e);Q=np.empty((len(e),self.M+1))
+[?2004l[?2004h>   for chunk in np.array_split(order,max(1,int(np.ceil(len(e)/96)))):
+[?2004l[?2004h>    # limit energy disparity, and omit numerically irrelevant angular momenta
+[?2004l[?2004h>    q,A,B=self.s.cross(e[chunk]*self.T,self.M,self.kind)
+[?2004l[?2004h>    Q[chunk]=q;self.calls+=len(chunk)
+[?2004l[?2004h>   la=laguerres(self.M+1,1,e)/np.sqrt(np.arange(self.M+1)+1)[:,None]
+[?2004l[?2004h>   f=(w*e*np.exp(-e))[:,None,None]*Q[:,:,None]*la.T[:,None,:]
+[?2004l[?2004h>   f=f.reshape(len(edges),16,self.M+1,self.M+1).sum(axis=1)
+[?2004l[?2004h>   return f
+[?2004l[?2004h>  def run(self):
+[?2004l[?2004h>   bounds=[0,.001,.003,.01,.03,.1,.2,.4,.7,1,1.5,2,3,4,6,8,12,16,24,32,48,64,80,100]
+[?2004l[?2004h>   edges=list(zip(bounds[:-1],bounds[1:]));old=self.evaluate(edges);total=np.zeros_like(old[0]);errors=0
+[?2004l[?2004h>   for iteration in range(12):
+[?2004l[?2004h>    children=[pair for l,r in edges for pair in [(l,(l+r)/2),((l+r)/2,r)]]
+[?2004l[?2004h>    fine=self.evaluate(children).reshape(len(edges),2,self.M+1,self.M+1)
+[?2004l[?2004h>    err=np.max(abs(fine.sum(axis=1)-old),axis=(1,2))
+[?2004l[?2004h>    ok=err<self.tol
+[?2004l[?2004h>    total+=fine[ok].sum(axis=(0,1));errors+=err[ok].sum()
+[?2004l[?2004h>    print('quad',iteration,len(edges),self.calls,float(err.max()),'remain',sum(~ok),file=sys.stderr,flush=True)
+[?2004l[?2004h>    if np.all(ok):break
+[?2004l[?2004h>    edges=[pair for j,(l,r) in enumerate(edges) if not ok[j] for pair in [(l,(l+r)/2),((l+r)/2,r)]]
+[?2004l[?2004h>    old=fine[~ok].reshape(-1,self.M+1,self.M+1)
+[?2004l[?2004h>   else:total+=old.sum(axis=0)
+[?2004l[?2004h>   return total
+[?2004l[?2004h> 
+[?2004l[?2004h> def compute(s1,s2,a,L,x,T,Nmax=12):
+[?2004l[?2004h>  m1,k1=species[s1];m2,k2=species[s2];M=2*Nmax
+[?2004l[?2004h>  st=time.perf_counter();mom=[]
+[?2004l[?2004h>  for mu,kind in [(m1/2,k1),(m2/2,k2),(m1*m2/(m1+m2),0)]:
+[?2004l[?2004h>   it=Integrator(a,L,mu,T,M,kind);mom.append(it.run());print('integrated',mu,time.perf_counter()-st,file=sys.stderr,flush=True)
+[?2004l[?2004h>  vals=[]
+[?2004l[?2004h>  for N in range(3,Nmax+1):
+[?2004l[?2004h>   cc=[]
+[?2004l[?2004h>   for q in [1,2]:
+[?2004l[?2004h>    out=np.zeros((2*N,2*N))
+[?2004l[?2004h>    for ma,mb,xx,sl,mm,sp in [(m1,m1,x*x/2,slice(0,N),mom[0],True),(m2,m2,(1-x)**2/2,slice(N,2*N),mom[1],True),(m1,m2,x*(1-x),slice(0,2*N),mom[2],False)]:
+[?2004l[?2004h>     br=Brackets(ma,mb,N,q);sz=br.L+1
+[?2004l[?2004h>     mat=br.integrated(mm[:sz,:sz],sp)
+[?2004l[?2004h>     out[sl,sl]+=xx*mat
+[?2004l[?2004h>    cc.append(out)
+[?2004l[?2004h>   v=np.array(transport(m1,m2,x,T,*cc,N));vals.append(v)
+[?2004l[?2004h>   print('N',N,v,'elapsed',time.perf_counter()-st,file=sys.stderr,flush=True)
+[?2004l[?2004h>  return vals[-1],mom
+[?2004l[?2004h> 
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  s1,s2=sys.argv[1:3];a,L,x,T=map(float,sys.argv[3:7]);v,mom=compute(s1,s2,a,L,x,T,int(sys.argv[7]) if len(sys.argv)>7 else 12)
+[?2004l[?2004h>  np.savez('/app/dev/last.npz',mom=mom,val=v)
+[?2004l[?2004h>  print(v)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 /app/dev/driver.py pH2 oH2 0 1.5 0.5 0.3 10 > /app/dev/run.out 2> /app/dev/run.log &
+[?2004l[1] 522
+[?2004hroot@e65e3822b05e:/app# tail -20 /app/dev/run.log
+[?2004lquad 0 23 1104 9.651136821009487e-05 remain 8
+quad 1 16 1616 0.00024265253618782623 remain 15
+quad 2 30 2576 0.00010281227778374813 remain 12
+quad 3 24 3344 4.810600408372556e-05 remain 6
+quad 4 12 3728 1.269344250820481e-05 remain 3
+quad 5 6 3920 2.467193116473254e-13 remain 0
+integrated 0.5 21.82592510106042
+[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+[?2004l[?2004h> import sys;sys.path.insert(0,'/app/dev');from scatter import *
+[?2004l[?2004h> s=Scatter(0,.8,1)
+[?2004l[?2004h> for E,l in [(.1,0),(.1,4),(.5,7),(2,10),(10,20)]:
+[?2004l[?2004h>  r0=.4;z=np.array([0.,1.])
+[?2004l[?2004h>  def rhs(r,z):return [z[1],(l*(l+1)/r**2+s.c*(s.potential(r)-E))*z[0]]
+[?2004l[?2004h>  for rb in [.43,.47,.52,.58,.65,.72,.8,1,2,5,10,20,40]:
+[?2004l[?2004h>   sol=solve_ivp(rhs,(r0,rb),z,method='DOP853',rtol=2e-11,atol=1e-13);z=sol.y[:,-1];z/=max(abs(z));r0=rb
+[?2004l[?2004h>  k=np.sqrt(s.c*E);t=k*r0;j=t*spherical_jn(l,t);y=t*spherical_yn(l,t);dj=k*(spherical_jn(l,t)+t*spherical_jn(l,t,True));dy=k*(spherical_yn(l,t)+t*spherical_yn(l,t,True));d=np.arctan2(z[0]*dj-z[1]*j,z[0]*dy-z[1]*y)
+[?2004l[?2004h>  d2=s.phases([E])[0][0,l]
+[?2004l[?2004h>  print(E,l,d,d2,'difference',np.angle(np.exp(2j*(d2-d)))/2,flush=True)
+[?2004l[?2004h> PY
+[?2004l0.1 0 1.6804877023113955 1.6804877237616662 difference 2.1450270670797522e-08
+0.1 4 -0.45114659524011985 -0.45114657831209964 difference 1.6928020207807037e-08
+0.5 7 -2.820254521052459 -2.820254315310913 difference 2.0574154602215347e-07
+2 10 -0.8084985298141978 -0.8084980413852714 difference 4.884289264150965e-07
+10 20 0.044321748966891596 0.044322853239937975 difference 1.1042730463789452e-06
+[?2004hroot@e65e3822b05e:/app# tail -30 /app/dev/run.log; cat /app/dev/run.out
+[?2004lquad 0 23 1104 9.651136821009487e-05 remain 8
+quad 1 16 1616 0.00024265253618782623 remain 15
+quad 2 30 2576 0.00010281227778374813 remain 12
+quad 3 24 3344 4.810600408372556e-05 remain 6
+quad 4 12 3728 1.269344250820481e-05 remain 3
+quad 5 6 3920 2.467193116473254e-13 remain 0
+integrated 0.5 21.82592510106042
+quad 0 23 1104 5.626954103821191e-05 remain 8
+quad 1 16 1616 0.00018601152288333367 remain 16
+[?2004hroot@e65e3822b05e:/app# tail -40 /app/dev/run.log; cat /app/dev/run.out
+[?2004lquad 0 23 1104 9.651136821009487e-05 remain 8
+quad 1 16 1616 0.00024265253618782623 remain 15
+quad 2 30 2576 0.00010281227778374813 remain 12
+quad 3 24 3344 4.810600408372556e-05 remain 6
+quad 4 12 3728 1.269344250820481e-05 remain 3
+quad 5 6 3920 2.467193116473254e-13 remain 0
+integrated 0.5 21.82592510106042
+quad 0 23 1104 5.626954103821191e-05 remain 8
+quad 1 16 1616 0.00018601152288333367 remain 16
+quad 2 32 2640 8.798638180840257e-05 remain 23
+quad 3 46 4112 2.2153103194755275e-05 remain 25
+quad 4 50 5712 1.2742517030456257e-05 remain 21
+[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+[?2004l[?2004h> import sys;sys.path.insert(0,'/app/dev');from scatter import *
+[?2004l[?2004h> s=Scatter(0,1.5,.5)
+[?2004l[?2004h> for extra in [10,20,40]:
+[?2004l[?2004h>  d,A,B=s.phases([.1,.5,2],extra=extra)
+[?2004l[?2004h>  k=np.sqrt(s.c*np.array([.1,.5,2]));l=np.arange(d.shape[1]);coef=(2*l+1)*np.exp(1j*d)*np.sin(d)/k[:,None]
+[?2004l[?2004h>  t,w=roots_legendre(len(l)+12);from numpy.polynomial.legendre import legvander
+[?2004l[?2004h>  P=legvander(t,len(l)-1).T
+[?2004l[?2004h>  print(extra,2*np.pi*(abs(coef@P)**2)@((1-t)*w), 'last phases',d[:,-5:],flush=True)
+[?2004l[?2004h> PY
+[?2004l10 [38.10971005 10.73726778  3.9951383 ] last phases [[4.01845833e-06 3.34452787e-06 2.80518796e-06 2.36832817e-06
+  2.00067073e-06]
+ [1.01806686e-04 8.51136862e-05 7.15990284e-05 6.05803857e-05
+  5.15349845e-05]
+ [1.62970323e-03 1.36247129e-03 1.14616310e-03 9.69803015e-04
+  8.25037085e-04]]
+20 [38.10971005 10.73726768  3.99513172] last phases [[8.00777828e-07 6.89703059e-07 5.91256281e-07 5.14634638e-07
+  4.53261375e-07]
+ [2.15061529e-05 1.88488126e-05 1.65741254e-05 1.46219304e-05
+  1.29384101e-05]
+ [3.44509645e-04 3.01978978e-04 2.65595526e-04 2.34349454e-04
+  2.07414363e-04]]
+40 [38.10971005 10.73726767  3.99513113] last phases [[4.87137960e-10 1.74791998e-10 5.89348877e-11 1.87279260e-11
+  5.62383001e-12]
+ [2.51033128e-06 2.29981607e-06 2.11072248e-06 1.94056460e-06
+  1.78476494e-06]
+ [4.05698769e-05 3.72151846e-05 3.41921806e-05 3.14553490e-05
+  2.89796513e-05]]
+[?2004hroot@e65e3822b05e:/app# tail -20 /app/dev/run.log; ps -o pid,etime,cmd -p 522
+[?2004lquad 0 23 1104 9.651136821009487e-05 remain 8
+quad 1 16 1616 0.00024265253618782623 remain 15
+quad 2 30 2576 0.00010281227778374813 remain 12
+quad 3 24 3344 4.810600408372556e-05 remain 6
+quad 4 12 3728 1.269344250820481e-05 remain 3
+quad 5 6 3920 2.467193116473254e-13 remain 0
+integrated 0.5 21.82592510106042
+quad 0 23 1104 5.626954103821191e-05 remain 8
+quad 1 16 1616 0.00018601152288333367 remain 16
+quad 2 32 2640 8.798638180840257e-05 remain 23
+quad 3 46 4112 2.2153103194755275e-05 remain 25
+quad 4 50 5712 1.2742517030456257e-05 remain 21
+quad 5 42 7056 1.2177582224992545e-05 remain 17
+quad 6 34 8144 6.103046350638963e-06 remain 14
+quad 7 28 9040 3.040840102067066e-06 remain 10
+quad 8 20 9680 1.5213120222491716e-06 remain 8
+quad 9 16 10192 6.425248748852253e-07 remain 1
+quad 10 2 10256 1.9225072922512965e-15 remain 0
+integrated 0.5 76.44487607385963
+bash: ps: command not found
+[?2004hroot@e65e3822b05e:/app# cp /app/dev/scatter.py /app/dev/scatter_notail.py
+[?2004l[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/dev/scatter.py';s=open(p).read().replace('from scipy.special import spherical_jn,spherical_yn,roots_legendre','from scipy.special import spherical_jn,spherical_yn,roots_legendre,gammaln')
+[?2004l[?2004h> s=s.replace(' def cross(self,E,M,kind=0,h=.003,R=40):',''' def born(self,E,l):
+[?2004l[?2004h>   k=np.sqrt(self.c*np.atleast_1d(E));l=np.asarray(l)
+[?2004l[?2004h>   out=np.zeros((len(k),len(l)))
+[?2004l[?2004h>   for base,sign in [(6,1),(12,-1)]:
+[?2004l[?2004h>    for j in range(16 if self.a else 1):
+[?2004l[?2004h>     power=base+j
+[?2004l[?2004h>     integ=np.exp(np.log(np.pi/2)+gammaln(power-1)-(power-1)*np.log(2)-2*gammaln(power/2)+gammaln(l+(3-power)/2)-gammaln(l+(1+power)/2))
+[?2004l[?2004h>     cf=np.exp(gammaln(base+j)-gammaln(base)-gammaln(j+1))*self.a**j
+[?2004l[?2004h>     out+=sign*4*self.c*self.b**base*cf*k[:,None]**(power-2)*integ[None,:]
+[?2004l[?2004h>   return out
+[?2004l[?2004h>  def cross(self,E,M,kind=0,h=.003,R=40):''')
+[?2004l[?2004h> s=s.replace('  d,A,B=self.phases(E,h,R)','  d,A,B=self.phases(E,h,R,extra=20)\n  cut=d.shape[1]\n  tail=self.born(E,np.arange(cut,max(2*cut,100)))\n  d=np.concatenate([d,tail],axis=1)')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+[?2004l[?2004h> import sys;sys.path.insert(0,'/app/dev');from scatter import *
+[?2004l[?2004h> for a in [0,.5]:
+[?2004l[?2004h>  s=Scatter(a,.8,1)
+[?2004l[?2004h>  E=np.array([.5,2,10]);d,A,B=s.phases(E,extra=40);l=np.arange(d.shape[1]-5,d.shape[1]);print(a,'exact',d[:,-5:],'born',s.born(E,l),flush=True)
+[?2004l[?2004h> for sz in [1,2,3]:
+[?2004l[?2004h>  s=Scatter(0,1.5,.5);q,*_=s.cross(np.array([.1,.5,2])[:sz],20,1/9)
+[?2004l[?2004h>  print(sz,q[:,:5],flush=True)
+[?2004l[?2004h> PY
+[?2004l0 exact [[5.29099591e-06 5.12491885e-06 4.96637581e-06 4.81399337e-06
+  4.66530718e-06]
+ [8.57110374e-05 8.30729730e-05 8.05318305e-05 7.80831374e-05
+  7.57235087e-05]
+ [2.14412651e-03 2.07818358e-03 2.01464288e-03 1.95344020e-03
+  1.89443398e-03]] born [[5.35836563e-06 5.19349285e-06 5.03467044e-06 4.88164094e-06
+  4.73415934e-06]
+ [8.57337995e-05 8.30958383e-05 8.05546828e-05 7.81062138e-05
+  7.57465109e-05]
+ [2.14318555e-03 2.07724712e-03 2.01372806e-03 1.95252547e-03
+  1.89354137e-03]]
+0.5 exact [[9.48071625e-08 9.17638668e-08 8.88511777e-08 8.60460802e-08
+  8.33364111e-08]
+ [1.77046340e-06 1.71311926e-06 1.65829976e-06 1.60497012e-06
+  1.55443918e-06]
+ [6.39396962e-05 6.17470068e-05 5.96272626e-05 5.76155478e-05
+  5.56636466e-05]] born [[9.58701467e-08 9.28408905e-08 8.99257726e-08 8.71198070e-08
+  8.44182550e-08]
+ [1.76260399e-06 1.70537537e-06 1.65036205e-06 1.59746460e-06
+  1.54658871e-06]
+ [6.31455945e-05 6.09465448e-05 5.88387441e-05 5.68178060e-05
+  5.48795834e-05]]
+1 [[ 0.         50.94406075 34.52208503 50.94406075 42.39910178]]
+2 [[ 0.         50.94406075 34.52208503 50.94406075 42.39910178]
+ [ 0.         35.79688149 15.37015784 35.79688149 20.7583086 ]]
+3 [[ 0.         50.94406075 34.52208503 50.94406075 42.39910178]
+ [ 0.         35.79688149 15.37015784 35.79688149 20.7583086 ]
+ [ 0.         15.969704    5.3109311  15.969704    7.39907549]]
+[?2004hroot@e65e3822b05e:/app# tail -25 /app/dev/run.log; cat /app/dev/run.out
+[?2004lquad 8 20 9680 1.5213120222491716e-06 remain 8
+quad 9 16 10192 6.425248748852253e-07 remain 1
+quad 10 2 10256 1.9225072922512965e-15 remain 0
+integrated 0.5 76.44487607385963
+quad 0 23 1104 7.822945939039982e-05 remain 8
+quad 1 16 1616 0.0002304180231154085 remain 16
+quad 2 32 2640 0.0001135925054824849 remain 23
+quad 3 46 4112 2.086463158623708e-05 remain 24
+quad 4 48 5648 1.4619364903267762e-05 remain 23
+quad 5 46 7120 1.4619358734258014e-05 remain 20
+quad 6 40 8400 7.309920471168518e-06 remain 16
+quad 7 32 9424 3.654985703462066e-06 remain 15
+quad 8 30 10384 9.136882172799954e-07 remain 5
+quad 9 10 10704 2.30077085843286e-07 remain 1
+quad 10 2 10768 2.3007707944996264e-07 remain 1
+quad 11 2 10832 2.0083761043121484e-15 remain 0
+integrated 0.5 129.10210039187223
+N 3 [ 3.31516387e-02  1.24542422e-01  4.14341968e-02 -9.30216477e-05] elapsed 129.12362027494237
+N 4 [ 3.31516484e-02  1.24564543e-01  4.14341973e-02 -9.36515944e-05] elapsed 129.15189667604864
+N 5 [ 3.31516655e-02  1.24564598e-01  4.14342281e-02 -9.42427003e-05] elapsed 129.18104257108644
+N 6 [ 3.31516677e-02  1.24564808e-01  4.14342331e-02 -9.43557546e-05] elapsed 129.21680321963504
+N 7 [ 3.31516678e-02  1.24564847e-01  4.14342334e-02 -9.43557196e-05] elapsed 129.2789286347106
+N 8 [ 3.31516678e-02  1.24564850e-01  4.14342334e-02 -9.43529559e-05] elapsed 129.3347010910511
+N 9 [ 3.31516678e-02  1.24564850e-01  4.14342334e-02 -9.43528900e-05] elapsed 129.40452092606574
+N 10 [ 3.31516678e-02  1.24564850e-01  4.14342334e-02 -9.43529653e-05] elapsed 129.4863577960059
+[1]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/dev/driver.py pH2 oH2 0 1.5 0.5 0.3 10 > /app/dev/run.out 2> /app/dev/run.log
+[ 3.31516678e-02  1.24564850e-01  4.14342334e-02 -9.43529653e-05]
+[?2004hroot@e65e3822b05e:/app# cp /app/dev/last.npz /app/dev/equal_old.npz
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 /app/dev/driver.py pH2 pD2 0 0.8 0.05 0.2 12 > /app/dev/extreme.out 2> /app/dev/extreme.log &
+[?2004l[1] 682
+[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 /app/dev/driver.py HD oD2 0.5 2.8 0.95 0.6 12 > /app/dev/core.out 2> /app/dev/core.log &
+[?2004l[2] 683
+[?2004hroot@e65e3822b05e:/app# tail -12 /app/dev/extreme.log; tail -12 /app/dev/core.log
+[?2004lquad 0 23 1104 0.00872983865988327 remain 2
+quad 1 4 1232 0.003911222187304483 remain 2
+quad 2 4 1360 0.00013154179033958088 remain 1
+quad 3 2 1424 8.477613432837303e-06 remain 1
+quad 4 2 1488 1.4785511346510072e-08 remain 0
+integrated 0.5 24.262212365865707
+[2]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/dev/driver.py HD oD2 0.5 2.8 0.95 0.6 12 > /app/dev/core.out 2> /app/dev/core.log
+quad 0 23 1104 8.719092114972682e-11 remain 0
+integrated 0.8571428571428571 27.98501057177782
+N 3 [ 0.14902596  0.36799402  0.12644566 -0.10381836] elapsed 28.00528622791171
+N 4 [ 0.14903462  0.36839244  0.12645245 -0.10428944] elapsed 28.028320784680545
+N 5 [ 0.1490361   0.36844816  0.12645341 -0.10437499] elapsed 28.05770959611982
+N 6 [ 0.14903644  0.36845951  0.12645358 -0.10439541] elapsed 28.093572509940714
+N 7 [ 0.14903652  0.36846245  0.12645361 -0.1044012 ] elapsed 28.14169334806502
+N 8 [ 0.14903655  0.36846331  0.12645362 -0.10440302] elapsed 28.19885993283242
+N 9 [ 0.14903656  0.36846359  0.12645362 -0.10440363] elapsed 28.286882407031953
+N 10 [ 0.14903656  0.36846369  0.12645362 -0.10440384] elapsed 28.376974823884666
+N 11 [ 0.14903656  0.36846372  0.12645362 -0.10440392] elapsed 28.483917510136962
+N 12 [ 0.14903656  0.36846373  0.12645362 -0.10440395] elapsed 28.61103712907061
+[?2004hroot@e65e3822b05e:/app# cat > /app/dev/resonances.py <<'PY'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from scipy.optimize import minimize_scalar
+[?2004l[?2004h> from scatter import Scatter
+[?2004l[?2004h> from time import perf_counter
+[?2004l[?2004h> 
+[?2004l[?2004h> def scan(s,T):
+[?2004l[?2004h>  # Only waves with a centrifugal barrier can support positive-energy shape resonances.
+[?2004l[?2004h>  r=np.linspace(s.a+.9*s.b,12,2000)
+[?2004l[?2004h>  barriers=[]
+[?2004l[?2004h>  for l in range(1,30):
+[?2004l[?2004h>   U=s.potential(r)+l*(l+1)/(s.c*r*r)
+[?2004l[?2004h>   minima=np.where((U[1:-1]<U[:-2])&(U[1:-1]<U[2:]))[0]+1
+[?2004l[?2004h>   maxima=np.where((U[1:-1]>U[:-2])&(U[1:-1]>U[2:]))[0]+1
+[?2004l[?2004h>   if not len(minima) or not len(maxima):break
+[?2004l[?2004h>   lo=minima[0];hi=maxima[maxima>lo]
+[?2004l[?2004h>   if not len(hi):break
+[?2004l[?2004h>   barriers.append((l,U[lo],U[hi[0]]))
+[?2004l[?2004h>  if not barriers:return []
+[?2004l[?2004h>  emax=max(b[2] for b in barriers)
+[?2004l[?2004h>  grid=np.unique(np.r_[np.geomspace(1e-7,min(.01,emax),60),np.linspace(.01,emax,200)])
+[?2004l[?2004h>  grid=grid[(grid>0)&(grid<=emax)]
+[?2004l[?2004h>  As=[];Bs=[]
+[?2004l[?2004h>  for chunk in np.array_split(grid,int(np.ceil(len(grid)/64))):
+[?2004l[?2004h>   d,A,B=s.phases(chunk)
+[?2004l[?2004h>   As.append(A[:,:len(barriers)+1]);Bs.append(B[:,:len(barriers)+1])
+[?2004l[?2004h>  A=np.concatenate(As);B=np.concatenate(Bs)
+[?2004l[?2004h>  roots=[]
+[?2004l[?2004h>  for l,emin,emax in barriers:
+[?2004l[?2004h>   ids=np.where((A[:-1,l]*A[1:,l]<0)&(grid[:-1]<emax)&(grid[1:]>max(0,emin)))[0]
+[?2004l[?2004h>   for j in ids:
+[?2004l[?2004h>    left,right=grid[j:j+2];al=A[j,l];bl=B[j,l];ar=A[j+1,l];br=B[j+1,l]
+[?2004l[?2004h>    for iteration in range(35):
+[?2004l[?2004h>     mid=(left+right)/2
+[?2004l[?2004h>     d,am,bm=s.phases([mid]);am=am[0,l];bm=bm[0,l]
+[?2004l[?2004h>     if al*am<0:right=mid;ar=am;br=bm
+[?2004l[?2004h>     else:left=mid;al=am;bl=bm
+[?2004l[?2004h>     width=abs((right-left)*(bl+br)/2/(ar-al))
+[?2004l[?2004h>     if right-left<max(1e-12,width*.03):break
+[?2004l[?2004h>    root=(left+right)/2
+[?2004l[?2004h>    if width<.1*T:
+[?2004l[?2004h>     roots.append((root,width,l))
+[?2004l[?2004h>  return roots
+[?2004l[?2004h> 
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  st=perf_counter();s=Scatter(0,.8,1);print(scan(s,.2));print('time',perf_counter()-st)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 /app/dev/resonances.py > /app/dev/res.out 2> /app/dev/res.log &
+[?2004l[2] 705
+[?2004hroot@e65e3822b05e:/app# tail -30 /app/dev/extreme.log; cat /app/dev/extreme.out; cat /app/dev/res.out; tail -10 /app/dev/res.log
+[?2004lquad 0 23 1104 0.00872983865988327 remain 2
+quad 1 4 1232 0.003911222187304483 remain 2
+quad 2 4 1360 0.00013154179033958088 remain 1
+quad 3 2 1424 8.477613432837303e-06 remain 1
+quad 4 2 1488 1.4785511346510072e-08 remain 0
+integrated 0.5 24.262212365865707
+quad 0 23 1104 0.012017785579449658 remain 8
+quad 1 16 1616 0.02838011966544407 remain 6
+quad 2 12 2000 0.015513742317581014 remain 3
+quad 3 6 2192 0.001906479047298515 remain 3
+quad 4 6 2384 0.0012767938901671189 remain 2
+quad 5 4 2512 0.00033315024922404846 remain 2
+quad 6 4 2640 0.00026992149189410813 remain 2
+quad 7 4 2768 0.00034159143533203304 remain 1
+quad 8 2 2832 1.5516409148978727e-05 remain 1
+quad 9 2 2896 1.5226296505620532e-06 remain 1
+quad 10 2 2960 9.585383875521103e-11 remain 0
+integrated 1.0 86.28230672609061
+[2]+  Exit 1                  OPENBLAS_NUM_THREADS=1 python3 /app/dev/resonances.py > /app/dev/res.out 2> /app/dev/res.log
+Traceback (most recent call last):
+  File "/app/dev/resonances.py", line 45, in <module>
+    st=perf_counter();s=Scatter(0,.8,1);print(scan(s,.2));print('time',perf_counter()-st)
+                                              ^^^^^^^^^^
+  File "/app/dev/resonances.py", line 26, in scan
+    A=np.concatenate(As);B=np.concatenate(Bs)
+      ^^^^^^^^^^^^^^^^^^
+ValueError: all the input array dimensions except for the concatenation axis must match exactly, but along dimension 1, the array at index 0 has size 13 and the array at index 1 has size 17
+[?2004hroot@e65e3822b05e:/app# cp /app/dev/last.npz /app/dev/core12.npz
+[?2004l[?2004hroot@e65e3822b05e:/app# sed -i 's/s.phases(chunk)/s.phases(chunk,extra=35)/' /app/dev/resonances.py
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 /app/dev/resonances.py > /app/dev/res.out 2> /app/dev/res.log &
+[?2004l[2] 748
+[?2004hroot@e65e3822b05e:/app# tail -20 /app/dev/extreme.log
+[?2004lquad 0 23 1104 0.00872983865988327 remain 2
+quad 1 4 1232 0.003911222187304483 remain 2
+quad 2 4 1360 0.00013154179033958088 remain 1
+quad 3 2 1424 8.477613432837303e-06 remain 1
+quad 4 2 1488 1.4785511346510072e-08 remain 0
+integrated 0.5 24.262212365865707
+quad 0 23 1104 0.012017785579449658 remain 8
+quad 1 16 1616 0.02838011966544407 remain 6
+quad 2 12 2000 0.015513742317581014 remain 3
+quad 3 6 2192 0.001906479047298515 remain 3
+quad 4 6 2384 0.0012767938901671189 remain 2
+quad 5 4 2512 0.00033315024922404846 remain 2
+quad 6 4 2640 0.00026992149189410813 remain 2
+quad 7 4 2768 0.00034159143533203304 remain 1
+quad 8 2 2832 1.5516409148978727e-05 remain 1
+quad 9 2 2896 1.5226296505620532e-06 remain 1
+quad 10 2 2960 9.585383875521103e-11 remain 0
+integrated 1.0 86.28230672609061
+[?2004hroot@e65e3822b05e:/app# tail -25 /app/dev/extreme.log; cat /app/dev/extreme.out; cat /app/dev/res.out; tail -10 /app/dev/res.log
+[?2004lquad 10 2 2960 9.585383875521103e-11 remain 0
+integrated 1.0 86.28230672609061
+quad 0 23 1104 0.05861948117355631 remain 5
+quad 1 10 1424 0.002370752775892715 remain 2
+quad 2 4 1552 0.000210740258339559 remain 2
+quad 3 4 1680 5.2746779380830056e-05 remain 2
+quad 4 4 1808 4.225098375806868e-05 remain 1
+quad 5 2 1872 3.9423998338783406e-05 remain 1
+quad 6 2 1936 4.875720973534364e-05 remain 1
+quad 7 2 2000 6.489064620682564e-05 remain 1
+quad 8 2 2064 3.0933936133245923e-05 remain 1
+quad 9 2 2128 3.538002319102094e-05 remain 1
+quad 10 2 2192 0.00010832316403351985 remain 1
+quad 11 2 2256 4.96967833554054e-05 remain 1
+integrated 0.6666666666666666 126.53076516278088
+N 3 [ 0.03357626  0.064648    0.02616969 -0.10468535] elapsed 126.55608585104346
+N 4 [ 0.03357632  0.06467865  0.0261757  -0.10582653] elapsed 126.57914299704134
+N 5 [ 0.03357648  0.06467899  0.0261757  -0.10583304] elapsed 126.62196176405996
+N 6 [ 0.03357655  0.06467997  0.02617619 -0.10586351] elapsed 126.67336680181324
+N 7 [ 0.03357657  0.06468045  0.02617678 -0.10591103] elapsed 126.72547645308077
+N 8 [ 0.03357657  0.06468058  0.02617715 -0.10593947] elapsed 126.78134109266102
+N 9 [ 0.03357657  0.06468061  0.02617732 -0.10595123] elapsed 126.86724099610001
+N 10 [ 0.03357657  0.06468062  0.02617737 -0.10595491] elapsed 126.96276588598266
+N 11 [ 0.03357657  0.06468062  0.02617738 -0.10595572] elapsed 127.0712956758216
+N 12 [ 0.03357657  0.06468062  0.02617739 -0.10595581] elapsed 127.20909204287454
+[1]-  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/dev/driver.py pH2 pD2 0 0.8 0.05 0.2 12 > /app/dev/extreme.out 2> /app/dev/extreme.log
+[2]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/dev/resonances.py > /app/dev/res.out 2> /app/dev/res.log
+[ 0.03357657  0.06468062  0.02617739 -0.10595581]
+[(np.float64(0.015239496103924534), np.float64(2.0751535643795532e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340553398537), 7), (np.float64(0.005187982589453792), np.float64(3.634410082246423e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348830175034832e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148005339984), 12), (np.float64(0.33435890564194926), np.float64(0.012836898079018645), 13)]
+time 30.212483671028167
+[?2004hroot@e65e3822b05e:/app# cp /app/dev/last.npz /app/dev/extreme12_old.npz
+[?2004l[?2004hroot@e65e3822b05e:/app# cp /app/dev/driver.py /app/dev/driver_old.py
+[?2004l[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/dev/driver.py';s=open(p).read().replace('from scatter import Scatter','from scatter import Scatter\nfrom resonances import scan');s=s.replace('tol=2e-7','tol=3e-8');s=s.replace('  edges=list(zip(bounds[:-1],bounds[1:]));','''  resonances=scan(self.s,self.T)
+[?2004l[?2004h>   print('resonances',resonances,file=sys.stderr,flush=True)
+[?2004l[?2004h>   for en,width,l in resonances:
+[?2004l[?2004h>    if width>1e-10:
+[?2004l[?2004h>     bounds.extend([(en+j*width)/self.T for j in [-128,-32,-8,-2,0,2,8,32,128] if 0<(en+j*width)/self.T<100])
+[?2004l[?2004h>   bounds=sorted(set(bounds))
+[?2004l[?2004h>   edges=list(zip(bounds[:-1],bounds[1:]));''').replace('range(12):','range(22):')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> p='/app/dev/scatter.py';s=open(p).read().replace('.025/k.max(),.005*self.b','.018/k.max(),.004*self.b');open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 /app/dev/driver.py pH2 pD2 0 0.8 0.05 0.2 14 > /app/dev/refined.out 2> /app/dev/refined.log &
+[?2004l[1] 792
+[?2004hroot@e65e3822b05e:/app# tail -20 /app/dev/refined.log
+[?2004lresonances [(np.float64(0.0007343878784765391), np.float64(1.7280895064018207e-05), 2), (np.float64(0.09629936917846227), np.float64(0.0004029647735511871), 7), (np.float64(0.22557854832337138), np.float64(0.010989789867184623), 8)]
+quad 0 47 2256 2.264744403124297e-07 remain 3
+quad 1 6 2448 1.5269900327519181e-07 remain 5
+[?2004hroot@e65e3822b05e:/app# cat > /app/dev/checkbr.py <<'PY'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from brackets import *
+[?2004l[?2004h> from scipy.special import roots_hermite
+[?2004l[?2004h> 
+[?2004l[?2004h> def check(q):
+[?2004l[?2004h>  N=3;m1=1;m2=2;e=.7;t=.32
+[?2004l[?2004h>  br=Brackets(m1,m2,N,q)
+[?2004l[?2004h>  Q=np.array([1-eval_legendre(l,t) for l in range(br.L+1)])
+[?2004l[?2004h>  exact=2*br.matrix(e,Q,False)
+[?2004l[?2004h>  # Explicit Gaussian center-of-mass and angular average by deterministic quadrature.
+[?2004l[?2004h>  z,w=roots_hermite(7);w=w/np.sqrt(np.pi)
+[?2004l[?2004h>  xx=np.stack(np.meshgrid(z,z,z,indexing='ij'),axis=-1).reshape(-1,3)
+[?2004l[?2004h>  ww=np.einsum('i,j,k->ijk',w,w,w).ravel()
+[?2004l[?2004h>  zz,wz=roots_legendre(10);az=np.arange(20)*2*np.pi/20
+[?2004l[?2004h>  gs=np.array([[np.sqrt(1-v*v)*np.cos(a),np.sqrt(1-v*v)*np.sin(a),v] for v in zz for a in az]);wg=np.repeat(wz/2/len(az),len(az))
+[?2004l[?2004h>  acc=np.zeros_like(exact)
+[?2004l[?2004h>  for g,weight in zip(gs,wg):
+[?2004l[?2004h>   v=np.cross(g,[0,0,1]);v/=np.linalg.norm(v);u=np.cross(g,v)
+[?2004l[?2004h>   for a in np.arange(20)*2*np.pi/20:
+[?2004l[?2004h>    gp=t*g+np.sqrt(1-t*t)*(np.cos(a)*v+np.sin(a)*u)
+[?2004l[?2004h>    vv=[]
+[?2004l[?2004h>    for ma,mb,sign in [(m1,m2,1),(m2,m1,-1)]:
+[?2004l[?2004h>     p=np.sqrt(ma/(ma+mb))*xx+sign*np.sqrt(mb/(ma+mb)*e)*g
+[?2004l[?2004h>     r=np.sqrt(ma/(ma+mb))*xx+sign*np.sqrt(mb/(ma+mb)*e)*gp
+[?2004l[?2004h>     def fun(p):
+[?2004l[?2004h>      c2=(p*p).sum(axis=1);la=laguerres(N,q+.5,c2)/br.norm[:,None]
+[?2004l[?2004h>      f=p[:,2] if q==1 else p[:,0]*p[:,1]
+[?2004l[?2004h>      return la.T*f[:,None]
+[?2004l[?2004h>     vv.append(fun(p)-fun(r))
+[?2004l[?2004h>    v=np.concatenate(vv,axis=1)
+[?2004l[?2004h>    acc+=weight/20*np.einsum('wn,wm,w->nm',v,v,ww)
+[?2004l[?2004h>  print(q,np.max(abs(exact-acc)),np.max(abs(exact)),exact[:2,:2],acc[:2,:2])
+[?2004l[?2004h> from scipy.special import eval_legendre
+[?2004l[?2004h> for q in [1,2]:check(q)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 /app/dev/checkbr.py > /app/dev/checkbr.out 2> /app/dev/checkbr.log &
+[?2004l[2] 812
+[?2004hroot@e65e3822b05e:/app# cat /app/dev/checkbr.out; tail -10 /app/dev/checkbr.log; tail -25 /app/dev/refined.log
+[?2004l[2]+  Exit 1                  OPENBLAS_NUM_THREADS=1 python3 /app/dev/checkbr.py > /app/dev/checkbr.out 2> /app/dev/checkbr.log
+Traceback (most recent call last):
+  File "/app/dev/checkbr.py", line 34, in <module>
+    for q in [1,2]:check(q)
+                   ^^^^^^^^
+  File "/app/dev/checkbr.py", line 20, in check
+    gp=t*g+np.sqrt(1-t*t)*(np.cos(a)*v+np.sin(a)*u)
+                           ~~~~~~~~~~~^~~~~~~~~~~~
+ValueError: operands could not be broadcast together with shapes (343,6) (3,) 
+resonances [(np.float64(0.0007343878784765391), np.float64(1.7280895064018207e-05), 2), (np.float64(0.09629936917846227), np.float64(0.0004029647735511871), 7), (np.float64(0.22557854832337138), np.float64(0.010989789867184623), 8)]
+quad 0 47 2256 2.264744403124297e-07 remain 3
+quad 1 6 2448 1.5269900327519181e-07 remain 5
+quad 2 10 2768 2.5935655678654967e-08 remain 0
+integrated 0.5 49.288165889214724
+[?2004hroot@e65e3822b05e:/app# sed -i 's/   v=np.concatenate(vv,axis=1)/   dif=np.concatenate(vv,axis=1)/; s/,v,v,ww)/,dif,dif,ww)/' /app/dev/checkbr.py
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 /app/dev/checkbr.py > /app/dev/checkbr.out 2> /app/dev/checkbr.log &
+[?2004l[2] 852
+[?2004hroot@e65e3822b05e:/app# tail -25 /app/dev/refined.log
+[?2004lresonances [(np.float64(0.0007343878784765391), np.float64(1.7280895064018207e-05), 2), (np.float64(0.09629936917846227), np.float64(0.0004029647735511871), 7), (np.float64(0.22557854832337138), np.float64(0.010989789867184623), 8)]
+quad 0 47 2256 2.264744403124297e-07 remain 3
+quad 1 6 2448 1.5269900327519181e-07 remain 5
+quad 2 10 2768 2.5935655678654967e-08 remain 0
+integrated 0.5 49.288165889214724
+resonances [(np.float64(0.015239496103924534), np.float64(2.0751535643795532e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340553398537), 7), (np.float64(0.005187982589453792), np.float64(3.634410082246423e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348830175034832e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148005339984), 12), (np.float64(0.33435890564194926), np.float64(0.012836898214513793), 13)]
+[?2004hroot@e65e3822b05e:/app# cat /app/dev/checkbr.out; tail -5 /app/dev/checkbr.log; tail -15 /app/dev/refined.log
+[?2004l1 3.6637359812630166e-15 0.25833314874293545 [[0.21155556 0.16055938]
+ [0.16055938 0.22712604]] [[0.21155556 0.16055938]
+ [0.16055938 0.22712604]]
+2 7.91033905045424e-16 0.13879266225707157 [[0.10961399 0.10233396]
+ [0.10233396 0.12955153]] [[0.10961399 0.10233396]
+ [0.10233396 0.12955153]]
+[2]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/dev/checkbr.py > /app/dev/checkbr.out 2> /app/dev/checkbr.log
+resonances [(np.float64(0.0007343878784765391), np.float64(1.7280895064018207e-05), 2), (np.float64(0.09629936917846227), np.float64(0.0004029647735511871), 7), (np.float64(0.22557854832337138), np.float64(0.010989789867184623), 8)]
+quad 0 47 2256 2.264744403124297e-07 remain 3
+quad 1 6 2448 1.5269900327519181e-07 remain 5
+quad 2 10 2768 2.5935655678654967e-08 remain 0
+integrated 0.5 49.288165889214724
+resonances [(np.float64(0.015239496103924534), np.float64(2.0751535643795532e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340553398537), 7), (np.float64(0.005187982589453792), np.float64(3.634410082246423e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348830175034832e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148005339984), 12), (np.float64(0.33435890564194926), np.float64(0.012836898214513793), 13)]
+[?2004hroot@e65e3822b05e:/app# cp /app/dev/driver.py /app/dev/driver_single.py
+[?2004l[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/dev/scatter.py';s=open(p).read();a=s.index('  if kind==0:ds=');b=s.index('  return Q,A,B',a)
+[?2004l[?2004h> s=s[:a]+'''  kinds=np.atleast_1d(kind)
+[?2004l[?2004h>   dd=abs(coef@P[:len(l)])**2 if 0 in kinds else None
+[?2004l[?2004h>   ee=abs(coef[:,::2]@P[:len(l):2])**2
+[?2004l[?2004h>   oo=abs(coef[:,1::2]@P[1:len(l):2])**2
+[?2004l[?2004h>   angular=((1-P[:M+1])*wt).T
+[?2004l[?2004h>   result=[]
+[?2004l[?2004h>   for kk in kinds:
+[?2004l[?2004h>    ds=dd if kk==0 else (1+kk)*ee+(1-kk)*oo
+[?2004l[?2004h>    result.append(2*np.pi*ds@angular)
+[?2004l[?2004h>   Q=np.stack(result,axis=1)
+[?2004l[?2004h>   if np.ndim(kind)==0:Q=Q[:,0]
+[?2004l[?2004h> '''+s[b:];open(p,'w').write(s)
+[?2004l[?2004h> p='/app/dev/driver.py';s=open(p).read().replace('self.kind=kind;','self.kind=np.atleast_1d(kind);');s=s.replace('Q=np.empty((len(e),self.M+1))','Q=np.empty((len(e),len(self.kind),self.M+1))').replace('(w*e*np.exp(-e))[:,None,None]*Q[:,:,None]*la.T[:,None,:]','(w*e*np.exp(-e))[:,None,None,None]*Q[:,:,:,None]*la.T[:,None,None,:]').replace('f.reshape(len(edges),16,self.M+1,self.M+1)','f.reshape(len(edges),16,len(self.kind),self.M+1,self.M+1)').replace('reshape(len(edges),2,self.M+1,self.M+1)','reshape(len(edges),2,len(self.kind),self.M+1,self.M+1)').replace('axis=(1,2))','axis=(1,2,3))').replace('reshape(-1,self.M+1,self.M+1)','reshape(-1,len(self.kind),self.M+1,self.M+1)')
+[?2004l[?2004h> a=s.index(' st=time.perf_counter();mom=[]');b=s.index(' vals=[]',a)
+[?2004l[?2004h> s=s[:a]+''' st=time.perf_counter();mom=[None]*3
+[?2004l[?2004h>  groups={}
+[?2004l[?2004h>  for j,(mu,kind) in enumerate([(m1/2,k1),(m2/2,k2),(m1*m2/(m1+m2),0)]):
+[?2004l[?2004h>   groups.setdefault(mu,[]).append((j,kind))
+[?2004l[?2004h>  for mu,items in groups.items():
+[?2004l[?2004h>   it=Integrator(a,L,mu,T,M,[kind for j,kind in items]);allmom=it.run()
+[?2004l[?2004h>   for (j,kind),mm in zip(items,allmom):mom[j]=mm
+[?2004l[?2004h>   print('integrated',mu,time.perf_counter()-st,file=sys.stderr,flush=True)
+[?2004l[?2004h> '''+s[b:];open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 /app/dev/driver.py oD2 pD2 0 0.8 0.5 0.6 16 > /app/dev/hot.out 2> /app/dev/hot.log &
+[?2004l[2] 877
+[?2004hroot@e65e3822b05e:/app# tail -25 /app/dev/refined.log; cat /app/dev/refined.out; tail -15 /app/dev/hot.log
+[?2004lresonances [(np.float64(0.0007343878784765391), np.float64(1.7280895064018207e-05), 2), (np.float64(0.09629936917846227), np.float64(0.0004029647735511871), 7), (np.float64(0.22557854832337138), np.float64(0.010989789867184623), 8)]
+quad 0 47 2256 2.264744403124297e-07 remain 3
+quad 1 6 2448 1.5269900327519181e-07 remain 5
+quad 2 10 2768 2.5935655678654967e-08 remain 0
+integrated 0.5 49.288165889214724
+resonances [(np.float64(0.015239496103924534), np.float64(2.0751535643795532e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340553398537), 7), (np.float64(0.005187982589453792), np.float64(3.634410082246423e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348830175034832e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148005339984), 12), (np.float64(0.33435890564194926), np.float64(0.012836898214513793), 13)]
+[?2004hroot@e65e3822b05e:/app# cat /proc/792/stat; cat /proc/877/stat; tail -20 /app/dev/hot.log
+[?2004l792 (python3) R 56 792 55 34817 917 4194560 434124 0 0 0 13048 843 0 0 20 0 1 0 220293409 560943104 89882 18446744073709551615 99965403332608 99965403332945 140727969908512 0 0 0 0 16781312 2 0 0 0 17 44 0 0 0 0 0 99965403344304 99965403344920 99966462320640 140727969914280 140727969914333 140727969914333 140727969914849 0
+877 (python3) R 56 877 55 34817 918 4194560 33243 0 0 0 1574 80 0 0 20 0 1 0 220305684 304795648 27085 18446744073709551615 99645281652736 99645281653073 140721358054576 0 0 0 0 16781312 2 0 0 0 17 30 0 0 0 0 0 99645281664432 99645281665048 99645938982912 140721358060969 140721358061021 140721358061021 140721358061537 0
+[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+[?2004l[?2004h> import sys,time;sys.path.insert(0,'/app/dev');from scatter import *
+[?2004l[?2004h> s=Scatter(0,.8,1);E=np.array([.01,.1,.5,2])
+[?2004l[?2004h> q,*_=s.cross(E,32,[0,1/6,1/9]);print('batch',q[:,:,:4],flush=True)
+[?2004l[?2004h> for e in E:
+[?2004l[?2004h>  r,*_=s.cross([e],32,[0,1/6,1/9]);print('single',e,np.max(abs(r-q[np.where(E==e)[0]])),flush=True)
+[?2004l[?2004h> PY
+[?2004lbatch [[[  0.          42.38502336  56.86231797  77.33974087]
+  [  0.         120.47092159  59.27460656 120.47092159]
+  [  0.         121.24749215  58.47051036 121.24749215]]
+
+ [[  0.          24.65309012  23.16150537  27.14987721]
+  [  0.          35.78222774  25.03980619  35.78222774]
+  [  0.          34.99183161  24.41370591  34.99183161]]
+
+ [[  0.           9.74527043   9.72054817  11.93241083]
+  [  0.          37.093254     9.95900798  37.093254  ]
+  [  0.          37.29278012   9.87952137  37.29278012]]
+
+ [[  0.           4.50311504   6.53097362   8.28961596]
+  [  0.          21.42322249   6.53213813  21.42322249]
+  [  0.          21.41465655   6.53174996  21.41465655]]]
+single 0.01 9.042424062499776e-05
+single 0.1 2.480588449316201e-06
+single 0.5 4.853742886723467e-06
+single 2.0 1.0658141036401503e-14
+[?2004hroot@e65e3822b05e:/app# tail -30 /app/dev/refined.log; tail -30 /app/dev/hot.log
+[?2004lresonances [(np.float64(0.0007343878784765391), np.float64(1.7280895064018207e-05), 2), (np.float64(0.09629936917846227), np.float64(0.0004029647735511871), 7), (np.float64(0.22557854832337138), np.float64(0.010989789867184623), 8)]
+quad 0 47 2256 2.264744403124297e-07 remain 3
+quad 1 6 2448 1.5269900327519181e-07 remain 5
+quad 2 10 2768 2.5935655678654967e-08 remain 0
+integrated 0.5 49.288165889214724
+resonances [(np.float64(0.015239496103924534), np.float64(2.0751535643795532e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340553398537), 7), (np.float64(0.005187982589453792), np.float64(3.634410082246423e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348830175034832e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148005339984), 12), (np.float64(0.33435890564194926), np.float64(0.012836898214513793), 13)]
+quad 0 64 3072 3.4377804425389513e-07 remain 8
+quad 1 16 3584 1.3898746265006423e-07 remain 5
+quad 2 10 3904 5.969201199995666e-08 remain 5
+quad 3 10 4224 3.7414086273557245e-08 remain 1
+quad 4 2 4288 1.954077255561515e-08 remain 0
+integrated 1.0 172.03506761603057
+resonances [(np.float64(0.015239496103924534), np.float64(2.0751535643795532e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340553398537), 7), (np.float64(0.005187982589453792), np.float64(3.634410082246423e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348830175034832e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148005339984), 12), (np.float64(0.33435890564194926), np.float64(0.012836898214513793), 13), (np.float64(0.4433015257100826), np.float64(0.03550014822185949), 14)]
+[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> import time
+[?2004l[?2004h> for p in [792,877]:
+[?2004l[?2004h>  try:
+[?2004l[?2004h>   a=open('/proc/%s/stat'%p).read().split();print(p,'elapsed',time.monotonic()-int(a[21])/100,'CPU',(int(a[13])+int(a[14]))/100)
+[?2004l[?2004h>  except:pass
+[?2004l[?2004h> PY
+[?2004l792 elapsed 176.6792316599749 CPU 174.12
+877 elapsed 53.92930120509118 CPU 52.27
+[?2004hroot@e65e3822b05e:/app# tail -25 /app/dev/refined.log; tail -20 /app/dev/hot.log
+[?2004lresonances [(np.float64(0.0007343878784765391), np.float64(1.7280895064018207e-05), 2), (np.float64(0.09629936917846227), np.float64(0.0004029647735511871), 7), (np.float64(0.22557854832337138), np.float64(0.010989789867184623), 8)]
+quad 0 47 2256 2.264744403124297e-07 remain 3
+quad 1 6 2448 1.5269900327519181e-07 remain 5
+quad 2 10 2768 2.5935655678654967e-08 remain 0
+integrated 0.5 49.288165889214724
+resonances [(np.float64(0.015239496103924534), np.float64(2.0751535643795532e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340553398537), 7), (np.float64(0.005187982589453792), np.float64(3.634410082246423e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348830175034832e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148005339984), 12), (np.float64(0.33435890564194926), np.float64(0.012836898214513793), 13)]
+quad 0 64 3072 3.4377804425389513e-07 remain 8
+quad 1 16 3584 1.3898746265006423e-07 remain 5
+quad 2 10 3904 5.969201199995666e-08 remain 5
+quad 3 10 4224 3.7414086273557245e-08 remain 1
+quad 4 2 4288 1.954077255561515e-08 remain 0
+integrated 1.0 172.03506761603057
+resonances [(np.float64(0.018512689292087665), np.float64(0.0017502118596900108), 4), (np.float64(0.04448342750851718), np.float64(4.79227179943709e-07), 8), (np.float64(0.16634627673993835), np.float64(0.0014697941036529516), 9), (np.float64(0.28882291736029386), np.float64(0.013963532170980886), 10)]
+resonances [(np.float64(0.015239496103924534), np.float64(2.0751535643795532e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340553398537), 7), (np.float64(0.005187982589453792), np.float64(3.634410082246423e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348830175034832e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148005339984), 12), (np.float64(0.33435890564194926), np.float64(0.012836898214513793), 13), (np.float64(0.4433015257100826), np.float64(0.03550014822185949), 14)]
+[?2004hroot@e65e3822b05e:/app# cp /app/dev/scatter.py /app/dev/scatter_v2.py
+[?2004l[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/dev/scatter.py';s=open(p).read().replace('k.max()*3.5','k.max()*4.2').replace('extra=20)','extra=24)')
+[?2004l[?2004h> # Add asymptotic total tail: integral of (2l+1) [3 pi c b^6 k^4/(16 (l+.5)^5)]^2.
+[?2004l[?2004h> s=s.replace('   result.append(2*np.pi*ds@angular)','''   qm=2*np.pi*ds@angular
+[?2004l[?2004h>    if kk!=0:
+[?2004l[?2004h>     kt=np.sqrt(self.c*np.atleast_1d(E))
+[?2004l[?2004h>     start=len(l)
+[?2004l[?2004h>     lt=np.arange(start,max(start+1000,6*start))
+[?2004l[?2004h>     dt=self.born(E,lt)
+[?2004l[?2004h>     rem=2*np.pi/kt**2*np.sum((2*lt+1)[None,:]*dt**2,axis=1)
+[?2004l[?2004h>     qm[:,1::2]+=rem[:,None]
+[?2004l[?2004h>    result.append(qm)''')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# tail -30 /app/dev/refined.log; tail -25 /app/dev/hot.log
+[?2004lresonances [(np.float64(0.0007343878784765391), np.float64(1.7280895064018207e-05), 2), (np.float64(0.09629936917846227), np.float64(0.0004029647735511871), 7), (np.float64(0.22557854832337138), np.float64(0.010989789867184623), 8)]
+quad 0 47 2256 2.264744403124297e-07 remain 3
+quad 1 6 2448 1.5269900327519181e-07 remain 5
+quad 2 10 2768 2.5935655678654967e-08 remain 0
+integrated 0.5 49.288165889214724
+resonances [(np.float64(0.015239496103924534), np.float64(2.0751535643795532e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340553398537), 7), (np.float64(0.005187982589453792), np.float64(3.634410082246423e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348830175034832e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148005339984), 12), (np.float64(0.33435890564194926), np.float64(0.012836898214513793), 13)]
+quad 0 64 3072 3.4377804425389513e-07 remain 8
+quad 1 16 3584 1.3898746265006423e-07 remain 5
+quad 2 10 3904 5.969201199995666e-08 remain 5
+quad 3 10 4224 3.7414086273557245e-08 remain 1
+quad 4 2 4288 1.954077255561515e-08 remain 0
+integrated 1.0 172.03506761603057
+resonances [(np.float64(0.018512689292087665), np.float64(0.0017502118596900108), 4), (np.float64(0.04448342750851718), np.float64(4.79227179943709e-07), 8), (np.float64(0.16634627673993835), np.float64(0.0014697941036529516), 9), (np.float64(0.28882291736029386), np.float64(0.013963532170980886), 10)]
+resonances [(np.float64(0.015239496103924534), np.float64(2.0751535643795532e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340553398537), 7), (np.float64(0.005187982589453792), np.float64(3.634410082246423e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348830175034832e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148005339984), 12), (np.float64(0.33435890564194926), np.float64(0.012836898214513793), 13), (np.float64(0.4433015257100826), np.float64(0.03550014822185949), 14)]
+[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> import time
+[?2004l[?2004h> for p in [792,877]:
+[?2004l[?2004h>  try:
+[?2004l[?2004h>   a=open('/proc/%s/stat'%p).read().split();print(p,'elapsed',time.monotonic()-int(a[21])/100,'CPU',(int(a[13])+int(a[14]))/100)
+[?2004l[?2004h>  except:pass
+[?2004l[?2004h> PY
+[?2004l792 elapsed 225.66978409234434 CPU 222.79
+877 elapsed 102.91984357824549 CPU 100.96
+[?2004hroot@e65e3822b05e:/app# cp /app/dev/scatter.py /app/dev/scatter_num.py
+[?2004l[1]-  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/dev/driver.py pH2 pD2 0 0.8 0.05 0.2 14 > /app/dev/refined.out 2> /app/dev/refined.log
+[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/dev/scatter.py';s=open(p).read();a=s.index('  # two accurately initialized points');b=s.index('  norm=np.hypot(A,B)',a)
+[?2004l[?2004h> s=s[:a]+'''  for end in np.r_[rb*1.3**np.arange(1,int(np.ceil(np.log(R/rb)/np.log(1.3)))),R]:
+[?2004l[?2004h>    sol=solve_ivp(rhs,(r0,end),z.ravel(),method='DOP853',rtol=3e-11,atol=2e-13,t_eval=[end])
+[?2004l[?2004h>    z=sol.y[:,-1].reshape(z.shape)
+[?2004l[?2004h>    z/=np.maximum(abs(z[0]),abs(z[1]))[None,:,:];r0=end
+[?2004l[?2004h>   u=z[0];du=z[1]
+[?2004l[?2004h>   t0=k[:,None]*R
+[?2004l[?2004h>   j0=t0*spherical_jn(l,t0);y0=t0*spherical_yn(l,t0)
+[?2004l[?2004h>   dj=k[:,None]*(spherical_jn(l,t0)+t0*spherical_jn(l,t0,True))
+[?2004l[?2004h>   dy=k[:,None]*(spherical_yn(l,t0)+t0*spherical_yn(l,t0,True))
+[?2004l[?2004h>   A=u*dy-du*y0;B=u*dj-du*j0
+[?2004l[?2004h> '''+s[b:]
+[?2004l[?2004h> open('/app/dev/scatter_dop.py','w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/dev/doptest.out 2> /app/dev/doptest.log &
+[?2004l[?2004h> import sys,time;sys.path.insert(0,'/app/dev');from scatter_dop import Scatter
+[?2004l[?2004h> for mx,sz in [(2,32),(10,64),(60,64)]:
+[?2004l[?2004h>  s=Scatter(0,.8,1);E=np.linspace(mx/3,mx,sz);st=time.perf_counter();q,*_=s.cross(E,32,[0,1/6]);print(mx,sz,time.perf_counter()-st,q[-1,:,:5],flush=True)
+[?2004l[?2004h> from scatter_num import Scatter as Numerov
+[?2004l[?2004h> s=Scatter(0,.8,1);ss=Numerov(0,.8,1)
+[?2004l[?2004h> E=np.array([.01,.1,.5,2,10]);d=s.phases(E)[0];dd=ss.phases(E)[0];print('phase diff',np.max(abs(np.angle(np.exp(2j*(d-dd)))/2),axis=1),flush=True)
+[?2004l[?2004h> PY
+[?2004l[3] 1029
+[?2004hroot@e65e3822b05e:/app# tail -22 /app/dev/refined.log; cat /app/dev/refined.out; tail -22 /app/dev/hot.log; cat /app/dev/doptest.out; tail -10 /app/dev/doptest.log
+[?2004lquad 2 10 3904 5.969201199995666e-08 remain 5
+quad 3 10 4224 3.7414086273557245e-08 remain 1
+quad 4 2 4288 1.954077255561515e-08 remain 0
+integrated 1.0 172.03506761603057
+resonances [(np.float64(0.018512689292087665), np.float64(0.0017502118596900108), 4), (np.float64(0.04448342750851718), np.float64(4.79227179943709e-07), 8), (np.float64(0.16634627673993835), np.float64(0.0014697941036529516), 9), (np.float64(0.28882291736029386), np.float64(0.013963532170980886), 10)]
+quad 0 54 2592 1.552105723945374e-06 remain 4
+quad 1 8 2848 5.711735989732958e-07 remain 5
+quad 2 10 3168 1.1881885275677462e-07 remain 2
+quad 3 4 3296 1.1429302726462254e-08 remain 0
+integrated 0.6666666666666666 240.9611724121496
+N 3 [ 0.03357626  0.064648    0.02616969 -0.10468535] elapsed 240.9870978379622
+N 4 [ 0.03357632  0.06467865  0.0261757  -0.10582653] elapsed 241.0196469053626
+N 5 [ 0.03357648  0.06467899  0.0261757  -0.10583304] elapsed 241.06140527129173
+N 6 [ 0.03357655  0.06467997  0.02617619 -0.10586351] elapsed 241.10887798294425
+N 7 [ 0.03357657  0.06468045  0.02617678 -0.10591103] elapsed 241.16355907032266
+N 8 [ 0.03357657  0.06468058  0.02617715 -0.10593947] elapsed 241.24641408631578
+N 9 [ 0.03357657  0.06468061  0.02617732 -0.10595124] elapsed 241.34176569897681
+N 10 [ 0.03357657  0.06468062  0.02617737 -0.10595492] elapsed 241.4778833333403
+N 11 [ 0.03357657  0.06468062  0.02617739 -0.10595573] elapsed 241.61627841414884
+N 12 [ 0.03357657  0.06468062  0.02617739 -0.10595581] elapsed 241.7830297779292
+N 13 [ 0.03357657  0.06468062  0.02617739 -0.10595581] elapsed 241.94207768607885
+N 14 [ 0.03357657  0.06468062  0.02617739 -0.10595584] elapsed 242.15185870509595
+[3]+  Exit 1                  OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/dev/doptest.out 2> /app/dev/doptest.log
+import sys,time;sys.path.insert(0,'/app/dev');from scatter_dop import Scatter
+for mx,sz in [(2,32),(10,64),(60,64)]:
+ s=Scatter(0,.8,1);E=np.linspace(mx/3,mx,sz);st=time.perf_counter();q,*_=s.cross(E,32,[0,1/6]);print(mx,sz,time.perf_counter()-st,q[-1,:,:5],flush=True)
+from scatter_num import Scatter as Numerov
+s=Scatter(0,.8,1);ss=Numerov(0,.8,1)
+E=np.array([.01,.1,.5,2,10]);d=s.phases(E)[0];dd=ss.phases(E)[0];print('phase diff',np.max(abs(np.angle(np.exp(2j*(d-dd)))/2),axis=1),flush=True)
+PY
+
+[ 0.03357657  0.06468062  0.02617739 -0.10595584]
+resonances [(np.float64(0.015239496103924534), np.float64(2.0751535643795532e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340553398537), 7), (np.float64(0.005187982589453792), np.float64(3.634410082246423e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348830175034832e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148005339984), 12), (np.float64(0.33435890564194926), np.float64(0.012836898214513793), 13), (np.float64(0.4433015257100826), np.float64(0.03550014822185949), 14)]
+Traceback (most recent call last):
+  File "<stdin>", line 3, in <module>
+NameError: name 'np' is not defined
+[?2004hroot@e65e3822b05e:/app# cp /app/dev/last.npz /app/dev/extreme14.npz
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/dev/doptest.out 2> /app/dev/doptest.log &
+[?2004l[?2004h> import sys,time,numpy as np;sys.path.insert(0,'/app/dev');from scatter_dop import Scatter
+[?2004l[?2004h> for mx,sz in [(2,32),(10,64),(60,64)]:
+[?2004l[?2004h>  s=Scatter(0,.8,1);E=np.linspace(mx/3,mx,sz);st=time.perf_counter();q,*_=s.cross(E,32,[0,1/6]);print(mx,sz,time.perf_counter()-st,q[-1,:,:5],flush=True)
+[?2004l[?2004h> from scatter_num import Scatter as Numerov
+[?2004l[?2004h> s=Scatter(0,.8,1);ss=Numerov(0,.8,1)
+[?2004l[?2004h> E=np.array([.01,.1,.5,2,10]);d=s.phases(E)[0];dd=ss.phases(E)[0];print('phase diff',np.max(abs(np.angle(np.exp(2j*(d-dd)))/2),axis=1),flush=True)
+[?2004l[?2004h> PY
+[?2004l[3] 1072
+[?2004hroot@e65e3822b05e:/app# tail -20 /app/dev/hot.log
+[?2004lresonances [(np.float64(0.015239496103924534), np.float64(2.0751535643795532e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340553398537), 7), (np.float64(0.005187982589453792), np.float64(3.634410082246423e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348830175034832e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148005339984), 12), (np.float64(0.33435890564194926), np.float64(0.012836898214513793), 13), (np.float64(0.4433015257100826), np.float64(0.03550014822185949), 14)]
+[?2004hroot@e65e3822b05e:/app# cat /app/dev/doptest.out; tail -8 /app/dev/doptest.log; tail -20 /app/dev/hot.log
+[?2004l2 32 1.3412748919799924 [[ 0.          4.50311496  6.53097349  8.28961576  9.68193564]
+ [ 0.         21.4232228   6.532138   21.4232228   9.68498123]]
+10 64 9.782270340714604 [[ 0.          2.68265458  3.16681443  3.48561636  3.76618966]
+ [ 0.         19.72940912  3.16681443 19.72940912  3.76618966]]
+resonances [(np.float64(0.015239496103924534), np.float64(2.0751535643795532e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340553398537), 7), (np.float64(0.005187982589453792), np.float64(3.634410082246423e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348830175034832e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148005339984), 12), (np.float64(0.33435890564194926), np.float64(0.012836898214513793), 13), (np.float64(0.4433015257100826), np.float64(0.03550014822185949), 14)]
+quad 0 71 3408 2.645478471841045e-07 remain 7
+[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> import time
+[?2004l[?2004h> for p in [877,1072]:
+[?2004l[?2004h>  try:
+[?2004l[?2004h>   a=open('/proc/%s/stat'%p).read().split();print(p,'elapsed',time.monotonic()-int(a[21])/100,'CPU',(int(a[13])+int(a[14]))/100)
+[?2004l[?2004h>  except:pass
+[?2004l[?2004h> PY
+[?2004l877 elapsed 193.02605888806283 CPU 190.81
+1072 elapsed 24.226151487790048 CPU 24.05
+[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/dev/profile.out 2>&1 &
+[?2004l[?2004h> import sys,cProfile,pstats,numpy as np;sys.path.insert(0,'/app/dev');from scatter import Scatter
+[?2004l[?2004h> s=Scatter(0,.8,1);p=cProfile.Profile();p.enable();s.cross(np.linspace(15,30,64),32,[0,1/6]);p.disable();pstats.Stats(p).sort_stats('cumtime').print_stats(30)
+[?2004l[?2004h> PY
+[?2004l[4] 1115
+[?2004hroot@e65e3822b05e:/app# tail -25 /app/dev/hot.log; cat /app/dev/doptest.out
+[?2004lresonances [(np.float64(0.015239496103924534), np.float64(2.0751535643795532e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340553398537), 7), (np.float64(0.005187982589453792), np.float64(3.634410082246423e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348830175034832e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148005339984), 12), (np.float64(0.33435890564194926), np.float64(0.012836898214513793), 13), (np.float64(0.4433015257100826), np.float64(0.03550014822185949), 14)]
+quad 0 71 3408 2.645478471841045e-07 remain 7
+quad 1 14 3856 1.8300960591410842e-07 remain 7
+quad 2 14 4304 6.612584035892155e-08 remain 5
+2 32 1.3412748919799924 [[ 0.          4.50311496  6.53097349  8.28961576  9.68193564]
+ [ 0.         21.4232228   6.532138   21.4232228   9.68498123]]
+10 64 9.782270340714604 [[ 0.          2.68265458  3.16681443  3.48561636  3.76618966]
+ [ 0.         19.72940912  3.16681443 19.72940912  3.76618966]]
+[?2004hroot@e65e3822b05e:/app# tail -25 /app/dev/hot.log; cat /app/dev/doptest.out; head -45 /app/dev/profile.out
+[?2004lresonances [(np.float64(0.015239496103924534), np.float64(2.0751535643795532e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340553398537), 7), (np.float64(0.005187982589453792), np.float64(3.634410082246423e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348830175034832e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148005339984), 12), (np.float64(0.33435890564194926), np.float64(0.012836898214513793), 13), (np.float64(0.4433015257100826), np.float64(0.03550014822185949), 14)]
+quad 0 71 3408 2.645478471841045e-07 remain 7
+quad 1 14 3856 1.8300960591410842e-07 remain 7
+quad 2 14 4304 6.612584035892155e-08 remain 5
+quad 3 10 4624 4.248378521198859e-08 remain 2
+quad 4 4 4752 3.583562438458365e-08 remain 1
+quad 5 2 4816 1.6277951209175967e-12 remain 0
+integrated 1.0 226.75961234001443
+N 3 [ 9.26830320e-02  1.73797436e-01  6.19010490e-02 -2.05278930e-10] elapsed 226.77886882517487
+N 4 [9.26843196e-02 1.73798244e-01 6.19013893e-02 1.41411652e-10] elapsed 226.84772191988304
+N 5 [9.26846663e-02 1.73805127e-01 6.19015573e-02 3.99516134e-10] elapsed 226.8820885438472
+N 6 [9.26847236e-02 1.73807476e-01 6.19015939e-02 5.15239339e-10] elapsed 226.96088075917214
+N 7 [9.26847334e-02 1.73807937e-01 6.19016006e-02 5.59243874e-10] elapsed 227.04131527384743
+N 8 [9.26847356e-02 1.73808022e-01 6.19016021e-02 5.75938292e-10] elapsed 227.13163319183514
+N 9 [9.26847363e-02 1.73808041e-01 6.19016025e-02 5.82789412e-10] elapsed 227.2388516422361
+N 10 [9.26847365e-02 1.73808046e-01 6.19016026e-02 5.85786495e-10] elapsed 227.3550617019646
+N 11 [9.26847366e-02 1.73808048e-01 6.19016026e-02 5.87101515e-10] elapsed 227.52924526808783
+N 12 [9.26847366e-02 1.73808049e-01 6.19016027e-02 5.87652000e-10] elapsed 227.7152161882259
+N 13 [9.26847366e-02 1.73808049e-01 6.19016027e-02 5.87864997e-10] elapsed 227.94174607889727
+N 14 [9.26847366e-02 1.73808049e-01 6.19016027e-02 5.87939703e-10] elapsed 228.3377901329659
+N 15 [9.26847366e-02 1.73808049e-01 6.19016027e-02 5.87962165e-10] elapsed 228.8266852539964
+N 16 [9.26847366e-02 1.73808049e-01 6.19016027e-02 5.87967271e-10] elapsed 229.31882480112836
+[2]   Done                    OPENBLAS_NUM_THREADS=1 python3 /app/dev/driver.py oD2 pD2 0 0.8 0.5 0.6 16 > /app/dev/hot.out 2> /app/dev/hot.log
+2 32 1.3412748919799924 [[ 0.          4.50311496  6.53097349  8.28961576  9.68193564]
+ [ 0.         21.4232228   6.532138   21.4232228   9.68498123]]
+10 64 9.782270340714604 [[ 0.          2.68265458  3.16681443  3.48561636  3.76618966]
+ [ 0.         19.72940912  3.16681443 19.72940912  3.76618966]]
+[?2004hroot@e65e3822b05e:/app# cp /app/dev/last.npz /app/dev/hot16.npz
+[?2004l[3]-  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/dev/doptest.out 2> /app/dev/doptest.log
+import sys,time,numpy as np;sys.path.insert(0,'/app/dev');from scatter_dop import Scatter
+for mx,sz in [(2,32),(10,64),(60,64)]:
+ s=Scatter(0,.8,1);E=np.linspace(mx/3,mx,sz);st=time.perf_counter();q,*_=s.cross(E,32,[0,1/6]);print(mx,sz,time.perf_counter()-st,q[-1,:,:5],flush=True)
+from scatter_num import Scatter as Numerov
+s=Scatter(0,.8,1);ss=Numerov(0,.8,1)
+E=np.array([.01,.1,.5,2,10]);d=s.phases(E)[0];dd=ss.phases(E)[0];print('phase diff',np.max(abs(np.angle(np.exp(2j*(d-dd)))/2),axis=1),flush=True)
+PY
+
+[4]+  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/dev/profile.out 2>&1
+import sys,cProfile,pstats,numpy as np;sys.path.insert(0,'/app/dev');from scatter import Scatter
+s=Scatter(0,.8,1);p=cProfile.Profile();p.enable();s.cross(np.linspace(15,30,64),32,[0,1/6]);p.disable();pstats.Stats(p).sort_stats('cumtime').print_stats(30)
+PY
+
+[?2004hroot@e65e3822b05e:/app# head -45 /app/dev/profile.out; cat /app/dev/doptest.out; tail -10 /app/dev/doptest.log
+[?2004l         591433 function calls (591384 primitive calls) in 22.358 seconds
+
+   Ordered by: cumulative time
+   List reduced from 170 to 30 due to restriction <30>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.022    0.022   22.358   22.358 /app/dev/scatter.py:60(cross)
+        1   11.154   11.154   22.327   22.327 /app/dev/scatter.py:12(phases)
+        8    0.005    0.001    5.611    0.701 /usr/local/lib/python3.12/site-packages/scipy/integrate/_ivp/ivp.py:160(solve_ivp)
+     1236    0.003    0.000    5.450    0.004 /usr/local/lib/python3.12/site-packages/scipy/integrate/_ivp/base.py:179(step)
+     1236    0.159    0.000    5.447    0.004 /usr/local/lib/python3.12/site-packages/scipy/integrate/_ivp/rk.py:111(_step_impl)
+   132492    5.324    0.000    5.416    0.000 /app/dev/scatter.py:28(qq)
+     1250    2.890    0.002    4.433    0.004 /usr/local/lib/python3.12/site-packages/scipy/integrate/_ivp/rk.py:14(rk_step)
+    15016    0.014    0.000    1.542    0.000 /usr/local/lib/python3.12/site-packages/scipy/integrate/_ivp/base.py:156(fun)
+    15016    0.020    0.000    1.528    0.000 /usr/local/lib/python3.12/site-packages/scipy/integrate/_ivp/base.py:23(fun_wrapped)
+    15016    0.894    0.000    1.501    0.000 /app/dev/scatter.py:19(rhs)
+     1250    0.772    0.001    0.853    0.001 /usr/local/lib/python3.12/site-packages/scipy/integrate/_ivp/rk.py:683(_estimate_error_norm)
+    15017    0.427    0.000    0.441    0.000 /usr/local/lib/python3.12/site-packages/numpy/_core/shape_base.py:380(stack)
+        8    0.149    0.019    0.150    0.019 /usr/local/lib/python3.12/site-packages/numpy/_core/shape_base.py:220(vstack)
+   147508    0.138    0.000    0.138    0.000 /app/dev/scatter.py:9(potential)
+        6    0.000    0.000    0.121    0.020 /usr/local/lib/python3.12/site-packages/scipy/special/_spherical_bessel.py:23(wrapper)
+        6    0.000    0.000    0.121    0.020 /usr/local/lib/python3.12/site-packages/scipy/_external/array_api_extra/_lib/_funcs.py:67(apply_where)
+        6    0.000    0.000    0.120    0.020 /usr/local/lib/python3.12/site-packages/scipy/_external/array_api_extra/_lib/_funcs.py:165(_apply_where)
+        6    0.000    0.000    0.118    0.020 /usr/local/lib/python3.12/site-packages/scipy/special/_spherical_bessel.py:32(<lambda>)
+     2524    0.014    0.000    0.080    0.000 /usr/local/lib/python3.12/site-packages/numpy/linalg/_linalg.py:2623(norm)
+    17548    0.070    0.000    0.070    0.000 {method 'ravel' of 'numpy.ndarray' objects}
+        6    0.064    0.011    0.064    0.011 /usr/local/lib/python3.12/site-packages/scipy/special/_spherical_bessel.py:38(spherical_jn)
+     2524    0.062    0.000    0.062    0.000 {method 'dot' of 'numpy.ndarray' objects}
+        6    0.054    0.009    0.054    0.009 /usr/local/lib/python3.12/site-packages/scipy/special/_spherical_bessel.py:129(spherical_yn)
+    15017    0.009    0.000    0.028    0.000 /usr/local/lib/python3.12/site-packages/numpy/_core/shape_base.py:370(_stack_dispatcher)
+     3337    0.024    0.000    0.024    0.000 {built-in method builtins.abs}
+    15025    0.011    0.000    0.018    0.000 /usr/local/lib/python3.12/site-packages/numpy/_core/shape_base.py:208(_arrays_for_stack_dispatcher)
+    15025    0.017    0.000    0.017    0.000 {method 'reshape' of 'numpy.ndarray' objects}
+    47583    0.012    0.000    0.012    0.000 {built-in method builtins.len}
+        1    0.000    0.000    0.008    0.008 /usr/local/lib/python3.12/site-packages/scipy/special/_orthogonal.py:2507(roots_legendre)
+        1    0.002    0.002    0.008    0.008 /usr/local/lib/python3.12/site-packages/scipy/special/_orthogonal.py:159(_gen_roots_and_weights)
+
+
+2 32 1.3412748919799924 [[ 0.          4.50311496  6.53097349  8.28961576  9.68193564]
+ [ 0.         21.4232228   6.532138   21.4232228   9.68498123]]
+10 64 9.782270340714604 [[ 0.          2.68265458  3.16681443  3.48561636  3.76618966]
+ [ 0.         19.72940912  3.16681443 19.72940912  3.76618966]]
+60 64 56.227685986086726 [[0.         2.01888579 2.38245718 2.58144227 2.71602908]
+ [0.         8.88540148 2.38245718 8.88540148 2.71602908]]
+phase diff [2.27346019e-10 6.22151958e-11 2.08498552e-10 5.47733886e-09
+ 3.09182491e-07]
+[?2004hroot@e65e3822b05e:/app# cp /app/dev/scatter.py /app/dev/scatter_precise.py
+[?2004l[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/dev/scatter.py';s=open(p).read().replace('.018/k.max()','.04/k.max()')
+[?2004l[?2004h> s=s.replace('  E=np.atleast_1d(E);k=np.sqrt(self.c*E)','  E=np.atleast_1d(E);k=np.sqrt(self.c*E)\n  R=24 if E.min()>.005 else 40')
+[?2004l[?2004h> s=s.replace('def qq(r):return (ll[None,:]/r**2+self.c*(self.potential(r)-E[:,None]))*(h*h/12)','def qq(r):return (ll[None,:]/r**2+self.c*(self.potential(r)-E[:,None])+(h**4/240)*k[:,None]**6)*(h*h/12)')
+[?2004l[?2004h> s=s.replace('  return delta,A,B','''  if R<30:
+[?2004l[?2004h>    # First-order tail: the nonoscillating term, including centrifugal enhancement.
+[?2004l[?2004h>    impact=(l+.5)[None,:]/k[:,None]
+[?2004l[?2004h>    rn,wn=roots_legendre(32)
+[?2004l[?2004h>    v=(rn+1)/2;weights=wn/2
+[?2004l[?2004h>    rs=R/v
+[?2004l[?2004h>    fac=1/np.sqrt(np.maximum(1-(impact[:,None,:]/rs[None,:,None])**2,.01))
+[?2004l[?2004h>    tail=-self.c/(2*k[:,None])*np.sum((self.potential(rs)*weights*R/v**2)[None,:,None]*fac,axis=1)
+[?2004l[?2004h>    delta+=tail
+[?2004l[?2004h>   return delta,A,B''')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/dev/fastcheck.out 2> /app/dev/fastcheck.log &
+[?2004l[?2004h> import sys,time,numpy as np;sys.path.insert(0,'/app/dev');from scatter import Scatter
+[?2004l[?2004h> from scatter_precise import Scatter as Ref
+[?2004l[?2004h> for a,L,mu in [(0,.8,1),(.5,2.8,.75),(0,1.5,.5)]:
+[?2004l[?2004h>  E=np.array([.01,.03,.1,.3,.6,1,3,10]);s=Scatter(a,L,mu);r=Ref(a,L,mu)
+[?2004l[?2004h>  st=time.perf_counter();q,*_=s.cross(E,32,[0,1/9]);print('fast',a,time.perf_counter()-st,flush=True)
+[?2004l[?2004h>  st=time.perf_counter();qq,*_=r.cross(E,32,[0,1/9]);print('ref',time.perf_counter()-st,'relative',np.max(abs(q[:,:,1:]-qq[:,:,1:])/qq[:,:,1:],axis=(1,2)),flush=True)
+[?2004l[?2004h> PY
+[?2004l[1] 1181
+[?2004hroot@e65e3822b05e:/app# cat /app/dev/fastcheck.out; tail -15 /app/dev/fastcheck.log
+[?2004lfast 0 0.7114987350068986
+ref 1.5195546350441873 relative [4.25661996e-05 2.65469993e-06 2.62602240e-07 7.23263415e-08
+ 8.38975557e-08 7.58609725e-08 5.37968961e-08 1.78603571e-06]
+fast 0.5 0.18843184504657984
+ref 0.2267225948162377 relative [2.93535182e-06 9.26286973e-07 2.31589133e-07 2.15975630e-09
+ 2.46554565e-10 1.44603918e-10 1.17824042e-09 1.34167917e-08]
+fast 0 0.22635750006884336
+ref 0.5747501603327692 relative [9.12798191e-05 3.29982981e-05 6.23181471e-07 2.39918064e-08
+ 2.95462871e-08 2.49843780e-08 4.99682070e-08 9.80743008e-07]
+[1]+  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/dev/fastcheck.out 2> /app/dev/fastcheck.log
+import sys,time,numpy as np;sys.path.insert(0,'/app/dev');from scatter import Scatter
+from scatter_precise import Scatter as Ref
+for a,L,mu in [(0,.8,1),(.5,2.8,.75),(0,1.5,.5)]:
+ E=np.array([.01,.03,.1,.3,.6,1,3,10]);s=Scatter(a,L,mu);r=Ref(a,L,mu)
+ st=time.perf_counter();q,*_=s.cross(E,32,[0,1/9]);print('fast',a,time.perf_counter()-st,flush=True)
+ st=time.perf_counter();qq,*_=r.cross(E,32,[0,1/9]);print('ref',time.perf_counter()-st,'relative',np.max(abs(q[:,:,1:]-qq[:,:,1:])/qq[:,:,1:],axis=(1,2)),flush=True)
+PY
+
+[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> for c,b in [(5,.5),(123,1),(20,1),(80,.5)]:
+[?2004l[?2004h>  d=(60/(np.sqrt(c)*b)+.8**-5)**(-.2)
+[?2004l[?2004h>  print(c,b,d)
+[?2004l[?2004h> PY
+[?2004l5 0.5 0.44591979696544826
+123 1 0.6523906062070646
+20 1 0.5710458168454932
+80 0.5 0.5710458168454932
+[?2004hroot@e65e3822b05e:/app# cp /app/dev/scatter.py /app/dev/scatter_fast0.py
+[?2004l[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/dev/scatter.py';s=open(p).read().replace('E.min()>.005','E.min()>.15');s=s.replace('  r0=self.a+.4*self.b;rb=self.a+.8*self.b','  d0=min(.64,(75/(np.sqrt(self.c)*self.b)+.8**-5)**(-.2))\n  r0=self.a+d0*self.b;rb=self.a+.8*self.b');s=s.replace('  for end in self.a+self.b*np.array([.43,.47,.52,.58,.65,.72,.8]):','  for end in self.a+self.b*np.linspace(d0,.8,5)[1:]:');open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/dev/startcheck.out 2> /app/dev/startcheck.log &
+[?2004l[?2004h> import sys,time,numpy as np;sys.path.insert(0,'/app/dev');from scatter import Scatter
+[?2004l[?2004h> from scatter_fast0 import Scatter as Ref
+[?2004l[?2004h> for a,L,mu in [(0,.8,1),(.5,2.8,.5),(0,1.5,.5)]:
+[?2004l[?2004h>  E=np.array([.001,.01,.03,.1,.3,.6,1,3,10,30]);s=Scatter(a,L,mu);r=Ref(a,L,mu)
+[?2004l[?2004h>  st=time.perf_counter();d=s.phases(E)[0];print('fast',a,time.perf_counter()-st,flush=True)
+[?2004l[?2004h>  st=time.perf_counter();dd=r.phases(E,R=40)[0];print('ref',time.perf_counter()-st,'diff',np.max(abs(np.angle(np.exp(2j*(d-dd)))/2),axis=1),flush=True)
+[?2004l[?2004h> PY
+[?2004l[1] 1286
+[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 /app/dev/driver.py HD pD2 0 0.8 0.95 0.6 16 > /app/dev/worst.out 2> /app/dev/worst.log &
+[?2004l[2] 1287
+[?2004hroot@e65e3822b05e:/app# cat /app/dev/startcheck.out; tail -10 /app/dev/startcheck.log; tail -15 /app/dev/worst.log
+[?2004lfast 0 1.6307767168618739
+ref 1.9910843018442392 diff [0.00000000e+00 0.00000000e+00 0.00000000e+00 0.00000000e+00
+ 0.00000000e+00 0.00000000e+00 0.00000000e+00 0.00000000e+00
+ 0.00000000e+00 4.96491737e-13]
+fast 0.5 0.32712343567982316
+ref 0.33973811101168394 diff [0. 0. 0. 0. 0. 0. 0. 0. 0. 0.]
+fast 0 0.42884462606161833
+ref 0.5901884660124779 diff [0.00000000e+00 0.00000000e+00 0.00000000e+00 0.00000000e+00
+ 0.00000000e+00 0.00000000e+00 0.00000000e+00 0.00000000e+00
+ 3.36619621e-13 0.00000000e+00]
+[1]-  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/dev/startcheck.out 2> /app/dev/startcheck.log
+import sys,time,numpy as np;sys.path.insert(0,'/app/dev');from scatter import Scatter
+from scatter_fast0 import Scatter as Ref
+for a,L,mu in [(0,.8,1),(.5,2.8,.5),(0,1.5,.5)]:
+ E=np.array([.001,.01,.03,.1,.3,.6,1,3,10,30]);s=Scatter(a,L,mu);r=Ref(a,L,mu)
+ st=time.perf_counter();d=s.phases(E)[0];print('fast',a,time.perf_counter()-st,flush=True)
+ st=time.perf_counter();dd=r.phases(E,R=40)[0];print('ref',time.perf_counter()-st,'diff',np.max(abs(np.angle(np.exp(2j*(d-dd)))/2),axis=1),flush=True)
+PY
+
+resonances [(np.float64(0.002274725106800354), np.float64(4.577740018185007e-07), 4), (np.float64(0.03339499110334846), np.float64(0.003572351328253358), 5), (np.float64(0.0872300750228734), np.float64(1.6889213188406965e-05), 9), (np.float64(0.20636141898392935), np.float64(0.0027529661692648286), 10), (np.float64(0.32538714650050377), np.float64(0.01730960380957884), 11)]
+[?2004hroot@e65e3822b05e:/app# tail -20 /app/dev/worst.log
+[?2004lresonances [(np.float64(0.002274725106800354), np.float64(4.577740018185007e-07), 4), (np.float64(0.03339499110334846), np.float64(0.003572351328253358), 5), (np.float64(0.0872300750228734), np.float64(1.6889213188406965e-05), 9), (np.float64(0.20636141898392935), np.float64(0.0027529661692648286), 10), (np.float64(0.32538714650050377), np.float64(0.01730960380957884), 11)]
+quad 0 63 3024 1.0624021897776004e-06 remain 8
+[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 /app/dev/driver.py pH2 oH2 0.35 2 0.35 0.4 16 > /app/dev/mod.out 2> /app/dev/mod.log &
+[?2004l[3] 1328
+[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/dev/scatcompare.out 2> /app/dev/scatcompare.log &
+[?2004l[?2004h> import sys,time,numpy as np;sys.path.insert(0,'/app/dev');from scatter import Scatter
+[?2004l[?2004h> from scatter_precise import Scatter as Ref
+[?2004l[?2004h> for a,L,mu in [(0,.8,1),(.5,2.8,.75),(0,1.5,.5)]:
+[?2004l[?2004h>  E=np.array([.16,.2,.3,.5,1,3,10,30]);s=Scatter(a,L,mu);r=Ref(a,L,mu)
+[?2004l[?2004h>  q,*_=s.cross(E,32,[0,1/9]);qq,*_=r.cross(E,32,[0,1/9]);print(a,L,mu,'relative',np.max(abs(q[:,:,1:]-qq[:,:,1:])/qq[:,:,1:],axis=(1,2)),flush=True)
+[?2004l[?2004h> PY
+[?2004l[4] 1329
+[?2004hroot@e65e3822b05e:/app# tail -20 /app/dev/worst.log; tail -20 /app/dev/mod.log; cat /app/dev/scatcompare.out; tail -10 /app/dev/scatcompare.log
+[?2004lresonances [(np.float64(0.002274725106800354), np.float64(4.577740018185007e-07), 4), (np.float64(0.03339499110334846), np.float64(0.003572351328253358), 5), (np.float64(0.0872300750228734), np.float64(1.6889213188406965e-05), 9), (np.float64(0.20636141898392935), np.float64(0.0027529661692648286), 10), (np.float64(0.32538714650050377), np.float64(0.01730960380957884), 11)]
+quad 0 63 3024 1.0624021897776004e-06 remain 8
+quad 1 16 3536 3.05871402428437e-07 remain 7
+quad 2 14 3984 8.65459333643237e-08 remain 6
+quad 3 12 4368 9.847065413071121e-08 remain 2
+quad 4 4 4496 6.568427995956583e-09 remain 0
+integrated 0.75 61.3101983750239
+[3]-  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/dev/driver.py pH2 oH2 0.35 2 0.35 0.4 16 > /app/dev/mod.out 2> /app/dev/mod.log
+[4]+  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/dev/scatcompare.out 2> /app/dev/scatcompare.log
+import sys,time,numpy as np;sys.path.insert(0,'/app/dev');from scatter import Scatter
+from scatter_precise import Scatter as Ref
+for a,L,mu in [(0,.8,1),(.5,2.8,.75),(0,1.5,.5)]:
+ E=np.array([.16,.2,.3,.5,1,3,10,30]);s=Scatter(a,L,mu);r=Ref(a,L,mu)
+ q,*_=s.cross(E,32,[0,1/9]);qq,*_=r.cross(E,32,[0,1/9]);print(a,L,mu,'relative',np.max(abs(q[:,:,1:]-qq[:,:,1:])/qq[:,:,1:],axis=(1,2)),flush=True)
+PY
+
+resonances []
+quad 0 23 1104 4.2787655640808e-09 remain 0
+integrated 0.5 11.535850627813488
+N 3 [0.09651103 0.36363604 0.12880303 0.0007002 ] elapsed 11.566596230957657
+N 4 [0.09651591 0.36403995 0.12881888 0.0008302 ] elapsed 11.605928984936327
+N 5 [0.09651654 0.36408571 0.12882143 0.00087845] elapsed 11.655144803691655
+N 6 [0.09651665 0.36409247 0.1288219  0.0008943 ] elapsed 11.716803142800927
+N 7 [0.09651667 0.36409384 0.128822   0.0008991 ] elapsed 11.793789558112621
+N 8 [0.09651668 0.36409422 0.12882202 0.00090054] elapsed 11.884231149684638
+N 9 [0.09651668 0.36409434 0.12882203 0.00090099] elapsed 11.99260139092803
+N 10 [0.09651669 0.36409439 0.12882203 0.00090115] elapsed 12.12196380412206
+N 11 [0.09651669 0.36409441 0.12882203 0.0009012 ] elapsed 12.276869317051023
+N 12 [0.09651669 0.36409442 0.12882203 0.00090123] elapsed 12.460576022043824
+N 13 [0.09651669 0.36409442 0.12882203 0.00090124] elapsed 12.685008180793375
+N 14 [0.09651669 0.36409442 0.12882203 0.00090124] elapsed 12.942043485119939
+N 15 [0.09651669 0.36409442 0.12882203 0.00090124] elapsed 13.184599475003779
+N 16 [0.09651669 0.36409443 0.12882203 0.00090124] elapsed 13.476126611698419
+0 0.8 1 relative [2.55747077e-07 1.55893123e-07 1.03499212e-07 9.49578583e-08
+ 8.36575250e-08 1.67426973e-08 1.86181029e-07 4.03819150e-06]
+0.5 2.8 0.75 relative [9.84655914e-08 4.35353755e-08 2.20668875e-09 1.12046804e-09
+ 1.07745183e-09 1.12821611e-09 3.70886587e-09 2.13263489e-08]
+0 1.5 0.5 relative [3.69325970e-08 1.92394697e-08 2.93023565e-08 2.61680104e-08
+ 2.68896939e-08 1.77508231e-08 1.01176758e-07 1.25452711e-06]
+[?2004hroot@e65e3822b05e:/app# sed -n '1,180p' /app/dev/scatter.py
+[?2004limport numpy as np
+from scipy.integrate import solve_ivp
+from scipy.special import spherical_jn,spherical_yn,roots_legendre,gammaln
+from time import perf_counter
+
+class Scatter:
+ def __init__(self,a,L,mu):
+  self.a=a;self.b=1-a;self.c=8*np.pi**2*mu/L**2
+ def potential(self,r):
+  z=(self.b/(r-self.a))**6
+  return 4*z*(z-1)
+ def phases(self,E,h=.003,R=40,extra=10):
+  E=np.atleast_1d(E);k=np.sqrt(self.c*E)
+  R=24 if E.min()>.15 else 40
+  h=min(h,.04/k.max(),.004*self.b)
+  lm=int(np.ceil(k.max()*4.2))+extra
+  l=np.arange(lm+1);ll=l*(l+1)
+  d0=min(.64,(75/(np.sqrt(self.c)*self.b)+.8**-5)**(-.2))
+  r0=self.a+d0*self.b;rb=self.a+.8*self.b
+  z=np.zeros((2,len(E),len(l)));z[1]=1
+  def rhs(r,z):
+   z=z.reshape(2,len(E),len(l));q=ll[None,:]/r**2+self.c*(self.potential(r)-E[:,None])
+   return np.stack([z[1],q*z[0]]).ravel()
+  for end in self.a+self.b*np.linspace(d0,.8,5)[1:]:
+   sol=solve_ivp(rhs,(r0,end),z.ravel(),method='DOP853',rtol=2e-10,atol=1e-12)
+   z=sol.y[:,-1].reshape(z.shape);z/=np.maximum(abs(z[0]),abs(z[1]))[None,:,:];r0=end
+  # two accurately initialized points
+  sol=solve_ivp(rhs,(rb,rb+h),z.ravel(),method='DOP853',rtol=2e-11,atol=1e-13)
+  prev=z[0].copy();cur=sol.y[:,-1].reshape(z.shape)[0].copy()
+  def qq(r):return (ll[None,:]/r**2+self.c*(self.potential(r)-E[:,None])+(h**4/240)*k[:,None]**6)*(h*h/12)
+  qp=qq(rb);qc=qq(rb+h)
+  steps=int(np.ceil((R-rb)/h));R=rb+steps*h
+  saved={}
+  for i in range(2,steps+3):
+   r=rb+i*h;qn=qq(r)
+   nex=(2*(1+5*qc)*cur-(1-qp)*prev)/(1-qn)
+   prev,cur=cur,nex;qp,qc=qc,qn
+   if i>=steps-2: saved[i]=cur.copy()
+   if i%80==0 and i<steps-2:
+    norm=np.maximum(abs(cur),abs(prev));norm=np.maximum(norm,1e-100)
+    cur/=norm;prev/=norm
+  u=saved[steps]
+  du=(saved[steps-2]-8*saved[steps-1]+8*saved[steps+1]-saved[steps+2])/(12*h)
+  t0=k[:,None]*R
+  j0=t0*spherical_jn(l,t0);y0=t0*spherical_yn(l,t0)
+  dj=k[:,None]*(spherical_jn(l,t0)+t0*spherical_jn(l,t0,True))
+  dy=k[:,None]*(spherical_yn(l,t0)+t0*spherical_yn(l,t0,True))
+  A=u*dy-du*y0;B=u*dj-du*j0
+  norm=np.hypot(A,B);A/=norm;B/=norm
+  delta=np.arctan2(B,A)
+  if R<30:
+   # First-order tail: the nonoscillating term, including centrifugal enhancement.
+   impact=(l+.5)[None,:]/k[:,None]
+   rn,wn=roots_legendre(32)
+   v=(rn+1)/2;weights=wn/2
+   rs=R/v
+   fac=1/np.sqrt(np.maximum(1-(impact[:,None,:]/rs[None,:,None])**2,.01))
+   tail=-self.c/(2*k[:,None])*np.sum((self.potential(rs)*weights*R/v**2)[None,:,None]*fac,axis=1)
+   delta+=tail
+  return delta,A,B
+ def born(self,E,l):
+  k=np.sqrt(self.c*np.atleast_1d(E));l=np.asarray(l)
+  out=np.zeros((len(k),len(l)))
+  for base,sign in [(6,1),(12,-1)]:
+   for j in range(16 if self.a else 1):
+    power=base+j
+    integ=np.exp(np.log(np.pi/2)+gammaln(power-1)-(power-1)*np.log(2)-2*gammaln(power/2)+gammaln(l+(3-power)/2)-gammaln(l+(1+power)/2))
+    cf=np.exp(gammaln(base+j)-gammaln(base)-gammaln(j+1))*self.a**j
+    out+=sign*4*self.c*self.b**base*cf*k[:,None]**(power-2)*integ[None,:]
+  return out
+ def cross(self,E,M,kind=0,h=.003,R=40):
+  d,A,B=self.phases(E,h,R,extra=24)
+  cut=d.shape[1]
+  tail=self.born(E,np.arange(cut,max(2*cut,100)))
+  d=np.concatenate([d,tail],axis=1)
+  l=np.arange(d.shape[1]);k=np.sqrt(self.c*np.atleast_1d(E))
+  n=len(l)+(M+1)//2+2
+  t,wt=roots_legendre(n)
+  P=np.empty((max(M+1,len(l)),n));P[0]=1
+  if len(P)>1:P[1]=t
+  for j in range(1,len(P)-1):P[j+1]=((2*j+1)*t*P[j]-j*P[j-1])/(j+1)
+  coef=(2*l+1)[None,:]*np.exp(1j*d)*np.sin(d)/k[:,None]
+  kinds=np.atleast_1d(kind)
+  dd=abs(coef@P[:len(l)])**2 if 0 in kinds else None
+  ee=abs(coef[:,::2]@P[:len(l):2])**2
+  oo=abs(coef[:,1::2]@P[1:len(l):2])**2
+  angular=((1-P[:M+1])*wt).T
+  result=[]
+  for kk in kinds:
+   ds=dd if kk==0 else (1+kk)*ee+(1-kk)*oo
+   qm=2*np.pi*ds@angular
+   if kk!=0:
+    kt=np.sqrt(self.c*np.atleast_1d(E))
+    start=len(l)
+    lt=np.arange(start,max(start+1000,6*start))
+    dt=self.born(E,lt)
+    rem=2*np.pi/kt**2*np.sum((2*lt+1)[None,:]*dt**2,axis=1)
+    qm[:,1::2]+=rem[:,None]
+   result.append(qm)
+  Q=np.stack(result,axis=1)
+  if np.ndim(kind)==0:Q=Q[:,0]
+  return Q,A,B
+
+if __name__=='__main__':
+ s=Scatter(0,1.5,.5)
+ for h in [.006,.003,.0015]:
+  st=perf_counter();d,A,B=s.phases([.03,.1,.2,.5,1,2],h,R=12)
+  print(h,perf_counter()-st,d[:,:8])
+[?2004hroot@e65e3822b05e:/app# cp /app/dev/last.npz /app/dev/mod16.npz
+[?2004l[?2004hroot@e65e3822b05e:/app# tail -25 /app/dev/worst.log
+[?2004lresonances [(np.float64(0.002274725106800354), np.float64(4.577740018185007e-07), 4), (np.float64(0.03339499110334846), np.float64(0.003572351328253358), 5), (np.float64(0.0872300750228734), np.float64(1.6889213188406965e-05), 9), (np.float64(0.20636141898392935), np.float64(0.0027529661692648286), 10), (np.float64(0.32538714650050377), np.float64(0.01730960380957884), 11)]
+quad 0 63 3024 1.0624021897776004e-06 remain 8
+quad 1 16 3536 3.05871402428437e-07 remain 7
+quad 2 14 3984 8.65459333643237e-08 remain 6
+quad 3 12 4368 9.847065413071121e-08 remain 2
+quad 4 4 4496 6.568427995956583e-09 remain 0
+integrated 0.75 61.3101983750239
+resonances [(np.float64(0.015239496103924534), np.float64(2.075153574424446e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340569747603), 7), (np.float64(0.005187982589453792), np.float64(3.630312163726018e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348832267328502e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148162815264), 12), (np.float64(0.33435890564194926), np.float64(0.012836898281683377), 13), (np.float64(0.4433015257100826), np.float64(0.035500149717242246), 14)]
+[?2004hroot@e65e3822b05e:/app# sed -n '1,190p' /app/dev/driver.py
+[?2004limport sys,time
+import numpy as np
+from scipy.special import roots_legendre
+from scatter import Scatter
+from resonances import scan
+from brackets import Brackets,laguerres,transport
+
+species={'pH2':(1.,1.),'oH2':(1.,1/9),'HD':(1.5,-1/6),'oD2':(2.,1/6),'pD2':(2.,1/9)}
+
+class Integrator:
+ def __init__(self,a,L,mu,T,M,kind,tol=3e-8):
+  self.s=Scatter(a,L,mu);self.T=T;self.M=M;self.kind=np.atleast_1d(kind);self.tol=tol;self.calls=0
+  self.rn,self.wn=roots_legendre(16)
+ def evaluate(self,edges):
+  edges=np.array(edges);left=edges[:,0];right=edges[:,1]
+  e=((left+right)[:,None]/2+(right-left)[:,None]/2*self.rn).ravel()
+  w=((right-left)[:,None]/2*self.wn).ravel()
+  order=np.argsort(e);Q=np.empty((len(e),len(self.kind),self.M+1))
+  for chunk in np.array_split(order,max(1,int(np.ceil(len(e)/96)))):
+   # limit energy disparity, and omit numerically irrelevant angular momenta
+   q,A,B=self.s.cross(e[chunk]*self.T,self.M,self.kind)
+   Q[chunk]=q;self.calls+=len(chunk)
+  la=laguerres(self.M+1,1,e)/np.sqrt(np.arange(self.M+1)+1)[:,None]
+  f=(w*e*np.exp(-e))[:,None,None,None]*Q[:,:,:,None]*la.T[:,None,None,:]
+  f=f.reshape(len(edges),16,len(self.kind),self.M+1,self.M+1).sum(axis=1)
+  return f
+ def run(self):
+  bounds=[0,.001,.003,.01,.03,.1,.2,.4,.7,1,1.5,2,3,4,6,8,12,16,24,32,48,64,80,100]
+  resonances=scan(self.s,self.T)
+  print('resonances',resonances,file=sys.stderr,flush=True)
+  for en,width,l in resonances:
+   if width>1e-10:
+    bounds.extend([(en+j*width)/self.T for j in [-128,-32,-8,-2,0,2,8,32,128] if 0<(en+j*width)/self.T<100])
+  bounds=sorted(set(bounds))
+  edges=list(zip(bounds[:-1],bounds[1:]));old=self.evaluate(edges);total=np.zeros_like(old[0]);errors=0
+  for iteration in range(22):
+   children=[pair for l,r in edges for pair in [(l,(l+r)/2),((l+r)/2,r)]]
+   fine=self.evaluate(children).reshape(len(edges),2,len(self.kind),self.M+1,self.M+1)
+   err=np.max(abs(fine.sum(axis=1)-old),axis=(1,2,3))
+   ok=err<self.tol
+   total+=fine[ok].sum(axis=(0,1));errors+=err[ok].sum()
+   print('quad',iteration,len(edges),self.calls,float(err.max()),'remain',sum(~ok),file=sys.stderr,flush=True)
+   if np.all(ok):break
+   edges=[pair for j,(l,r) in enumerate(edges) if not ok[j] for pair in [(l,(l+r)/2),((l+r)/2,r)]]
+   old=fine[~ok].reshape(-1,len(self.kind),self.M+1,self.M+1)
+  else:total+=old.sum(axis=0)
+  return total
+
+def compute(s1,s2,a,L,x,T,Nmax=12):
+ m1,k1=species[s1];m2,k2=species[s2];M=2*Nmax
+ st=time.perf_counter();mom=[None]*3
+ groups={}
+ for j,(mu,kind) in enumerate([(m1/2,k1),(m2/2,k2),(m1*m2/(m1+m2),0)]):
+  groups.setdefault(mu,[]).append((j,kind))
+ for mu,items in groups.items():
+  it=Integrator(a,L,mu,T,M,[kind for j,kind in items]);allmom=it.run()
+  for (j,kind),mm in zip(items,allmom):mom[j]=mm
+  print('integrated',mu,time.perf_counter()-st,file=sys.stderr,flush=True)
+ vals=[]
+ for N in range(3,Nmax+1):
+  cc=[]
+  for q in [1,2]:
+   out=np.zeros((2*N,2*N))
+   for ma,mb,xx,sl,mm,sp in [(m1,m1,x*x/2,slice(0,N),mom[0],True),(m2,m2,(1-x)**2/2,slice(N,2*N),mom[1],True),(m1,m2,x*(1-x),slice(0,2*N),mom[2],False)]:
+    br=Brackets(ma,mb,N,q);sz=br.L+1
+    mat=br.integrated(mm[:sz,:sz],sp)
+    out[sl,sl]+=xx*mat
+   cc.append(out)
+  v=np.array(transport(m1,m2,x,T,*cc,N));vals.append(v)
+  print('N',N,v,'elapsed',time.perf_counter()-st,file=sys.stderr,flush=True)
+ return vals[-1],mom
+
+if __name__=='__main__':
+ s1,s2=sys.argv[1:3];a,L,x,T=map(float,sys.argv[3:7]);v,mom=compute(s1,s2,a,L,x,T,int(sys.argv[7]) if len(sys.argv)>7 else 12)
+ np.savez('/app/dev/last.npz',mom=mom,val=v)
+ print(v)
+[?2004hroot@e65e3822b05e:/app# cat > /app/dev/build.py <<'PY'
+[?2004l[?2004h> from pathlib import Path
+[?2004l[?2004h> header='''#!/usr/bin/env python3
+[?2004l[?2004h> """Quantum dilute-mixture transport in reduced Kihara units.
+[?2004l[?2004h> 
+[?2004l[?2004h> The collision operator is evaluated in a converged Sonine-Galerkin basis.
+[?2004l[?2004h> Gaussian center-of-mass integration and rotational averaging are exact for
+[?2004l[?2004h> this basis; thermal relative-energy integration is adaptive. Quantum cross
+[?2004l[?2004h> sections include the molecular internal-state exchange weights. Positive-
+[?2004l[?2004h> energy centrifugal resonances are located before integration.
+[?2004l[?2004h> """
+[?2004l[?2004h> import os
+[?2004l[?2004h> for _key in ('OPENBLAS_NUM_THREADS','OMP_NUM_THREADS','MKL_NUM_THREADS'):
+[?2004l[?2004h>     os.environ[_key] = '1'
+[?2004l[?2004h> import sys, time, json
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from scipy.integrate import solve_ivp
+[?2004l[?2004h> from scipy.special import (spherical_jn, spherical_yn, roots_legendre,
+[?2004l[?2004h>                            roots_genlaguerre, gammaln, lpmv)
+[?2004l[?2004h> from scipy.linalg import solve
+[?2004l[?2004h> '''
+[?2004l[?2004h> out=header
+[?2004l[?2004h> for filename in ['brackets.py','scatter.py','resonances.py','driver.py']:
+[?2004l[?2004h>  s=Path('/app/dev/'+filename).read_text().split("if __name__=='__main__':")[0]
+[?2004l[?2004h>  s='\n'.join(line for line in s.splitlines() if not line.startswith(('import ','from ')))
+[?2004l[?2004h>  if filename=='brackets.py':
+[?2004l[?2004h>   s=s.split('\ndef test(N):')[0]
+[?2004l[?2004h>   s=s.replace('la=laguerres(self.L+1,1,e)/np.sqrt(np.arange(self.L+1))[:,None] if False else laguerres(self.L+1,1,e)/np.sqrt(np.arange(self.L+1)+1)[:,None]','la=laguerres(self.L+1,1,e)/np.sqrt(np.arange(self.L+1)+1)[:,None]')
+[?2004l[?2004h>  s='\n'.join(line for line in s.splitlines() if 'print(' not in line)
+[?2004l[?2004h>  out+='\n'+s+'\n'
+[?2004l[?2004h> out+='''
+[?2004l[?2004h> if __name__ == '__main__':
+[?2004l[?2004h>     s1, s2 = sys.argv[1:3]
+[?2004l[?2004h>     a, L, x, T = map(float, sys.argv[3:7])
+[?2004l[?2004h>     values, _ = compute(s1, s2, a, L, x, T, 18)
+[?2004l[?2004h>     names = ('viscosity', 'thermal_conductivity', 'binary_diffusion',
+[?2004l[?2004h>              'thermal_diffusion_factor')
+[?2004l[?2004h>     print(json.dumps(dict(zip(names, map(float, values))), allow_nan=False,
+[?2004l[?2004h>                      separators=(',', ':')))
+[?2004l[?2004h> '''
+[?2004l[?2004h> Path('/app/output/transport.py').write_text(out)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# python3 /app/dev/build.py
+[?2004l[?2004hroot@e65e3822b05e:/app# python3 -m py_compile /app/output/transport.py
+[?2004l[?2004hroot@e65e3822b05e:/app# mkdir -p /app/dev/clean
+[?2004l[?2004hroot@e65e3822b05e:/app# cp /app/output/transport.py /app/dev/clean/transport.py
+[?2004l[?2004hroot@e65e3822b05e:/app# cd /app/dev/clean && python3 transport.py pH2 oH2 0.35 2 0.35 0.4 > /app/dev/finaltest.out 2> /app/dev/finaltest.log &
+[?2004l[3] 1397
+[?2004hroot@e65e3822b05e:/app# tail -25 /app/dev/worst.log; cat /app/dev/finaltest.out; cat /app/dev/finaltest.log
+[?2004lresonances [(np.float64(0.002274725106800354), np.float64(4.577740018185007e-07), 4), (np.float64(0.03339499110334846), np.float64(0.003572351328253358), 5), (np.float64(0.0872300750228734), np.float64(1.6889213188406965e-05), 9), (np.float64(0.20636141898392935), np.float64(0.0027529661692648286), 10), (np.float64(0.32538714650050377), np.float64(0.01730960380957884), 11)]
+quad 0 63 3024 1.0624021897776004e-06 remain 8
+quad 1 16 3536 3.05871402428437e-07 remain 7
+quad 2 14 3984 8.65459333643237e-08 remain 6
+quad 3 12 4368 9.847065413071121e-08 remain 2
+quad 4 4 4496 6.568427995956583e-09 remain 0
+integrated 0.75 61.3101983750239
+resonances [(np.float64(0.015239496103924534), np.float64(2.075153574424446e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340569747603), 7), (np.float64(0.005187982589453792), np.float64(3.630312163726018e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348832267328502e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148162815264), 12), (np.float64(0.33435890564194926), np.float64(0.012836898281683377), 13), (np.float64(0.4433015257100826), np.float64(0.035500149717242246), 14)]
+quad 0 71 3408 6.854973606529313e-07 remain 8
+quad 1 16 3920 5.595304553018821e-07 remain 5
+quad 2 10 4240 1.7007459141016312e-07 remain 6
+quad 3 12 4624 6.306628408392356e-08 remain 5
+quad 4 10 4944 7.561025933133791e-08 remain 3
+quad 5 6 5136 1.0735485472812556e-08 remain 0
+integrated 1.0 139.63233298622072
+resonances [(np.float64(0.011239148624076215), np.float64(3.940423325461127e-05), 5), (np.float64(0.04610438073388724), np.float64(0.004132435117957225), 6), (np.float64(0.1121941343822612), np.float64(3.615064889936565e-05), 10), (np.float64(0.22773262192954868), np.float64(0.002959553635241668), 11), (np.float64(0.3417933224991611), np.float64(0.017335148255306302), 12)]
+[3]+  Done                    cd /app/dev/clean && python3 transport.py pH2 oH2 0.35 2 0.35 0.4 > /app/dev/finaltest.out 2> /app/dev/finaltest.log
+{"viscosity":0.09651668604024669,"thermal_conductivity":0.36409442587239604,"binary_diffusion":0.1288220321390635,"thermal_diffusion_factor":0.0009012427096804987}
+[?2004hroot@e65e3822b05e:/app# ls -la /app/output
+[?2004ltotal 28
+drwxr-xr-x 1 root root  4096 Nov  5 06:17 .
+drwxr-xr-x 1 root root  4096 Nov  5 05:50 ..
+drwxr-xr-x 2 root root  4096 Nov  5 06:17 __pycache__
+-rw-r--r-- 1 root root 12181 Nov  5 06:17 transport.py
+[?2004hroot@e65e3822b05e:/app# tail -25 /app/dev/worst.log
+[?2004lresonances [(np.float64(0.002274725106800354), np.float64(4.577740018185007e-07), 4), (np.float64(0.03339499110334846), np.float64(0.003572351328253358), 5), (np.float64(0.0872300750228734), np.float64(1.6889213188406965e-05), 9), (np.float64(0.20636141898392935), np.float64(0.0027529661692648286), 10), (np.float64(0.32538714650050377), np.float64(0.01730960380957884), 11)]
+quad 0 63 3024 1.0624021897776004e-06 remain 8
+quad 1 16 3536 3.05871402428437e-07 remain 7
+quad 2 14 3984 8.65459333643237e-08 remain 6
+quad 3 12 4368 9.847065413071121e-08 remain 2
+quad 4 4 4496 6.568427995956583e-09 remain 0
+integrated 0.75 61.3101983750239
+resonances [(np.float64(0.015239496103924534), np.float64(2.075153574424446e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340569747603), 7), (np.float64(0.005187982589453792), np.float64(3.630312163726018e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348832267328502e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148162815264), 12), (np.float64(0.33435890564194926), np.float64(0.012836898281683377), 13), (np.float64(0.4433015257100826), np.float64(0.035500149717242246), 14)]
+quad 0 71 3408 6.854973606529313e-07 remain 8
+quad 1 16 3920 5.595304553018821e-07 remain 5
+quad 2 10 4240 1.7007459141016312e-07 remain 6
+quad 3 12 4624 6.306628408392356e-08 remain 5
+quad 4 10 4944 7.561025933133791e-08 remain 3
+quad 5 6 5136 1.0735485472812556e-08 remain 0
+integrated 1.0 139.63233298622072
+resonances [(np.float64(0.011239148624076215), np.float64(3.940423325461127e-05), 5), (np.float64(0.04610438073388724), np.float64(0.004132435117957225), 6), (np.float64(0.1121941343822612), np.float64(3.615064889936565e-05), 10), (np.float64(0.22773262192954868), np.float64(0.002959553635241668), 11), (np.float64(0.3417933224991611), np.float64(0.017335148255306302), 12)]
+[?2004hroot@e65e3822b05e:/app# cat > /app/dev/reverse.py <<'PY'
+[?2004l[?2004h> import sys,numpy as np
+[?2004l[?2004h> sys.path.insert(0,'/app/dev')
+[?2004l[?2004h> from brackets import Brackets,transport
+[?2004l[?2004h> 
+[?2004l[?2004h> def frommom(m1,m2,x,T,mom,N):
+[?2004l[?2004h>  cc=[]
+[?2004l[?2004h>  for q in [1,2]:
+[?2004l[?2004h>   out=np.zeros((2*N,2*N))
+[?2004l[?2004h>   for ma,mb,xx,sl,mm,sp in [(m1,m1,x*x/2,slice(0,N),mom[0],True),(m2,m2,(1-x)**2/2,slice(N,2*N),mom[1],True),(m1,m2,x*(1-x),slice(0,2*N),mom[2],False)]:
+[?2004l[?2004h>    b=Brackets(ma,mb,N,q);sz=b.L+1;out[sl,sl]+=xx*b.integrated(mm[:sz,:sz],sp)
+[?2004l[?2004h>   cc.append(out)
+[?2004l[?2004h>  return np.array(transport(m1,m2,x,T,*cc,N))
+[?2004l[?2004h> 
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  mom=np.load('/app/dev/extreme14.npz')['mom']
+[?2004l[?2004h>  for N in [10,12,14]:
+[?2004l[?2004h>   a=frommom(1,2,.05,.2,mom,N);b=frommom(2,1,.95,.2,mom[[1,0,2]],N)
+[?2004l[?2004h>   print(N,a,b,'diff',a-b*np.array([1,1,1,-1]))
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 /app/dev/reverse.py
+[?2004l10 [ 0.03357657  0.06468062  0.02617737 -0.10595492] [0.03357657 0.06468062 0.02617737 0.10595492] diff [0.00000000e+00 2.77555756e-17 3.46944695e-18 4.16333634e-17]
+12 [ 0.03357657  0.06468062  0.02617739 -0.10595581] [0.03357657 0.06468062 0.02617739 0.10595581] diff [-6.93889390e-18  0.00000000e+00 -1.04083409e-17  4.16333634e-17]
+14 [ 0.03357657  0.06468062  0.02617739 -0.10595584] [0.03357657 0.06468062 0.02617739 0.10595584] diff [ 2.08166817e-17  1.38777878e-17 -3.12250226e-17  2.35922393e-16]
+[?2004hroot@e65e3822b05e:/app# rm -rf /app/output/__pycache__
+[?2004l[?2004hroot@e65e3822b05e:/app# tail -30 /app/dev/worst.log; cat /app/dev/worst.out
+[?2004lquad 4 4 4496 6.568427995956583e-09 remain 0
+integrated 0.75 61.3101983750239
+resonances [(np.float64(0.015239496103924534), np.float64(2.075153574424446e-05), 6), (np.float64(0.05323242311957792), np.float64(0.0029727340569747603), 7), (np.float64(0.005187982589453792), np.float64(3.630312163726018e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348832267328502e-05), 11), (np.float64(0.22542914471216208), np.float64(0.001675148162815264), 12), (np.float64(0.33435890564194926), np.float64(0.012836898281683377), 13), (np.float64(0.4433015257100826), np.float64(0.035500149717242246), 14)]
+quad 0 71 3408 6.854973606529313e-07 remain 8
+quad 1 16 3920 5.595304553018821e-07 remain 5
+quad 2 10 4240 1.7007459141016312e-07 remain 6
+quad 3 12 4624 6.306628408392356e-08 remain 5
+quad 4 10 4944 7.561025933133791e-08 remain 3
+quad 5 6 5136 1.0735485472812556e-08 remain 0
+integrated 1.0 139.63233298622072
+resonances [(np.float64(0.011239148624076215), np.float64(3.940423325461127e-05), 5), (np.float64(0.04610438073388724), np.float64(0.004132435117957225), 6), (np.float64(0.1121941343822612), np.float64(3.615064889936565e-05), 10), (np.float64(0.22773262192954868), np.float64(0.002959553635241668), 11), (np.float64(0.3417933224991611), np.float64(0.017335148255306302), 12)]
+quad 0 63 3024 2.3533646942297537e-07 remain 6
+quad 1 12 3408 6.241707350973513e-08 remain 3
+quad 2 6 3600 3.075180909917208e-08 remain 1
+quad 3 2 3664 9.298506409294305e-12 remain 0
+integrated 0.8571428571428571 196.98136075399816
+N 3 [0.08099931 0.19931815 0.06685247 0.01291382] elapsed 197.0015579923056
+N 4 [0.08100027 0.19931815 0.06685263 0.01291433] elapsed 197.03819136228412
+N 5 [0.08100057 0.19932479 0.06685271 0.01288848] elapsed 197.07230634707958
+N 6 [0.08100062 0.19932749 0.06685273 0.01287857] elapsed 197.11801763111725
+N 7 [0.08100063 0.19932808 0.06685273 0.01287615] elapsed 197.1679721600376
+N 8 [0.08100063 0.1993282  0.06685273 0.0128756 ] elapsed 197.23984324000776
+N 9 [0.08100063 0.19932823 0.06685273 0.01287545] elapsed 197.31006559124216
+N 10 [0.08100063 0.19932824 0.06685273 0.0128754 ] elapsed 197.40147100714967
+N 11 [0.08100063 0.19932824 0.06685273 0.01287538] elapsed 197.5003913929686
+N 12 [0.08100064 0.19932824 0.06685273 0.01287538] elapsed 197.6459837681614
+N 13 [0.08100064 0.19932824 0.06685273 0.01287538] elapsed 197.8166944719851
+N 14 [0.08100064 0.19932824 0.06685273 0.01287538] elapsed 198.01909223990515
+N 15 [0.08100064 0.19932824 0.06685273 0.01287538] elapsed 198.2972512212582
+N 16 [0.08100064 0.19932824 0.06685273 0.01287538] elapsed 198.61620633117855
+[2]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/dev/driver.py HD pD2 0 0.8 0.95 0.6 16 > /app/dev/worst.out 2> /app/dev/worst.log
+[0.08100064 0.19932824 0.06685273 0.01287538]
+[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> import time
+[?2004l[?2004h> p=1287
+[?2004l[?2004h> try:
+[?2004l[?2004h>  a=open('/proc/%s/stat'%p).read().split();print('elapsed',time.monotonic()-int(a[21])/100,'CPU',(int(a[13])+int(a[14]))/100)
+[?2004l[?2004h> except:pass
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# cp /app/dev/last.npz /app/dev/worst16_fast.npz
+[?2004l[?2004hroot@e65e3822b05e:/app# cp /app/dev/scatter.py /app/dev/scatter_fastvalid.py
+[?2004l[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/dev/scatter.py';s=open(p).read().replace('R=24 if E.min()>.15 else 40','R=32 if E.min()>.15 else 60').replace('.04/k.max()','.03/k.max()').replace('if R<30:','if R<40:');open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 /app/dev/driver.py HD pD2 0 0.8 0.95 0.6 18 > /app/dev/conservative.out 2> /app/dev/conservative.log &
+[?2004l[1] 1485
+[?2004hroot@e65e3822b05e:/app# python3 /app/dev/build.py
+[?2004l[?2004hroot@e65e3822b05e:/app# cp /app/output/transport.py /app/dev/clean/transport.py
+[?2004l[?2004hroot@e65e3822b05e:/app# cd /app/dev/clean && python3 transport.py oH2 HD 0.15 1.2 0.65 0.25 > /app/dev/clean2.out 2> /app/dev/clean2.log &
+[?2004l[2] 1488
+[?2004hroot@e65e3822b05e:/app# tail -15 /app/dev/conservative.log; cat /app/dev/clean2.out; cat /app/dev/clean2.log
+[?2004lresonances [(np.float64(0.002274725106800354), np.float64(4.5777409844066486e-07), 4), (np.float64(0.03339499110334846), np.float64(0.0035723515764860907), 5), (np.float64(0.0872300750228734), np.float64(1.688921321116197e-05), 9), (np.float64(0.20636141898392935), np.float64(0.002752965989536742), 10), (np.float64(0.32538714650050377), np.float64(0.017309602380607334), 11)]
+[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> import ast,pathlib
+[?2004l[?2004h> p=pathlib.Path('/app/output/transport.py');ast.parse(p.read_text());print('bytes',p.stat().st_size,'regular',p.is_file(),'symlink',p.is_symlink())
+[?2004l[?2004h> PY
+[?2004lbytes 12181 regular True symlink False
+[?2004hroot@e65e3822b05e:/app# tail -20 /app/dev/conservative.log; cat /app/dev/clean2.out; tail -10 /app/dev/clean2.log
+[?2004lresonances [(np.float64(0.002274725106800354), np.float64(4.5777409844066486e-07), 4), (np.float64(0.03339499110334846), np.float64(0.0035723515764860907), 5), (np.float64(0.0872300750228734), np.float64(1.688921321116197e-05), 9), (np.float64(0.20636141898392935), np.float64(0.002752965989536742), 10), (np.float64(0.32538714650050377), np.float64(0.017309602380607334), 11)]
+[2]+  Done                    cd /app/dev/clean && python3 transport.py oH2 HD 0.15 1.2 0.65 0.25 > /app/dev/clean2.out 2> /app/dev/clean2.log
+{"viscosity":0.03054684463816921,"thermal_conductivity":0.09821534734886457,"binary_diffusion":0.032569913176921976,"thermal_diffusion_factor":0.04340388020245243}
+[?2004hroot@e65e3822b05e:/app# tail -25 /app/dev/conservative.log
+[?2004lresonances [(np.float64(0.002274725106800354), np.float64(4.5777409844066486e-07), 4), (np.float64(0.03339499110334846), np.float64(0.0035723515764860907), 5), (np.float64(0.0872300750228734), np.float64(1.688921321116197e-05), 9), (np.float64(0.20636141898392935), np.float64(0.002752965989536742), 10), (np.float64(0.32538714650050377), np.float64(0.017309602380607334), 11)]
+quad 0 63 3024 3.5602606462958875e-07 remain 6
+quad 1 12 3408 1.636005098060167e-07 remain 3
+quad 2 6 3600 9.238906983899398e-08 remain 3
+quad 3 6 3792 4.53666412769671e-08 remain 3
+quad 4 6 3984 3.1672209299671295e-10 remain 0
+integrated 0.75 81.19705000892282
+[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> import time
+[?2004l[?2004h> try:
+[?2004l[?2004h>  a=open('/proc/1485/stat').read().split();print('elapsed',time.monotonic()-int(a[21])/100,'CPU',(int(a[13])+int(a[14]))/100)
+[?2004l[?2004h> except:pass
+[?2004l[?2004h> PY
+[?2004lelapsed 83.47232602536678 CPU 83.18
+[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/dev/driver.py';s=open(p).read().replace('   Q[chunk]=q;self.calls+=len(chunk)','   for j,kind in enumerate(self.kind):\n    if kind!=0:q[:,j,1::2]=0\n   Q[chunk]=q;self.calls+=len(chunk)');s=s.replace(' return vals[-1],mom',''' if Nmax==18:
+[?2004l[?2004h>   scale=np.maximum(abs(vals[-1]),np.array([1e-12,1e-12,1e-12,.05]))
+[?2004l[?2004h>   change=np.max(abs(vals[-1]-vals[-3])/scale)
+[?2004l[?2004h>   if change>2e-6:
+[?2004l[?2004h>    return compute(s1,s2,a,L,x,T,24)
+[?2004l[?2004h>  return vals[-1],mom''');open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@e65e3822b05e:/app# python3 /app/dev/build.py
+[?2004l[?2004hroot@e65e3822b05e:/app# tail -20 /app/dev/conservative.log
+[?2004lresonances [(np.float64(0.002274725106800354), np.float64(4.5777409844066486e-07), 4), (np.float64(0.03339499110334846), np.float64(0.0035723515764860907), 5), (np.float64(0.0872300750228734), np.float64(1.688921321116197e-05), 9), (np.float64(0.20636141898392935), np.float64(0.002752965989536742), 10), (np.float64(0.32538714650050377), np.float64(0.017309602380607334), 11)]
+quad 0 63 3024 3.5602606462958875e-07 remain 6
+quad 1 12 3408 1.636005098060167e-07 remain 3
+quad 2 6 3600 9.238906983899398e-08 remain 3
+quad 3 6 3792 4.53666412769671e-08 remain 3
+quad 4 6 3984 3.1672209299671295e-10 remain 0
+integrated 0.75 81.19705000892282
+resonances [(np.float64(0.015239496103924534), np.float64(2.0751535128645506e-05), 6), (np.float64(0.05323242311957792), np.float64(0.002972734106148273), 7), (np.float64(0.005187982589453792), np.float64(3.630309386990002e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348832227858814e-05), 11), (np.float64(0.22542914471216208), np.float64(0.0016751480480738685), 12), (np.float64(0.33435890564194926), np.float64(0.012836898464520193), 13), (np.float64(0.4433015257100826), np.float64(0.03550014750426452), 14)]
+[?2004hroot@e65e3822b05e:/app# cp /app/output/transport.py /app/dev/clean/transport.py
+[?2004l[?2004hroot@e65e3822b05e:/app# cd /app/dev/clean && python3 transport.py pH2 oH2 0.35 2 0.35 0.4 > /app/dev/final3.out 2> /app/dev/final3.log &
+[?2004l[2] 1597
+[?2004hroot@e65e3822b05e:/app# tail -20 /app/dev/conservative.log
+[?2004lresonances [(np.float64(0.002274725106800354), np.float64(4.5777409844066486e-07), 4), (np.float64(0.03339499110334846), np.float64(0.0035723515764860907), 5), (np.float64(0.0872300750228734), np.float64(1.688921321116197e-05), 9), (np.float64(0.20636141898392935), np.float64(0.002752965989536742), 10), (np.float64(0.32538714650050377), np.float64(0.017309602380607334), 11)]
+quad 0 63 3024 3.5602606462958875e-07 remain 6
+quad 1 12 3408 1.636005098060167e-07 remain 3
+quad 2 6 3600 9.238906983899398e-08 remain 3
+quad 3 6 3792 4.53666412769671e-08 remain 3
+quad 4 6 3984 3.1672209299671295e-10 remain 0
+integrated 0.75 81.19705000892282
+resonances [(np.float64(0.015239496103924534), np.float64(2.0751535128645506e-05), 6), (np.float64(0.05323242311957792), np.float64(0.002972734106148273), 7), (np.float64(0.005187982589453792), np.float64(3.630309386990002e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348832227858814e-05), 11), (np.float64(0.22542914471216208), np.float64(0.0016751480480738685), 12), (np.float64(0.33435890564194926), np.float64(0.012836898464520193), 13), (np.float64(0.4433015257100826), np.float64(0.03550014750426452), 14)]
+[?2004hroot@e65e3822b05e:/app# tail -25 /app/dev/conservative.log; cat /app/dev/final3.out; cat /app/dev/final3.log
+[?2004lresonances [(np.float64(0.002274725106800354), np.float64(4.5777409844066486e-07), 4), (np.float64(0.03339499110334846), np.float64(0.0035723515764860907), 5), (np.float64(0.0872300750228734), np.float64(1.688921321116197e-05), 9), (np.float64(0.20636141898392935), np.float64(0.002752965989536742), 10), (np.float64(0.32538714650050377), np.float64(0.017309602380607334), 11)]
+quad 0 63 3024 3.5602606462958875e-07 remain 6
+quad 1 12 3408 1.636005098060167e-07 remain 3
+quad 2 6 3600 9.238906983899398e-08 remain 3
+quad 3 6 3792 4.53666412769671e-08 remain 3
+quad 4 6 3984 3.1672209299671295e-10 remain 0
+integrated 0.75 81.19705000892282
+resonances [(np.float64(0.015239496103924534), np.float64(2.0751535128645506e-05), 6), (np.float64(0.05323242311957792), np.float64(0.002972734106148273), 7), (np.float64(0.005187982589453792), np.float64(3.630309386990002e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348832227858814e-05), 11), (np.float64(0.22542914471216208), np.float64(0.0016751480480738685), 12), (np.float64(0.33435890564194926), np.float64(0.012836898464520193), 13), (np.float64(0.4433015257100826), np.float64(0.03550014750426452), 14)]
+[2]+  Done                    cd /app/dev/clean && python3 transport.py pH2 oH2 0.35 2 0.35 0.4 > /app/dev/final3.out 2> /app/dev/final3.log
+{"viscosity":0.09651668604013564,"thermal_conductivity":0.36409442587207774,"binary_diffusion":0.12882203214014587,"thermal_diffusion_factor":0.0009012427096776346}
+[?2004hroot@e65e3822b05e:/app# tail -25 /app/dev/conservative.log
+[?2004lresonances [(np.float64(0.002274725106800354), np.float64(4.5777409844066486e-07), 4), (np.float64(0.03339499110334846), np.float64(0.0035723515764860907), 5), (np.float64(0.0872300750228734), np.float64(1.688921321116197e-05), 9), (np.float64(0.20636141898392935), np.float64(0.002752965989536742), 10), (np.float64(0.32538714650050377), np.float64(0.017309602380607334), 11)]
+quad 0 63 3024 3.5602606462958875e-07 remain 6
+quad 1 12 3408 1.636005098060167e-07 remain 3
+quad 2 6 3600 9.238906983899398e-08 remain 3
+quad 3 6 3792 4.53666412769671e-08 remain 3
+quad 4 6 3984 3.1672209299671295e-10 remain 0
+integrated 0.75 81.19705000892282
+resonances [(np.float64(0.015239496103924534), np.float64(2.0751535128645506e-05), 6), (np.float64(0.05323242311957792), np.float64(0.002972734106148273), 7), (np.float64(0.005187982589453792), np.float64(3.630309386990002e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348832227858814e-05), 11), (np.float64(0.22542914471216208), np.float64(0.0016751480480738685), 12), (np.float64(0.33435890564194926), np.float64(0.012836898464520193), 13), (np.float64(0.4433015257100826), np.float64(0.03550014750426452), 14)]
+quad 0 71 3408 3.1816380907656594e-07 remain 6
+[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> import time
+[?2004l[?2004h> try:
+[?2004l[?2004h>  a=open('/proc/1485/stat').read().split();print('elapsed',time.monotonic()-int(a[21])/100,'CPU',(int(a[13])+int(a[14]))/100)
+[?2004l[?2004h> except:pass
+[?2004l[?2004h> PY
+[?2004lelapsed 189.97819332405925 CPU 189.5
+[?2004hroot@e65e3822b05e:/app# python3 - <<'PY'
+[?2004l[?2004h> import ast,json,pathlib
+[?2004l[?2004h> p=pathlib.Path('/app/output/transport.py');s=p.read_text();ast.parse(s)
+[?2004l[?2004h> assert '/app/dev' not in s
+[?2004l[?2004h> for name in ['final3','clean2']:
+[?2004l[?2004h>  text=pathlib.Path('/app/dev/'+name+'.out').read_text();obj=json.loads(text)
+[?2004l[?2004h>  assert set(obj)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+[?2004l[?2004h>  assert all(type(v) in (int,float) for v in obj.values())
+[?2004l[?2004h>  print(name,'valid JSON',len(text),'bytes')
+[?2004l[?2004h> print('transport.py',p.stat().st_size,'bytes')
+[?2004l[?2004h> PY
+[?2004lfinal3 valid JSON 165 bytes
+clean2 valid JSON 164 bytes
+transport.py 12431 bytes
+[?2004hroot@e65e3822b05e:/app# tail -25 /app/dev/conservative.log
+[?2004lresonances [(np.float64(0.002274725106800354), np.float64(4.5777409844066486e-07), 4), (np.float64(0.03339499110334846), np.float64(0.0035723515764860907), 5), (np.float64(0.0872300750228734), np.float64(1.688921321116197e-05), 9), (np.float64(0.20636141898392935), np.float64(0.002752965989536742), 10), (np.float64(0.32538714650050377), np.float64(0.017309602380607334), 11)]
+quad 0 63 3024 3.5602606462958875e-07 remain 6
+quad 1 12 3408 1.636005098060167e-07 remain 3
+quad 2 6 3600 9.238906983899398e-08 remain 3
+quad 3 6 3792 4.53666412769671e-08 remain 3
+quad 4 6 3984 3.1672209299671295e-10 remain 0
+integrated 0.75 81.19705000892282
+resonances [(np.float64(0.015239496103924534), np.float64(2.0751535128645506e-05), 6), (np.float64(0.05323242311957792), np.float64(0.002972734106148273), 7), (np.float64(0.005187982589453792), np.float64(3.630309386990002e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348832227858814e-05), 11), (np.float64(0.22542914471216208), np.float64(0.0016751480480738685), 12), (np.float64(0.33435890564194926), np.float64(0.012836898464520193), 13), (np.float64(0.4433015257100826), np.float64(0.03550014750426452), 14)]
+quad 0 71 3408 3.1816380907656594e-07 remain 6
+quad 1 12 3792 2.475683418268204e-07 remain 8
+quad 2 16 4304 9.013085577880275e-08 remain 7
+quad 3 14 4752 4.9101629262526814e-08 remain 2
+quad 4 4 4880 1.889851863889902e-08 remain 0
+integrated 1.0 203.74825506983325
+resonances [(np.float64(0.011239148624076215), np.float64(3.940423154249792e-05), 5), (np.float64(0.04610438073388724), np.float64(0.004132435230532924), 6), (np.float64(0.1121941343822612), np.float64(3.615064904668386e-05), 10), (np.float64(0.22773262192954868), np.float64(0.002959553797344509), 11), (np.float64(0.3417933224991611), np.float64(0.01733515046970489), 12)]
+[?2004hroot@e65e3822b05e:/app# tail -30 /app/dev/conservative.log; cat /app/dev/conservative.out
+[?2004lintegrated 0.75 81.19705000892282
+resonances [(np.float64(0.015239496103924534), np.float64(2.0751535128645506e-05), 6), (np.float64(0.05323242311957792), np.float64(0.002972734106148273), 7), (np.float64(0.005187982589453792), np.float64(3.630309386990002e-18), 10), (np.float64(0.11403012783386927), np.float64(1.3348832227858814e-05), 11), (np.float64(0.22542914471216208), np.float64(0.0016751480480738685), 12), (np.float64(0.33435890564194926), np.float64(0.012836898464520193), 13), (np.float64(0.4433015257100826), np.float64(0.03550014750426452), 14)]
+quad 0 71 3408 3.1816380907656594e-07 remain 6
+quad 1 12 3792 2.475683418268204e-07 remain 8
+quad 2 16 4304 9.013085577880275e-08 remain 7
+quad 3 14 4752 4.9101629262526814e-08 remain 2
+quad 4 4 4880 1.889851863889902e-08 remain 0
+integrated 1.0 203.74825506983325
+resonances [(np.float64(0.011239148624076215), np.float64(3.940423154249792e-05), 5), (np.float64(0.04610438073388724), np.float64(0.004132435230532924), 6), (np.float64(0.1121941343822612), np.float64(3.615064904668386e-05), 10), (np.float64(0.22773262192954868), np.float64(0.002959553797344509), 11), (np.float64(0.3417933224991611), np.float64(0.01733515046970489), 12)]
+quad 0 63 3024 3.594542201668105e-07 remain 5
+quad 1 10 3344 9.88835662241172e-08 remain 5
+quad 2 10 3664 4.401529574149521e-08 remain 1
+quad 3 2 3728 3.5269905884760533e-09 remain 0
+integrated 0.8571428571428571 292.6756937727332
+N 3 [0.08099931 0.19931815 0.06685247 0.01291382] elapsed 292.69813156081364
+N 4 [0.08100027 0.19931816 0.06685263 0.01291433] elapsed 292.7346942159347
+N 5 [0.08100057 0.19932479 0.06685271 0.01288848] elapsed 292.7825441197492
+N 6 [0.08100062 0.19932749 0.06685273 0.01287857] elapsed 292.839806095697
+N 7 [0.08100063 0.19932808 0.06685273 0.01287615] elapsed 292.89485113183036
+N 8 [0.08100063 0.1993282  0.06685273 0.0128756 ] elapsed 292.9644900429994
+N 9 [0.08100064 0.19932823 0.06685273 0.01287545] elapsed 293.0376986670308
+N 10 [0.08100064 0.19932824 0.06685273 0.0128754 ] elapsed 293.1309991138987
+N 11 [0.08100064 0.19932824 0.06685273 0.01287538] elapsed 293.2458258238621
+N 12 [0.08100064 0.19932824 0.06685273 0.01287538] elapsed 293.3840158949606
+N 13 [0.08100064 0.19932824 0.06685273 0.01287538] elapsed 293.5332293766551
+N 14 [0.08100064 0.19932825 0.06685273 0.01287537] elapsed 293.7318257689476
+N 15 [0.08100064 0.19932825 0.06685273 0.01287537] elapsed 293.9650184116326
+N 16 [0.08100064 0.19932825 0.06685273 0.01287537] elapsed 294.2674842476845
+N 17 [0.08100064 0.19932825 0.06685273 0.01287537] elapsed 294.6325823958032
+N 18 [0.08100064 0.19932825 0.06685273 0.01287537] elapsed 295.1308814310469
+[1]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/dev/driver.py HD pD2 0 0.8 0.95 0.6 18 > /app/dev/conservative.out 2> /app/dev/conservative.log
+[0.08100064 0.19932825 0.06685273 0.01287537]
+[?2004hroot@e65e3822b05e:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+[?2004l[?2004h> import numpy as np, pathlib, ast, stat
+[?2004l[?2004h> old=np.load('/app/dev/worst16_fast.npz')['val'];new=np.load('/app/dev/last.npz')['val']
+[?2004l[?2004h> print('refinement relative differences',abs(new-old)/abs(new))
+[?2004l[?2004h> p=pathlib.Path('/app/output/transport.py');ast.parse(p.read_text());assert stat.S_ISREG(p.stat().st_mode) and not p.is_symlink();assert p.stat().st_size<=20971520
+[?2004l[?2004h> print('final file:',p,'size:',p.stat().st_size)
+[?2004l[?2004h> PY
+[?2004lrefinement relative differences [8.95433792e-09 8.98495327e-09 1.84344920e-09 3.28657025e-08]
+final file: /app/output/transport.py size: 12431
+[?2004hroot@e65e3822b05e:/app# rm -rf /app/output/__pycache__
+[?2004l[?2004hroot@e65e3822b05e:/app# ls -la /app/output
+[?2004ltotal 28
+drwxr-xr-x 1 root root  4096 Nov  5 06:18 .
+drwxr-xr-x 1 root root  4096 Nov  5 05:50 ..
+-rw-r--r-- 1 root root 12431 Nov  5 06:21 transport.py
+[?2004hroot@e65e3822b05e:/app# 

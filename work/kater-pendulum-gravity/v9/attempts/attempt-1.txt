@@ -1,0 +1,642 @@
+#### step 2 19:37:10
+MSG: Analysis: The terminal is at /app. No data have been inspected yet; the setup and file formats need to be understood before reducing the pendulum measurements.
+Plan: Read the lab notes, list the data files, and inspect the first rows of a run and its clock-check log.
+CMD: cat /app/data/NOTES.md
+
+CMD: find /app/data -type f -maxdepth 3 -printf '%p %s bytes\n'
+
+CMD: head -12 /app/data/runs/a1.csv; head -12 /app/data/sync/a1.csv
+
+OBS: 3.csv 970 bytes
+root@18f95210cdfe:/app# head -12 /app/data/runs/a1.csv; head -12 /app/data/sync/a1.csv
+# run: a1
+# tracker: pendulum-track 1.8
+# unit: deg
+# nominal_fps: 240
+frame_counter,theta,tracker_ok
+12040,33.24750,1
+12041,33.25272,1
+12042,33.26060,1
+12043,33.27328,1
+12044,33.25931,1
+12045,33.26232,1
+12046,33.26188,1
+gps_s,frame_counter
+41874,12192
+41875,12433
+41876,12674
+41878,13155
+41879,13396
+41880,13637
+41881,13877
+41882,14118
+41883,14359
+41885,14840
+41886,15081
+root@18f95210cdfe:/app#
+
+
+#### step 3 19:37:34
+MSG: Analysis: The logs contain projected camera angles, not true swing angles, and hardware frame counters need calibration against GPS. The common camera view can be modeled as a projective mapping of the true bar angle. Damping and finite-amplitude effects also need to be included to recover infinitesimal, undamped periods.
+Plan: Inspect all run metadata and clock checks, then use Python/SciPy to summarize counter continuity, durations, angle ranges, and GPS-calibrated frame rates. This will guide a joint physical fit across the six runs.
+CMD: for f in /app/data/runs/*.csv; do head -7 "$f"; tail -2 "$f"; done; cat /app/data/sync/a1.csv
+
+CMD: python3 - <<'PY'
+import numpy as np, scipy
+from pathlib import Path
+print('scipy',scipy.__version__)
+for p in sorted(Path('/app/data/runs').glob('*.csv')):
+ d=np.genfromtxt(p,delimiter=',',comments='#',names=True)
+ s=np.genfromtxt('/app/data/sync/'+p.name,delimiter=',',names=True)
+ f=np.unwrap(d['frame_counter']*2*np.pi/65536)*65536/(2*np.pi)
+ sf=np.unwrap(s['frame_counter']*2*np.pi/65536)*65536/(2*np.pi)
+ z=np.polyfit(s['gps_s']-s['gps_s'][0],sf,1)
+ r=sf-np.polyval(z,s['gps_s']-s['gps_s'][0])
+ print(p.stem,len(d),'frame diff',np.unique(np.round(np.diff(f)),return_counts=True),'ok',np.mean(d['tracker_ok']),'theta range',d['theta'].min(),d['theta'].max(),'fps',z[0],'sync residual',r.min(),r.max(),'duration',(f[-1]-f[0])/z[0])
+PY
+
+OBS: 36)*65536/(2*np.pi)
+>  z=np.polyfit(s['gps_s']-s['gps_s'][0],sf,1)
+>  r=sf-np.polyval(z,s['gps_s']-s['gps_s'][0])
+>  print(p.stem,len(d),'frame diff',np.unique(np.round(np.diff(f)),return_counts=True),'ok',np.mean(d['tracker_ok']),'theta range',d['theta'].min(),d['theta'].m
+ax(),'fps',z[0],'sync residual',r.min(),r.max(),'duration',(f[-1]-f[0])/z[0])
+> PY
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+ModuleNotFoundError: No module named 'scipy'
+root@18f95210cdfe:/app#
+
+
+#### step 4 19:38:01
+MSG: Analysis: The A logs use degrees and the B logs radians. Some counters wrap around 65536. SciPy is not installed, so numerical fitting dependencies must be added before proceeding.
+Plan: Install NumPy and SciPy, then rerun the data summary with integer counter unwrapping and linear GPS calibration.
+CMD: pip install numpy scipy matplotlib
+
+CMD: cat > /app/inspect_data.py <<'PY'
+import numpy as np
+from pathlib import Path
+
+def unwrap(f):
+ return np.r_[f[0], f[0]+np.cumsum(np.diff(f).astype(int)%65536)]
+for p in sorted(Path('/app/data/runs').glob('*.csv')):
+ d=np.genfromtxt(p,delimiter=',',skip_header=4,names=True)
+ s=np.genfromtxt('/app/data/sync/'+p.name,delimiter=',',names=True)
+ f=unwrap(d['frame_counter']); sf=unwrap(s['frame_counter'])
+ z=np.polyfit(s['gps_s']-s['gps_s'][0],sf,1)
+ r=sf-np.polyval(z,s['gps_s']-s['gps_s'][0])
+ print(p.stem,len(d),'frame diff',np.unique(np.diff(f),return_counts=True),'ok',np.mean(d['tracker_ok']),'theta range',d['theta'].min(),d['theta'].max(),'fps',z[0],'sync residual',r.min(),r.max(),'duration',(f[-1]-f[0])/z[0])
+PY
+python3 /app/inspect_data.py
+
+OBS: 42265629467875
+3.530499100505949 duration 90.00012179780077
+b2 21637 frame diff (array([1.]), array([21636])) ok 0.9574802421777511 theta range -0.3477358 0.4086706 fps 240.41068967103433 sync residual -2.039483276836108
+4 2.2460340914403787 duration 89.99599822123382
+b3 21484 frame diff (array([1.]), array([21483])) ok 0.9608080431949357 theta range -0.5323489 0.6324293 fps 238.66716286905444 sync residual -5.444348330449429
+ 5.224303145776503 duration 90.01238269123232
+root@18f95210cdfe:/app#
+
+
+#### step 5 19:38:44
+MSG: Analysis: Each run lasts about 90 seconds and has continuous frame counters, including wraps. Roughly 4% of tracker samples are invalid and must be excluded. Several clock checks deviate from a constant frame rate by multiple frames, so a drifting-clock calibration is necessary rather than nominal FPS or a simple linear fit.
+Plan: Fit low-order clock polynomials and inspect residuals. Prepare calibrated data, estimate initial release times and periods, and develop a physical trajectory fit with a common three-parameter orthographic angle projection and per-run damping.
+CMD: cat > /app/prep.py <<'PY'
+import numpy as np
+from scipy.signal import find_peaks, savgol_filter
+from pathlib import Path
+
+def unwrap(f):
+ return np.r_[f[0], f[0]+np.cumsum(np.diff(f).astype(int)%65536)]
+data=[]
+for p in sorted(Path('/app/data/runs').glob('*.csv')):
+ name=p.stem
+ d=np.genfromtxt(p,delimiter=',',skip_header=4,names=True)
+ s=np.genfromtxt('/app/data/sync/'+p.name,delimiter=',',names=True)
+ f=unwrap(d['frame_counter']); sf=unwrap(s['frame_counter']); x=s['gps_s']-s['gps_s'][0]
+ print(name,'clock polynomial residual rms/max:')
+ for deg in range(1,5):
+  z=np.polyfit(x,sf,deg); r=sf-np.polyval(z,x)
+  print(deg,np.sqrt(np.mean(r*r)),np.max(np.abs(r)),z)
+ z=np.polyfit(x,sf,2)
+ # invert clock mapping using Newton iterations
+ t=(f-z[-1])/z[-2]
+ for _ in range(5): t-=(np.polyval(z,t)-f)/np.polyval(np.polyder(z),t)
+ t-=t[0]
+ y=d['theta']*(np.pi/180 if name[0]=='a' else 1)
+ ok=d['tracker_ok']==1
+ sm=savgol_filter(np.interp(t,t[ok],y[ok]),61,3)
+ peak,_=find_peaks(sm,distance=350,prominence=.02)
+ trough,_=find_peaks(-sm,distance=350,prominence=.02)
+ print('initial image angle',np.median(y[:100]),'peaks',list(zip(t[peak[:4]],sm[peak[:4]])),'troughs',list(zip(t[trough[:4]],sm[trough[:4]])))
+ print('period first/last',np.diff(t[peak])[:3],np.diff(t[peak])[-3:])
+ data.append(dict(name=name,t=t,y=y,ok=ok,clock=z,peak=peak,trough=trough))
+np.save('/app/prepared.npy',data,allow_pickle=True)
+PY
+python3 /app/prep.py
+
+OBS: find_peaks(sm,distance=350,prominence=.02)
+>  trough,_=find_peaks(-sm,distance=350,prominence=.02)
+>  print('initial image angle',np.median(y[:100]),'peaks',list(zip(t[peak[:4]],sm[peak[:4]])),'troughs',list(zip(t[trough[:4]],sm[trough[:4]])))
+>  print('period first/last',np.diff(t[peak])[:3],np.diff(t[peak])[-3:])
+>  data.append(dict(name=name,t=t,y=y,ok=ok,clock=z,peak=peak,trough=trough))
+> np.save('/app/prepared.npy',data,allow_pickle=True)
+> PY
+root@18f95210cdfe:/app# python3 /app/prep.py
+
+
+
+#### step 6 19:38:51
+MSG: Analysis: The preparation script is still running; its output will determine the clock model and initial trajectory guesses.
+Plan: Wait briefly for the data summaries.
+CMD: 
+OBS: 37192461506), np.float64(0.5642256452559671)), (np.float64(8.380223547518435), np.float64(0.5350056461542976))] troughs [(np.float64(3.
+3814292914813464), np.float64(-0.5026977758941062)), (np.float64(5.38011219770761), np.float64(-0.4765927847140161)), (np.float64(7.3243195395681315), np.float6
+4(-0.4270641455614596)), (np.float64(9.377465120612166), np.float64(-0.4301720954061389))]
+period first/last [2.00287518 2.00706097 1.99448636] [1.96499313 1.96917872 1.95660536]
+root@18f95210cdfe:/app#
+
+
+#### step 7 19:39:49
+MSG: Analysis: Clock deviations are not well described by quadratic drift alone. The trajectories show clear amplitude decay and amplitude-dependent periods (about 1.82 s for A and 1.96 s for B at low amplitude). A flexible GPS clock interpolation and a nonlinear pendulum model are needed. The shared view can be represented by an angle offset plus a two-parameter projective distortion.
+Plan: Build a smoothing-spline GPS clock calibration. Use smoothed angle derivatives to obtain initial estimates of the camera projection, natural frequencies, and linear/quadratic/friction damping coefficients before refining against full trajectories.
+CMD: cat > /app/initial_fit.py <<'PY'
+import numpy as np
+from scipy.interpolate import UnivariateSpline
+from scipy.signal import savgol_filter
+from scipy.optimize import least_squares
+from pathlib import Path
+
+names=['a1','a2','a3','b1','b2','b3']
+def unwrap(f): return np.r_[f[0],f[0]+np.cumsum(np.diff(f).astype(int)%65536)]
+data=[]
+for name in names:
+ d=np.genfromtxt('/app/data/runs/'+name+'.csv',delimiter=',',skip_header=4,names=True)
+ sy=np.genfromtxt('/app/data/sync/'+name+'.csv',delimiter=',',names=True)
+ f=unwrap(d['frame_counter']); sf=unwrap(sy['frame_counter']); gps=sy['gps_s']-sy['gps_s'][0]
+ # fit modest smoothing in counter units, excluding quantization noise
+ lin=np.polyfit(gps,sf,1)
+ sp=UnivariateSpline(gps,sf-np.polyval(lin,gps),s=len(gps)*.29**2)
+ tt=(f-lin[1])/lin[0]
+ for _ in range(5): tt-=(np.polyval(lin,tt)+sp(tt)-f)/(lin[0]+sp.derivative()(tt))
+ tt-=tt[0]
+ y=d['theta']*(np.pi/180 if name[0]=='a' else 1); ok=d['tracker_ok']==1
+ # uniform true-time grid for derivative fitting
+ t=np.arange(0,tt[-1],1/240)
+ yi=np.interp(t,tt[ok],y[ok]); yy=[savgol_filter(yi,101,7,deriv=j,delta=1/240) for j in range(3)]
+ mask=(t>1.7)&(t<t[-1]-.4)
+ idx=np.where(mask)[0][::12]
+ data.append(dict(name=name,t=tt,y=y,ok=ok,td=t[idx],yd=yy[0][idx],v=yy[1][idx],acc=yy[2][idx],gps=gps,sf=sf,frames=f,lin=lin))
+
+def deriv_transform(rho,S,H,y,v,acc):
+ z=y-rho; sn=np.sin(z); cs=np.cos(z); q=S*cs-H*sn
+ D=sn*sn+q*q
+ Dp=2*sn*cs+2*q*(-S*sn-H*cs)
+ th=np.arctan2(sn,q); hp=S/D; hpp=-S*Dp/D**2
+ return th,hp*v,hp*acc+hpp*v*v
+
+def fun(p,verbose=False):
+ rho,S,H=p[:3]; out=[]
+ for d in data:
+  th,v,acc=deriv_transform(rho,S,H,d['yd'],d['v'],d['acc'])
+  X=np.array([-np.sin(th),-v,-v*np.abs(v),-np.sign(v)]).T
+  coef=np.linalg.lstsq(X,acc,rcond=None)[0]
+  r=acc-X@coef; out.extend(r)
+  if verbose: print(d['name'],'T',2*np.pi/np.sqrt(coef[0]),'coefficients',coef,'rms',np.sqrt(np.mean(r*r)))
+ return np.array(out)
+r=least_squares(fun,[.02,1.,.1],bounds=([-.2,.3,-.8],[.2,2.,.8]),xtol=1e-11,ftol=1e-11,gtol=1e-11)
+print('camera',r.x,'cost',r.cost); fun(r.x,True)
+np.save('/app/data_fit.npy',data,allow_pickle=True); np.save('/app/camera_init.npy',r.x)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/initial_fit.py
+
+OBS: =None)[0]
+>   r=acc-X@coef; out.extend(r)
+>   if verbose: print(d['name'],'T',2*np.pi/np.sqrt(coef[0]),'coefficients',coef,'rms',np.sqrt(np.mean(r*r)))
+>  return np.array(out)
+> r=least_squares(fun,[.02,1.,.1],bounds=([-.2,.3,-.8],[.2,2.,.8]),xtol=1e-11,ftol=1e-11,gtol=1e-11)
+> print('camera',r.x,'cost',r.cost); fun(r.x,True)
+> np.save('/app/data_fit.npy',data,allow_pickle=True); np.save('/app/camera_init.npy',r.x)
+> PY
+root@18f95210cdfe:/app# OPENBLAS_NUM_THREADS=1 python3 /app/initial_fit.py
+
+
+
+#### step 8 19:40:06
+MSG: Analysis: The initial model is being computed. It treats the projection as tan(image angle − roll) = S sin(true angle)/(cos(true angle) + H sin(true angle)) and estimates damping from the equation of motion.
+Plan: Wait for the initial fit results before choosing the detailed trajectory model.
+CMD: 
+OBS: fficients [ 1.19453245e+01  5.20024096e-02 -7.37465213e-03 -5.76920220e-03] rms 0.1300122984868746
+b1 T 1.9704951862527125 coefficients [ 1.01673782e+01  6.51018629e-02 -3.56633994e-03 -1.14114196e-02] rms 0.28785894034171006
+b2 T 1.9640451829126018 coefficients [ 1.02342681e+01  6.29923117e-02 -9.18018228e-03 -1.00447131e-02] rms 0.12685476379553742
+b3 T 1.9669007568652517 coefficients [1.02045731e+01 5.86039159e-03 3.28155491e-02 6.64515821e-03] rms 0.31633678918453517
+root@18f95210cdfe:/app#
+
+
+#### step 9 19:41:15
+MSG: Analysis: The derivative fit provides useful starting values, but its residuals are too large for the required precision, partly because differentiating tracker data amplifies noise and tracking interruptions. A direct fit to the measured angles will be much more accurate.
+Plan: Install Numba for fast numerical integration, then jointly fit all six nonlinear damped trajectories, the common camera projection, and each run's release time and true release angle. Use a robust residual loss to limit the influence of tracker outliers.
+CMD: pip install numba
+
+CMD: cat > /app/trajectory.py <<'PY'
+import numpy as np
+from numba import njit
+from scipy.optimize import least_squares
+import time
+
+@njit
+def integrate(t,w,c1,c2,c0,A,tr):
+ h=.004
+ n=int((t[-1]-tr)/h)+3
+ th=np.empty(n); vel=np.empty(n); th[0]=A; vel[0]=0.
+ for i in range(1,n):
+  x=th[i-1]; v=vel[i-1]
+  k1=-w*np.sin(x)-c1*v-c2*v*abs(v)-c0*np.sign(v)
+  x2=x+h*v/2; v2=v+h*k1/2
+  k2=-w*np.sin(x2)-c1*v2-c2*v2*abs(v2)-c0*np.sign(v2)
+  x3=x+h*v2/2; v3=v+h*k2/2
+  k3=-w*np.sin(x3)-c1*v3-c2*v3*abs(v3)-c0*np.sign(v3)
+  x4=x+h*v3; v4=v+h*k3
+  k4=-w*np.sin(x4)-c1*v4-c2*v4*abs(v4)-c0*np.sign(v4)
+  th[i]=x+h*(v+2*v2+2*v3+v4)/6
+  vel[i]=v+h*(k1+2*k2+2*k3+k4)/6
+ out=np.empty(len(t))
+ for j in range(len(t)):
+  q=(t[j]-tr)/h
+  if q<=0: out[j]=A; continue
+  i=int(q); s=q-i
+  out[j]=(2*s**3-3*s*s+1)*th[i]+(s**3-2*s*s+s)*h*vel[i]+(-2*s**3+3*s*s)*th[i+1]+(s**3-s*s)*h*vel[i+1]
+ return out
+
+def project(th,cam):
+ rho,S,H=cam
+ return rho+np.arctan2(S*np.sin(th),np.cos(th)+H*np.sin(th))
+
+data=np.load('/app/data_fit.npy',allow_pickle=True)
+sel=[np.where(d['ok'])[0][::8] for d in data]
+def fun(p):
+ out=[]
+ for j,d in enumerate(data):
+  w,c1,c2,A,tr=p[3+j*5:8+j*5]
+  idx=sel[j]
+  th=integrate(d['t'][idx],w,c1,c2,0.,A,tr)
+  out.append(project(th,p[:3])-d['y'][idx])
+ return np.concatenate(out)
+
+if __name__=='__main__':
+ import os
+ if os.path.exists('/app/fit.npy'): p=np.load('/app/fit.npy')
+ else:
+  cam=np.load('/app/camera_init.npy'); p=list(cam)
+  for j,d in enumerate(data):
+   y=np.median(d['y'][:100])-cam[0]
+   A=np.arctan2(np.sin(y),cam[1]*np.cos(y)-cam[2]*np.sin(y))
+   p.extend([(2*np.pi/(1.818 if j<3 else 1.962))**2,.025,.018,A,[.83,1.21,.67,1.09,.94,1.37][j]])
+ lo=[-.1,.4,-.6]+[8,-.1,-.1,-1.3,.4]*6
+ hi=[.1,1.8,.6]+[15,.2,.2,1.3,1.6]*6
+ start=time.time()
+ r=least_squares(fun,p,bounds=(lo,hi),loss='soft_l1',f_scale=.001,verbose=2,x_scale='jac',ftol=1e-10,xtol=1e-10,gtol=1e-10,max_nfev=150)
+ np.save('/app/fit.npy',r.x)
+ print('elapsed',time.time()-start,'cam',r.x[:3])
+ for j,d in enumerate(data):
+  q=r.x[3+5*j:8+5*j]; rr=fun(r.x)[sum(len(x) for x in sel[:j]):sum(len(x) for x in sel[:j+1])]
+  print(d['name'],q,'period',2*np.pi/np.sqrt(q[0]),'residual quantiles',np.quantile(rr,[.01,.1,.5,.9,.99]))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/trajectory.py > /app/trajectory.log 2>&1
+
+OBS: ,verbose=2,x_scale='jac',ftol=1e-10,xtol=1e-10,gtol=1e-10,max_nfev=150)
+>  np.save('/app/fit.npy',r.x)
+>  print('elapsed',time.time()-start,'cam',r.x[:3])
+>  for j,d in enumerate(data):
+>   q=r.x[3+5*j:8+5*j]; rr=fun(r.x)[sum(len(x) for x in sel[:j]):sum(len(x) for x in sel[:j+1])]
+>   print(d['name'],q,'period',2*np.pi/np.sqrt(q[0]),'residual quantiles',np.quantile(rr,[.01,.1,.5,.9,.99]))
+> PY
+root@18f95210cdfe:/app# OPENBLAS_NUM_THREADS=1 python3 /app/trajectory.py > /app/trajectory.log 2>&1
+
+
+
+#### step 10 19:41:26
+MSG: Analysis: The direct trajectory optimization is running. Its residuals will indicate whether the assumed damping law and clock interpolation are adequate.
+Plan: Check optimizer progress and inspect clock residual patterns for evidence of structured oscillator drift.
+CMD: tail -20 /app/trajectory.log
+
+CMD: python3 - <<'PY'
+import numpy as np
+D=np.load('/app/data_fit.npy',allow_pickle=True)
+for d in D:
+ r=d['sf']-np.polyval(d['lin'],d['gps'])
+ print(d['name'],list(zip(d['gps'][::3],np.round(r[::3],2))))
+PY
+
+OBS: t64(-4.11)), (np.float64(50.0), np.floa
+t64(-3.12)), (np.float64(53.0), np.float64(-3.12)), (np.float64(56.0), np.float64(-2.12)), (np.float64(59.0), np.float64(-1.12)), (np.float64(62.0), np.float64(
+-1.12)), (np.float64(65.0), np.float64(-0.12)), (np.float64(68.0), np.float64(0.88)), (np.float64(72.0), np.float64(1.21)), (np.float64(75.0), np.float64(2.2)),
+ (np.float64(79.0), np.float64(-0.46)), (np.float64(84.0), np.float64(0.2)), (np.float64(87.0), np.float64(1.2))]
+root@18f95210cdfe:/app#
+
+
+#### step 11 19:42:24
+MSG: Analysis: The full nonlinear fit is already consistent across all runs: A periods are about 1.81630 s and B periods about 1.96177 s. It identifies nearly identical damping coefficients in all six runs and a common camera projection. The GPS residuals show abrupt integer-frame losses rather than smooth oscillator drift, so refining the clock calibration should further improve accuracy.
+Plan: Identify missing-delivery events from the clock logs, fit a constant frame cadence with integer counter offsets, and locate the corresponding discontinuities in the tracker trajectories. Then refit with that clock model and calculate gravity and radius of gyration from the two measured pivot distances.
+CMD: cat > /app/clock_refine.py <<'PY'
+import numpy as np
+from scipy.optimize import linprog
+from trajectory import data, integrate, project
+p=np.load('/app/fit.npy')
+for j,d in enumerate(data):
+ x=d['gps']; f=d['sf']; dx=np.diff(x); df=np.diff(f)
+ rate=np.median(df/dx)
+ jumps=np.where(df/dx < rate-1)[0]
+ loss=np.round(rate*dx[jumps]-df[jumps]).astype(int)
+ offsets=np.zeros(len(x))
+ for k,l in zip(jumps,loss): offsets[k+1:]+=l
+ coeff=np.polyfit(x,f+offsets,1)
+ # GPS first observed frame imposes counter-1 < continuous frame phase <= counter
+ # Find exact feasible cadence bounds consistent with all quantized LED checks
+ X=np.column_stack((x,np.ones(len(x))))
+ b=f+offsets
+ R=[]
+ for c in ([1,0],[-1,0]):
+  r=linprog(c,A_ub=np.r_[X,-X],b_ub=np.r_[b,-b+1],bounds=[(None,None),(None,None)],method='highs')
+  R.append(r.x[0] if r.success else None)
+ print(d['name'],'OLS rate',coeff[0],'feasible rate bounds',R,'events',[(x[k],x[k+1],int(l)) for k,l in zip(jumps,loss)])
+ # Compare successive frames to expected increments to localize skipped deliveries
+ t=d['t']; y=d['y']; ok=d['ok']; cam=p[:3]
+ z=y-cam[0]; th=np.arctan2(np.sin(z),cam[1]*np.cos(z)-cam[2]*np.sin(z))
+ for k,l in zip(jumps,loss):
+  # frame brackets in same unwrap convention as run
+  sf=f.copy()
+  sf+=round((d['frames'][0]-sf[0])/65536)*65536
+  idx=np.where((d['frames']>sf[k])&(d['frames']<sf[k+1]))[0]
+  dt=np.diff(t); dy=np.diff(th)
+  q=p[3+j*5:8+j*5]
+  pred=integrate(t,q[0],q[1],q[2],0,q[3],q[4])
+  dp=np.diff(pred)
+  err=dy-dp
+  valid=ok[:-1]&ok[1:]
+  cand=idx[(idx<len(err))&valid[np.minimum(idx,len(err)-1)]]
+  best=cand[np.argsort(np.abs(err[cand]))[-4:]]
+  print('event candidates (index,time,image delta,true angle error)',[(int(v),round(t[v],4),round(y[v+1]-y[v],6),round(err[v],6)) for v in best])
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/clock_refine.py
+
+OBS: ort(np.abs(err[cand]))[-4:]]
+>   print('event candidates (index,time,image delta,true angle error)',[(int(v),round(t[v],4),round(y[v+1]-y[v],6),round(err[v],6)) for v in best])
+> PY
+root@18f95210cdfe:/app# OPENBLAS_NUM_THREADS=1 python3 /app/clock_refine.py
+a1 OLS rate 240.74349784098865 feasible rate bounds [np.float64(240.74285714285713), np.float64(240.74468085106383)] events []
+a2 OLS rate 239.40684908934884 feasible rate bounds [None, None] events [(np.float64(48.0), np.float64(49.0), 4)]
+
+
+
+#### step 12 19:42:51
+MSG: Analysis: The first cadence refinement found counter-delivery gaps, but rounding the median one-second frame count misestimated at least one gap size. The quantized GPS checks can determine both the integer number of lost deliveries and tight bounds on the true cadence.
+Plan: Search nearby integer gap sizes and retain those consistent with every GPS check. Use the resulting cadence and trajectory discontinuities to replace the smoothing-spline times.
+CMD: cat > /app/clock_exact.py <<'PY'
+import numpy as np
+from scipy.optimize import linprog
+from itertools import product
+from trajectory import data,integrate,project
+p=np.load('/app/fit.npy'); clocks=[]
+for j,d in enumerate(data):
+ x=d['gps']; f=d['sf']; dx=np.diff(x); df=np.diff(f)
+ rate=np.median(df/dx); jumps=np.where(df/dx < rate-1)[0]
+ loss=np.round(rate*dx[jumps]-df[jumps]).astype(int)
+ X=np.column_stack((x,np.ones(len(x))))
+ for ls in product(*[range(max(1,l-2),l+3) for l in loss]):
+  off=np.zeros(len(x))
+  for k,l in zip(jumps,ls): off[k+1:]+=l
+  b=f+off
+  r=linprog([1,0],A_ub=np.r_[X,-X],b_ub=np.r_[b,-b+1],bounds=[(None,None)]*2,method='highs')
+  if not r.success: continue
+  r2=linprog([-1,0],A_ub=np.r_[X,-X],b_ub=np.r_[b,-b+1],bounds=[(None,None)]*2,method='highs')
+  fps=(r.x[0]+r2.x[0])/2
+  print(d['name'],'fps',fps,'bounds',r.x[0],r2.x[0],'loss',ls,flush=True)
+  # candidate discontinuities by sudden trajectory residual changes across +/- 10 samples
+  q=p[3+j*5:8+j*5]; t=d['t']; y=d['y']; ok=d['ok']
+  pred=project(integrate(t,q[0],q[1],q[2],0,q[3],q[4]),p[:3]); err=y-pred
+  sf=f+round((d['frames'][0]-f[0])/65536)*65536
+  events=[]
+  for k,l in zip(jumps,ls):
+   idx=np.where((d['frames']>sf[k])&(d['frames']<sf[k+1]))[0]
+   contrasts=[]
+   for i in idx:
+    a=np.arange(max(0,i-12),i+1); a=a[ok[a]]
+    b=np.arange(i+1,min(len(y),i+14)); b=b[ok[b]]
+    contrasts.append(abs(np.median(err[a])-np.median(err[b])) if len(a)>3 and len(b)>3 else 0)
+   best=idx[np.argmax(contrasts)]
+   print('event',int(best),'time',t[best], 'contrast',max(contrasts),flush=True)
+   events.append((int(best),int(l),int(sf[k]-d['frames'][0]),int(sf[k+1]-d['frames'][0])))
+  clocks.append(dict(name=d['name'],fps=fps,events=events,bounds=[r.x[0],r2.x[0]]))
+  break
+np.save('/app/clocks.npy',clocks,allow_pickle=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/clock_exact.py
+
+OBS: x(contrasts)]
+>    print('event',int(best),'time',t[best], 'contrast',max(contrasts),flush=True)
+>    events.append((int(best),int(l),int(sf[k]-d['frames'][0]),int(sf[k+1]-d['frames'][0])))
+>   clocks.append(dict(name=d['name'],fps=fps,events=events,bounds=[r.x[0],r2.x[0]]))
+>   break
+> np.save('/app/clocks.npy',clocks,allow_pickle=True)
+> PY
+root@18f95210cdfe:/app# OPENBLAS_NUM_THREADS=1 python3 /app/clock_exact.py
+a1 fps 240.74376899696048 bounds 240.74285714285713 240.74468085106383 loss ()
+
+
+
+#### step 13 19:42:59
+MSG: Analysis: The clock constraints and discontinuity search are still running. The trajectory fit suggests the damping law is correctly identified; the remaining refinement is predominantly timing.
+Plan: Wait for the exact cadence and event estimates.
+CMD: 
+OBS: 2 bounds 239.135593220339 239.13698630136986 loss (7,)
+event 5461 time 22.850770149179446 contrast 0.033991002062045916
+b2 fps 240.45534290271132 bounds 240.45454545454547 240.4561403508772 loss (4,)
+event 17138 time 71.27973288294557 contrast 0.005754318326608127
+b3 fps 238.8716540837337 bounds 238.8709677419355 238.87234042553192 loss (11, 3)
+event 9510 time 39.84841882613225 contrast 0.022367426767240767
+event 18738 time 78.49577112815292 contrast 0.001787784090957159
+root@18f95210cdfe:/app#
+
+
+#### step 14 19:43:39
+MSG: Analysis: The GPS checks identify constant cadences with isolated missing-delivery events: 5 frames in a2, 3 and 9 in a3, 7 in b1, 4 in b2, and 11 and 3 in b3. Cadence uncertainty is only a few parts per million. Approximate event locations have been found from angle discontinuities.
+Plan: Replace the spline timing with cadence-plus-gap timing. Alternate full trajectory fits with event-boundary searches, minimizing robust angle residuals, until the event locations and physical parameters stabilize.
+CMD: cat > /app/refine_fit.py <<'PY'
+import numpy as np
+from scipy.optimize import least_squares
+import trajectory as tr
+D=tr.data; clocks=np.load('/app/clocks.npy',allow_pickle=True); p=np.load('/app/fit.npy')
+lo=[-.1,.4,-.6]+[8,-.1,-.1,-1.3,.4]*6
+hi=[.1,1.8,.6]+[15,.2,.2,1.3,1.6]*6
+
+def set_times():
+ for d,c in zip(D,clocks):
+  virtual=d['frames']-d['frames'][0]
+  for idx,l,_,_ in c['events']: virtual[idx+1:]+=l
+  d['t']=virtual/c['fps']
+
+for it in range(4):
+ set_times()
+ r=least_squares(tr.fun,p,bounds=(lo,hi),loss='soft_l1',f_scale=.0006,x_scale='jac',ftol=1e-11,xtol=1e-11,gtol=1e-10)
+ p=r.x
+ print('iteration',it,'cost',r.cost,'camera',p[:3],flush=True)
+ for j,(d,c) in enumerate(zip(D,clocks)):
+  q=p[3+j*5:8+j*5]
+  print(d['name'],'T',2*np.pi/np.sqrt(q[0]),'params',q[1:],flush=True)
+  for k,(idx,l,start,end) in enumerate(c['events']):
+   ids=np.arange(max(0,start),min(len(d['y']),end+1))
+   t=d['t'].copy(); t[idx+1:]-=l/c['fps']
+   pre=tr.project(tr.integrate(t,q[0],q[1],q[2],0,q[3],q[4]),p[:3])[ids]
+   post=tr.project(tr.integrate(t+l/c['fps'],q[0],q[1],q[2],0,q[3],q[4]),p[:3])[ids]
+   e1=pre-d['y'][ids]; e2=post-d['y'][ids]
+   a=.0006
+   loss1=2*a*a*(np.sqrt(1+(e1/a)**2)-1)*d['ok'][ids]
+   loss2=2*a*a*(np.sqrt(1+(e2/a)**2)-1)*d['ok'][ids]
+   score=np.cumsum(loss1)-np.cumsum(loss2)+np.sum(loss2)
+   best=int(ids[np.argmin(score)])
+   print('event',k,idx,'->',best,flush=True)
+   c['events'][k]=(best,l,start,end)
+np.save('/app/fit_exact.npy',p); np.save('/app/clocks_exact.npy',clocks,allow_pickle=True)
+set_times(); np.save('/app/data_exact.npy',D,allow_pickle=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/refine_fit.py > /app/refine.log 2>&1
+
+OBS: 
+>    loss2=2*a*a*(np.sqrt(1+(e2/a)**2)-1)*d['ok'][ids]
+>    score=np.cumsum(loss1)-np.cumsum(loss2)+np.sum(loss2)
+>    best=int(ids[np.argmin(score)])
+>    print('event',k,idx,'->',best,flush=True)
+>    c['events'][k]=(best,l,start,end)
+> np.save('/app/fit_exact.npy',p); np.save('/app/clocks_exact.npy',clocks,allow_pickle=True)
+> set_times(); np.save('/app/data_exact.npy',D,allow_pickle=True)
+> PY
+root@18f95210cdfe:/app# OPENBLAS_NUM_THREADS=1 python3 /app/refine_fit.py > /app/refine.log 2>&1
+
+
+
+#### step 15 19:43:58
+MSG: Analysis: The timing-corrected refinement is running. Once it stabilizes, the two undamped frequencies determine gravity and the centre-of-mass radius of gyration without assuming the reversible pendulum has exactly equal periods.
+Plan: Inspect the refined results and calculate provisional gravity and gyration radius using T² = 4π²(k²+h²)/(gh).
+CMD: tail -40 /app/refine.log
+
+CMD: python3 - <<'PY'
+import numpy as np,os
+f='/app/fit_exact.npy' if os.path.exists('/app/fit_exact.npy') else '/app/fit.npy'
+p=np.load(f); T=2*np.pi/np.sqrt(p[3::5]); a=.20011; b=1.00003-a
+Ta=np.mean(T[:3]); Tb=np.mean(T[3:]); g=4*np.pi**2*(a*a-b*b)/(a*Ta*Ta-b*Tb*Tb); k=np.sqrt(g*a*Ta*Ta/(4*np.pi**2)-a*a)
+print('source',f,'T',T,'g',g,'k',k,'angles',abs(p[6::5]))
+PY
+
+OBS: p/fit.npy'
+> p=np.load(f); T=2*np.pi/np.sqrt(p[3::5]); a=.20011; b=1.00003-a
+> Ta=np.mean(T[:3]); Tb=np.mean(T[3:]); g=4*np.pi**2*(a*a-b*b)/(a*Ta*Ta-b*Tb*Tb); k=np.sqrt(g*a*Ta*Ta/(4*np.pi**2)-a*a)
+> print('source',f,'T',T,'g',g,'k',k,'angles',abs(p[6::5]))
+> PY
+source /app/fit_exact.npy T [1.81629599 1.81629583 1.8162973  1.96176165 1.96177137 1.96176789] g 9.791841089074882 k 0.35170014689160434 angles [0.55371224 0.7
+8116032 0.31944724 0.84060459 0.4031141  0.61717246]
+root@18f95210cdfe:/app#
+
+
+#### step 16 19:44:33
+MSG: Analysis: The corrected-clock fits have stabilized, with nearly identical periods for all three runs at each pivot. Provisional results are g = 9.791841 m/s² and radius of gyration = 0.351700 m. The six fitted release angles range from about 0.31945 to 0.84060 rad. All missing-delivery boundaries are now stable.
+Plan: Perform a final fit using every valid tracker sample rather than every eighth sample. Compare the fitted release angles to the observed held-angle plateaus, then write and validate the required JSON file.
+CMD: cat > /app/final_reduce.py <<'PY'
+import numpy as np
+from scipy.optimize import least_squares
+import trajectory as tr
+import json
+from pathlib import Path
+tr.data=np.load('/app/data_exact.npy',allow_pickle=True)
+tr.sel=[np.where(d['ok'])[0] for d in tr.data]
+p=np.load('/app/fit_exact.npy')
+lo=[-.1,.4,-.6]+[8,-.1,-.1,-1.3,.4]*6
+hi=[.1,1.8,.6]+[15,.2,.2,1.3,1.6]*6
+r=least_squares(tr.fun,p,bounds=(lo,hi),loss='soft_l1',f_scale=.0006,x_scale='jac',ftol=1e-11,xtol=1e-11,gtol=1e-10)
+p=r.x
+np.save('/app/fit_final.npy',p)
+T=2*np.pi/np.sqrt(p[3::5]); A=np.abs(p[6::5])
+print('camera',p[:3],'cost',r.cost)
+for j,d in enumerate(tr.data):
+ q=p[3+j*5:8+j*5]
+ held=d['ok']&(d['t']<q[4]-.1)
+ y=np.median(d['y'][held])-p[0]
+ heldA=abs(np.arctan2(np.sin(y),p[1]*np.cos(y)-p[2]*np.sin(y)))
+ print(d['name'],'T',T[j],'release',A[j],'held angle',heldA,'damping',q[1:3],'release time',q[4])
+Ta=float(np.mean(T[:3])); Tb=float(np.mean(T[3:])); a=.20011; b=1.00003-a
+# Eliminate the common centre-of-mass inertia between the two physical-pendulum equations.
+g=4*np.pi**2*(a*a-b*b)/(a*Ta*Ta-b*Tb*Tb)
+k=np.sqrt(g*a*Ta*Ta/(4*np.pi**2)-a*a)
+result={'g_m_s2':float(g),'small_amplitude_period_s':{'a':Ta,'b':Tb},'radius_of_gyration_m':float(k),'run_periods_s':{d['name']:float(v) for d,v in zip(tr.data,T)},'release_amplitude_rad':{d['name']:float(v) for d,v in zip(tr.data,A)}}
+Path('/app/output').mkdir(exist_ok=True)
+Path('/app/output/result.json').write_text(json.dumps(result,indent=2)+'\n')
+print(json.dumps(result,indent=2))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/final_reduce.py > /app/final_reduce.log 2>&1
+
+OBS: {'g_m_s2':float(g),'small_amplitude_period_s':{'a':Ta,'b':Tb},'radius_of_gyration_m':float(k),'run_periods_s':{d['name']:float(v) for d,v in zip(tr.dat
+a,T)},'release_amplitude_rad':{d['name']:float(v) for d,v in zip(tr.data,A)}}
+> Path('/app/output').mkdir(exist_ok=True)
+> Path('/app/output/result.json').write_text(json.dumps(result,indent=2)+'\n')
+> print(json.dumps(result,indent=2))
+> PY
+root@18f95210cdfe:/app# OPENBLAS_NUM_THREADS=1 python3 /app/final_reduce.py > /app/final_reduce.log 2>&1
+
+
+
+#### step 17 19:44:46
+MSG: Analysis: The all-sample final reduction is running. The prior fit already gives mutually consistent pivot periods and a well-constrained camera correction; the final step checks stability and produces the graded artifact.
+Plan: Inspect the final fit log and validate that result.json has exactly the requested keys and only finite numeric quantities.
+CMD: cat /app/final_reduce.log; cat /app/output/result.json
+
+CMD: python3 - <<'PY'
+import json,math
+p='/app/output/result.json'
+r=json.load(open(p))
+assert set(r)=={'g_m_s2','small_amplitude_period_s','radius_of_gyration_m','run_periods_s','release_amplitude_rad'}
+assert set(r['small_amplitude_period_s'])=={'a','b'}
+for k in ['run_periods_s','release_amplitude_rad']:
+ assert set(r[k])=={'a1','a2','a3','b1','b2','b3'}
+def check(x):
+ if isinstance(x,dict):
+  for v in x.values(): check(v)
+ else: assert type(x) in (float,int) and math.isfinite(x) and x>0
+check(r)
+print('Validated:',p)
+PY
+
+OBS: s2','small_amplitude_period_s','radius_of_gyration_m','run_periods_s','release_amplitude_rad'}
+> assert set(r['small_amplitude_period_s'])=={'a','b'}
+> for k in ['run_periods_s','release_amplitude_rad']:
+>  assert set(r[k])=={'a1','a2','a3','b1','b2','b3'}
+> def check(x):
+>  if isinstance(x,dict):
+>   for v in x.values(): check(v)
+>  else: assert type(x) in (float,int) and math.isfinite(x) and x>0
+> check(r)
+> print('Validated:',p)
+> PY
+Validated: /app/output/result.json
+root@18f95210cdfe:/app#
+
+
+#### step 18 19:44:54
+MSG: Analysis: The reduction is complete and /app/output/result.json has been written and validated with exactly the required members and finite positive JSON numbers. The analysis includes GPS clock calibration, missing-frame delivery corrections, the shared oblique camera projection, finite-amplitude pendulum dynamics, and damping. The final gravitational acceleration is 9.79182804947956 m/s²; the small-amplitude periods are 1.8162973546083692 s about A and 1.9617682266525858 s about B, and the radius of gyration is 0.3517000885264577 m. Release angles agree closely with the pre-release held-angle observations.
+Plan: No further commands are needed.
+CMD: 
+OBS: Current terminal state:
+New Terminal Output:
+
+root@18f95210cdfe:/app#
+
+
+Are you sure you want to mark the task as complete? This will trigger your solution to be graded and you won't be able to make any further corrections. If so, include "task_complete": true in your JSON response again.
+
+#### step 19 19:44:59
+MSG: Analysis: The requested result file is complete and its schema and numeric values have been validated.
+Plan: Submit the existing /app/output/result.json for grading.
+CMD: 
+OBS: New Terminal Output:
+
+root@18f95210cdfe:/app#
+
+

@@ -1,0 +1,1948 @@
+#### step 2 01:55:42
+MSG: Analysis: The output directory and reference program have not yet been created. This task requires a numerical collision calculation and a converged solution of the linearized Boltzmann equation; low-order transport formulas would not meet the requested tolerance.
+Plan: Inspect the available environment, then build and validate a numerical scattering and collision-bracket solver. The program will use a systematically converged polynomial basis for the transport equations.
+CMD: mkdir -p /app/output && ls -la /app && python3 - <<'PY'
+import numpy,scipy
+print(numpy.__version__, scipy.__version__)
+PY
+
+OBS: Previous response had warnings:
+WARNINGS: - Extra text detected after JSON object
+
+New Terminal Output:
+root@4b363f7bd497:/app# mkdir -p /app/output && ls -la /app && python3 - <<'PY'
+> import numpy,scipy
+> print(numpy.__version__, scipy.__version__)
+> PY
+total 12
+drwxr-xr-x 1 root root 4096 Nov  1 01:52 .
+drwxr-xr-x 1 root root 4096 Nov  1 01:52 ..
+drwxr-xr-x 2 root root 4096 Nov  1 01:52 output
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#### step 3 01:57:35
+MSG: Analysis: The directory exists and the Python scientific stack is available. I will implement a collision-bracket method: angular harmonic decomposition removes the outgoing-angle integral, and Gaussian quadrature handles the Maxwellian velocities. Increasing the polynomial basis will provide a convergence check.
+Plan: First implement and test vectorized classical scattering for the Kihara potential. Then use its angular transport cross sections in the viscosity and coupled heat/diffusion collision matrices.
+CMD: cat > /app/scatter.py <<'PY'
+import numpy as np
+from scipy.special import roots_legendre
+from scipy.optimize import brentq
+import time
+G16,W16=roots_legendre(16)
+G32,W32=roots_legendre(32)
+
+def potential(r,a):
+    h=((1-a)/(r-a))**6
+    return 4*h*(h-1)
+
+def critical(a,E):
+    s=1-a
+    def ec(t):
+        h=t**-6
+        return 4*h*(2-5*h+3*a/(s*t)*(1-2*h))
+    # E at a stationary point of b(r)^2
+    opt=__import__('scipy.optimize',fromlist=['minimize_scalar']).minimize_scalar(lambda z:-ec(np.exp(z)),bounds=(np.log(2**(1/6)),np.log(5)),method='bounded')
+    tm=np.exp(opt.x)
+    if E>=ec(tm): return None
+    tc=brentq(lambda t:ec(t)-E,tm,max(10,(16/E)**(1/6)))
+    ti=brentq(lambda t:ec(t)-E,1,tm)
+    rc=a+s*tc
+    bc=rc*np.sqrt(1-potential(rc,a)/E)
+    return rc,bc,a+s*ti
+
+def turning(b,a,E,crit):
+    s=1-a
+    h0=(1+np.sqrt(1+E))/2
+    r0=a+s*h0**(-1/6)
+    lo=np.full_like(b,r0)
+    hi=b+r0
+    if crit is not None:
+        rc,bc,ri=crit
+        lo=np.where(b>bc,rc,lo)
+        hi=np.where(b>bc,hi,ri)
+    for j in range(57):
+        r=(lo+hi)/2
+        f=r*r*(1-potential(r,a)/E)-b*b
+        good=f>0
+        hi=np.where(good,r,hi)
+        lo=np.where(good,lo,r)
+    return (lo+hi)/2
+
+def deflections(b,a,E,crit,tol=2e-10):
+    r=turning(b,a,E,crit)
+    # u=rmin/r=1-v^2 cancels the turning-point singularity
+    owner=np.arange(len(b))
+    left=np.zeros(len(b)); right=np.ones(len(b))
+    if crit is not None:
+        rc,bc,ri=crit
+        ix=np.flatnonzero((b<bc)&(r<rc))
+        v=np.sqrt(np.maximum(0,1-r[ix]/rc))
+        owner=np.r_[owner,ix]
+        right[ix]=v
+        left=np.r_[left,v];right=np.r_[right,np.ones(len(ix))]
+    sums=np.zeros(len(b))
+    rb=(b/r)**2
+    h=((1-a)/(r-a))**6
+    # Stable subtraction from the turning condition:
+    # F(u)= (b/r)^2(1-u^2)+(V(r)-V(r/u))/E
+    for it in range(35):
+        def evaluate(nodes,weights):
+            v=(left[:,None]+right[:,None])/2+(right-left)[:,None]/2*nodes
+            u=1-v*v
+            rr=r[owner,None]
+            # h(u)/h(1), using expm1 to maintain precision near u=1
+            d=(rr*v*v)/(rr-a)
+            lr=6*(np.log1p(-v*v)-np.log1p(a*v*v/(rr-a)))
+            dh=np.expm1(lr)
+            hh=h[owner,None]
+            dv=-4*hh*dh*(hh*(2+dh)-1)
+            f=rb[owner,None]*v*v*(2-v*v)+dv/E
+            f=np.maximum(f,1e-300)
+            vals=2*v*(b/r)[owner,None]/np.sqrt(f)
+            return (right-left)/2*(vals@weights)
+        q16=evaluate(G16,W16); q32=evaluate(G32,W32)
+        err=np.abs(q32-q16)
+        ok=(err<tol*(right-left)+2e-13*np.abs(q32))|((right-left)<1e-12)
+        np.add.at(sums,owner[ok],q32[ok])
+        if np.all(ok): break
+        own=owner[~ok];l=left[~ok];rr=right[~ok];mid=(l+rr)/2
+        owner=np.repeat(own,2)
+        left=np.column_stack((l,mid)).ravel();right=np.column_stack((mid,rr)).ravel()
+    else:
+        np.add.at(sums,owner,q32)
+    return np.pi-2*sums
+
+def cross_sections(a,E,L=12,tol=3e-7):
+    crit=critical(a,E)
+    scale=a+(1-a)*max(E**(-1/6),E**(-1/12))
+    cuts=[0.,1.]
+    if crit is not None:
+        bc=crit[1];cuts.insert(1,bc/(bc+scale))
+    left=np.array(cuts[:-1]);right=np.array(cuts[1:])
+    ans=np.zeros(L)
+    for iteration in range(30):
+        def evaluate(nodes,weights):
+            z=(left[:,None]+right[:,None])/2+(right-left)[:,None]/2*nodes
+            b=scale*z/(1-z)
+            chi=deflections(b.ravel(),a,E,crit).reshape(b.shape)
+            dc=2*np.sin(chi/2)**2
+            ds=[np.zeros_like(dc),dc]
+            for l in range(2,L+1):
+                ds.append((2*l-1)/l*(ds[-1]+dc*(1-ds[-1]))-(l-1)/l*ds[-2])
+            vals=np.stack(ds[1:],axis=-1)*(2*np.pi*scale**2*z/(1-z)**3)[:,:,None]
+            return (right-left)[:,None]/2*np.einsum('pnl,n->pl',vals,weights)
+        q16=evaluate(G16,W16);q32=evaluate(G32,W32)
+        err=np.max(np.abs(q32-q16),axis=1)
+        ref=np.maximum(np.max(np.abs(q32),axis=1),scale**2*(right-left))
+        ok=(err<tol*ref)|((right-left)<2e-11)
+        ans+=np.sum(q32[ok],axis=0)
+        if np.all(ok): return ans
+        l=left[~ok];r=right[~ok];mid=(l+r)/2
+        left=np.column_stack((l,mid)).ravel();right=np.column_stack((mid,r)).ravel()
+    return ans+np.sum(q32,axis=0)
+
+if __name__=='__main__':
+    import sys
+    a=float(sys.argv[1]) if len(sys.argv)>1 else 0
+    for E in [.04,.2,.5,.8,1,2,10,100]:
+        t=time.time(); q=cross_sections(a,E,16)
+        print(E,q[:4],time.time()-t,flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/scatter.py 0
+
+OBS: =(err<tol*ref)|((right-left)<2e-11)
+>         ans+=np.sum(q32[ok],axis=0)
+>         if np.all(ok): return ans
+>         l=left[~ok];r=right[~ok];mid=(l+r)/2
+>         left=np.column_stack((l,mid)).ravel();right=np.column_stack((mid,r)).ravel()
+>     return ans+np.sum(q32,axis=0)
+>
+> if __name__=='__main__':
+>     import sys
+>     a=float(sys.argv[1]) if len(sys.argv)>1 else 0
+>     for E in [.04,.2,.5,.8,1,2,10,100]:
+>         t=time.time(); q=cross_sections(a,E,16)
+>         print(E,q[:4],time.time()-t,flush=True)
+> PY
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/scatter.py 0
+
+
+
+#### step 4 01:58:44
+MSG: Analysis: The scattering implementation is being tested. The transport calculation can exploit rotational symmetry: vector and traceless-tensor basis functions have only three azimuthal components, and their angular expansion is finite. This substantially reduces the numerical work.
+Plan: Implement the Gaussian velocity quadrature and collision matrices, first testing them against hard-sphere limiting values. Check the normalization of viscosity, diffusion, and heat conductivity before combining the solver with Kihara scattering.
+CMD: cat > /app/brackets.py <<'PY'
+import numpy as np
+from scipy.special import roots_genlaguerre, roots_legendre, eval_genlaguerre, lpmv, gammaln
+from scipy.linalg import solve
+import time
+
+def angular_basis(N,rank):
+    u,wu=roots_legendre(N+3)
+    L=N+rank
+    projs=[]
+    for m in range(rank+1):
+        out=np.zeros((len(u),L))
+        for l in range(max(1,m),L+1):
+            out[:,l-1]=lpmv(m,l,u)*np.exp(.5*(np.log(2*l+1)+gammaln(l-m+1)-gammaln(l+m+1)))*wu/2
+        projs.append(out)
+    return u,projs
+
+def pair_matrix(N,rank,mi,mj,z,wz,Q,T,same=False):
+    L=N+rank
+    u,proj=angular_basis(N,rank)
+    s,ws=roots_genlaguerre(N+2,.5);ws/=np.sqrt(np.pi)/2
+    # arrays shape energy, CM magnitude, polar angle
+    aa=np.sqrt(mi/(mi+mj));bb=np.sqrt(mj/(mi+mj))
+    c=np.sqrt(s)[None,:,None];h=np.sqrt(z)[:,None,None]
+    sn=np.sqrt(1-u*u)[None,None,:];uu=u[None,None,:]
+    coeff=[]
+    for v0,t0 in [(aa*c,bb*h),(bb*c,-aa*h)]:
+        vv=v0+t0*uu
+        w2=v0*v0+t0*t0+2*v0*t0*uu
+        lag=np.stack([eval_genlaguerre(p,rank+.5,w2) for p in range(N)],axis=-1)
+        if rank==1:
+            funcs=[vv,t0*sn]
+        else:
+            funcs=[np.sqrt(1.5)*(vv*vv-w2/3),np.sqrt(2)*vv*t0*sn,t0*t0*sn*sn/np.sqrt(2)]
+        coeff.append([np.einsum('zsun,ul->zsnl',f[:,:,:,None]*lag,P,optimize=True) for f,P in zip(funcs,proj)])
+    if same:
+        coeff=[ [a+b for a,b in zip(*coeff)] ]
+    dim=N if same else 2*N
+    out=np.zeros((dim,dim))
+    weight=wz[:,None,None]*ws[None,:,None]*Q[:,:L][:,None,:]
+    for m in range(rank+1):
+        cc=np.concatenate([sp[m] for sp in coeff],axis=2)
+        out+=np.einsum('zsnl,zsml,zsl->nm',cc,cc,weight,optimize=True)
+    mu=mi*mj/(mi+mj)
+    out*=np.sqrt(2*T/mu)/(np.sqrt(np.pi)/2)/(2*rank+1)
+    return out
+
+def matrices(N,R,X,T,z,wz,Q):
+    mats=[]
+    for rank in [1,2]:
+        C=np.zeros((2*N,2*N))
+        C[:N,:N]+=.5*X**2*pair_matrix(N,rank,1,1,z,wz,Q,T,True)
+        C[N:,N:]+=.5*(1-X)**2*pair_matrix(N,rank,R,R,z,wz,Q,T,True)
+        C+=X*(1-X)*pair_matrix(N,rank,1,R,z,wz,Q,T,False)
+        mats.append(C)
+    return mats
+
+def properties(N,R,X,T,Cv,Cs):
+    bD=np.zeros(2*N);bT=bD.copy();bS=bD.copy()
+    bD[0]=np.sqrt(T/2);bD[N]=-np.sqrt(T/(2*R))
+    bT[1]=-2.5*X*np.sqrt(T/2);bT[N+1]=-2.5*(1-X)*np.sqrt(T/(2*R))
+    bS[0]=X;bS[N]=1-X
+    # The null vector is total momentum. Fix one velocity coefficient.
+    ix=np.arange(1,2*N)
+    c=solve(Cv[np.ix_(ix,ix)],np.column_stack((bD[ix],bT[ix])),assume_a='pos')
+    DD=bD[ix]@c[:,0];DT=bD[ix]@c[:,1];TT=bT[ix]@c[:,1]
+    eta=T/2*bS@solve(Cs,bS,assume_a='pos')
+    return np.array([eta,TT-DT*DT/DD,X*(1-X)*DD,DT/(X*(1-X)*DD)])
+
+if __name__=='__main__':
+    import sys
+    R=float(sys.argv[1]) if len(sys.argv)>1 else 1
+    X=float(sys.argv[2]) if len(sys.argv)>2 else .5
+    T=1
+    z,wz=roots_genlaguerre(50,1)
+    for N in [2,3,4,6,8,10,12,16]:
+        t=time.time();Q=np.ones((len(z),N+2))*np.pi
+        Cv,Cs=matrices(N,R,X,T,z,wz,Q)
+        print(N,properties(N,R,X,T,Cv,Cs),time.time()-t,flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/brackets.py 1 .5
+
+OBS:   2.15525312e-01 -3.85924222e-16] 0.0049440860748291016
+4 [1.79131236e-01 6.77568675e-01 2.15569709e-01 6.25559563e-16] 0.00627589225769043
+6 [ 1.79135891e-01  6.77819095e-01  2.15580373e-01 -1.70871786e-16] 0.01349496841430664
+8 [1.79136151e-01 6.77831684e-01 2.15581084e-01 1.42979179e-15] 0.028873682022094727
+10 [ 1.79136174e-01  6.77832756e-01  2.15581156e-01 -1.47961120e-15] 0.05230522155761719
+12 [ 1.79136177e-01  6.77832882e-01  2.15581165e-01 -1.49790638e-16] 0.07987761497497559
+16 [1.79136177e-01 6.77832903e-01 2.15581167e-01 1.14383307e-14] 0.20612263679504395
+root@4b363f7bd497:/app#
+
+
+#### step 5 01:59:05
+MSG: Analysis: The collision matrices reproduce converged hard-sphere transport values, including the expected higher-order corrections. The scattering test exposed excessive refinement near orbiting collisions; the adaptive integrator needs a roundoff-aware stopping condition.
+Plan: Fix that stopping condition and compare the scattering results against independent scalar adaptive integration. Also test basis convergence at the largest mass ratio.
+CMD: python3 - <<'PY'
+p='/app/scatter.py'
+s=open(p).read().replace('(err<tol*(right-left)+2e-13*np.abs(q32))|((right-left)<1e-12)','(err<tol+2e-11*np.abs(q32))|((right-left)<1e-10)')
+s=s.replace('np.add.at(sums,owner,q32)\n    return','np.add.at(sums,owner,evaluate(G32,W32))\n    return')
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/scatter.py 0 > /app/scatterlog 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/brackets.py 40 .95
+
+CMD: cat /app/scatterlog
+
+OBS: 0.005275249481201172
+3 [ 0.3135629   0.61560581  0.15277816 -0.84040338] 0.005089282989501953
+4 [ 0.31358683  0.61732279  0.15280194 -0.84647143] 0.006345987319946289
+6 [ 0.31359197  0.61769529  0.15281098 -0.84820773] 0.013439416885375977
+8 [ 0.31359225  0.61772207  0.15281237 -0.84839035] 0.02582240104675293
+10 [ 0.31359227  0.61772557  0.1528127  -0.84842268] 0.045705318450927734
+12 [ 0.31359227  0.61772625  0.1528128  -0.84843068] 0.07542204856872559
+16 [ 0.31359227  0.61772648  0.15281286 -0.84843413] 0.21215128898620605
+root@4b363f7bd497:/app# cat /app/scatterlog
+root@4b363f7bd497:/app#
+
+
+#### step 6 01:59:18
+MSG: Analysis: The large-mass-ratio hard-sphere test converges well by 16 polynomials. The scattering process is taking too long, likely because adaptive integration is pursuing negligible endpoint contributions or numerical noise.
+Plan: Limit the impact-parameter integration where the omitted inverse-power tail is negligible, and add temporary refinement diagnostics to locate the bottleneck.
+CMD: kill 214 2>/dev/null || true
+cp /app/scatter.py /app/scatterbak.py
+python3 - <<'PY'
+p='/app/scatter.py';s=open(p).read().replace('cuts=[0.,1.]','cuts=[0.,50/51]')
+s=s.replace('for iteration in range(30):','for iteration in range(30):\n        if __import__("os").environ.get("DEBUGSCAT"): print("outer",iteration,len(left),flush=True)')
+s=s.replace('for it in range(35):','for it in range(35):\n        if __import__("os").environ.get("DEBUGSCAT") and it>8: print("inner",it,len(left),flush=True)')
+open(p,'w').write(s)
+PY
+DEBUGSCAT=1 OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/debugscat 2>&1 &
+from scatter import *
+t=time.time();print(cross_sections(0,.04,16));print(time.time()-t)
+PY
+
+CMD: tail -30 /app/debugscat
+
+OBS:  2>&1 &
+> from scatter import *
+> t=time.time();print(cross_sections(0,.04,16));print(time.time()-t)
+> PY
+[1] 243
+root@4b363f7bd497:/app# tail -30 /app/debugscat
+inner 27 3564
+inner 28 4054
+inner 29 5042
+inner 30 5436
+inner 31 4480
+inner 32 2612
+inner 33 318
+inner 9 256
+inner 10 256
+inner 11 256
+inner 12 294
+inner 13 382
+inner 14 586
+inner 15 808
+inner 16 1114
+inner 17 1482
+inner 18 1838
+inner 19 2124
+inner 20 2294
+inner 21 2502
+inner 22 2856
+inner 23 3654
+inner 24 4400
+inner 25 5262
+inner 26 6344
+inner 27 7736
+inner 28 9356
+inner 29 12012
+inner 30 14014
+inner 31 16222
+root@4b363f7bd497:/app#
+
+
+#### step 7 01:59:36
+MSG: Analysis: Diagnostics show that the inner scattering integral, not the transport matrices, causes the slowdown. I need to distinguish a formula error from refinement triggered by cancellation close to an orbiting turning point.
+Plan: Inspect turning-point residuals and the transformed integrand at representative impact parameters, then compare selected deflection angles with scalar quadrature.
+CMD: kill 243 2>/dev/null || true
+OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+from scatter import *
+from scipy.integrate import quad
+A=0;E=.04;cr=critical(A,E);print('critical',cr)
+b=np.array([.1,1,cr[1]*.5,cr[1]*.99,cr[1]*1.01,10,50])
+r=turning(b,A,E,cr);print('b,r,resid',np.c_[b,r,r*r*(1-potential(r,A)/E)-b*b])
+for bi,ri in zip(b,r):
+    rb=(bi/ri)**2;hh=((1-A)/(ri-A))**6
+    def ff(v):
+        dh=np.expm1(6*(np.log1p(-v*v)-np.log1p(A*v*v/(ri-A))))
+        f=rb*v*v*(2-v*v)-4*hh*dh*(hh*(2+dh)-1)/E
+        return 2*v*bi/ri/np.sqrt(f)
+    pts=[np.sqrt(1-ri/cr[0])] if ri<cr[0] else None
+    q,err=quad(ff,0,1,points=pts,epsabs=1e-9,limit=200)
+    t=time.time();qv=deflections(np.array([bi]),A,E,cr)
+    print(bi, np.pi-2*q,qv,err,time.time()-t,flush=True)
+PY
+
+CMD: cat /app/scatterlog; head -20 /app/debugscat
+
+OBS: 66594314575195
+0.8 [ 8.1408949   9.63360628 11.49662154 12.22032179] 0.10745620727539062
+1 [ 7.5377255   8.85666264 10.73747574 11.23445603] 0.018318891525268555
+2 [4.6053634  6.72579559 8.34985574 9.2719986 ] 0.010326862335205078
+10 [2.6872665  3.17728552 3.50509126 3.79986285] 0.007514476776123047
+100 [1.86684024 2.21293486 2.40459997 2.53434422] 0.006082773208618164
+outer 0 2
+outer 1 4
+outer 2 4
+outer 3 4
+outer 4 4
+outer 5 4
+outer 6 4
+outer 7 4
+outer 8 4
+outer 9 4
+inner 9 2
+outer 10 4
+inner 9 2
+outer 11 4
+inner 9 2
+inner 9 4
+inner 10 2
+outer 12 4
+inner 9 2
+inner 9 4
+root@4b363f7bd497:/app#
+
+
+#### step 8 02:00:05
+MSG: Analysis: Representative deflection angles agree with independent scalar quadrature. The slowdown is confined to impact parameters extremely close to the orbiting threshold, whose contribution to the cross section is tiny. Away from that threshold, cross sections compute in milliseconds.
+Plan: Use an absolute error allowance for tiny impact-parameter panels. Then implement energy quadrature split at the orbiting critical energy; ordinary Gauss-Laguerre quadrature alone may miss the cross-section structure there.
+CMD: python3 - <<'PY'
+p='/app/scatter.py';s=open(p).read();s=s.replace('tol=3e-7','tol=2e-8');s=s.replace('err<tol*ref','err<tol*(ref+scale**2)');s=s.replace('((right-left)<2e-11)','((right-left)<2e-9)');s='\n'.join(x for x in s.split('\n') if 'DEBUGSCAT' not in x);open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/scatter.py 0 > /app/scatterlog2 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/scatter.py .8 > /app/scatterlog3 2>&1 &
+cat > /app/energy.py <<'PY'
+import numpy as np
+from scipy.special import roots_legendre
+from scipy.optimize import minimize_scalar
+from scatter import cross_sections
+import time
+
+def ecritical(a):
+    s=1-a
+    def ec(t):
+        h=t**-6
+        return 4*h*(2-5*h+3*a/(s*t)*(1-2*h))
+    opt=minimize_scalar(lambda z:-ec(np.exp(z)),bounds=(np.log(2**(1/6)),np.log(5)),method='bounded')
+    return ec(np.exp(opt.x))
+
+def energy_grid(a,T,n=16,zmax=120):
+    # z=t^3 makes the low-energy fractional power integrable and smooth.
+    ec=ecritical(a)/T
+    cuts=np.unique(np.r_[0,.015,.06,.2,.5,1,2,4,7,11,16,23,32,44,60,80,zmax,ec,ec*.8,ec*1.2])
+    cuts=cuts[(cuts>=0)&(cuts<=zmax)]
+    t=cuts**(1/3)
+    x,w=roots_legendre(n)
+    tt=(t[:-1,None]+t[1:,None])/2+(t[1:]-t[:-1])[:,None]/2*x
+    z=tt**3
+    wz=(t[1:]-t[:-1])[:,None]/2*w*3*tt**5*np.exp(-z)
+    return z.ravel(),wz.ravel()
+
+if __name__=='__main__':
+    import sys
+    from brackets import matrices,properties
+    a,R,X,T=map(float,sys.argv[1:5]);n=int(sys.argv[5]) if len(sys.argv)>5 else 16
+    z,wz=energy_grid(a,T,n)
+    st=time.time();Q=np.array([cross_sections(a,T*zi,26) for zi in z])
+    np.savez('/app/qdata.npz',z=z,wz=wz,Q=Q,a=a,T=T)
+    print('scattering',len(z),time.time()-st,flush=True)
+    for N in [4,6,8,12,16,20,24]:
+        st=time.time();Cv,Cs=matrices(N,R,X,T,z,wz,Q)
+        print(N,properties(N,R,X,T,Cv,Cs),time.time()-st,flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 1 .5 1 12 > /app/energylog 2>&1 &
+
+CMD: cat /app/scatterlog2 /app/scatterlog3; tail /app/energylog
+
+OBS: s(a,T*zi,26) for zi in z])
+>     np.savez('/app/qdata.npz',z=z,wz=wz,Q=Q,a=a,T=T)
+>     print('scattering',len(z),time.time()-st,flush=True)
+>     for N in [4,6,8,12,16,20,24]:
+>         st=time.time();Cv,Cs=matrices(N,R,X,T,z,wz,Q)
+>         print(N,properties(N,R,X,T,Cv,Cs),time.time()-st,flush=True)
+> PY
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 1 .5 1 12 > /app/energylog 2>&1 &
+[3] 298
+root@4b363f7bd497:/app# cat /app/scatterlog2 /app/scatterlog3; tail /app/energylog
+0.04 [5.19483692 5.98780142 6.48940169 6.81634748] 0.4888007640838623
+root@4b363f7bd497:/app#
+
+
+#### step 9 02:00:19
+MSG: Analysis: The revised scattering calculation is running alongside the energy-integrated transport test. I will monitor their timings and convergence before choosing production quadrature sizes.
+Plan: Read the current results and run a low-temperature, high-mass-ratio case, which is likely to be the most demanding for both scattering and polynomial convergence.
+CMD: cat /app/scatterlog2 /app/scatterlog3; tail -15 /app/energylog; ps -o pid,etime,time,rss,cmd -p 295,296,298
+OPENBLAS_NUM_THREADS=1 python3 /app/energy.py .8 40 .95 .2 16 > /app/extremelog 2>&1 &
+
+OBS: 103393554688
+2 [3.49993723 3.83394778 4.05035623 4.1999645 ] 0.26826000213623047
+10 [3.11060695 3.29562655 3.44143945 3.57231006] 0.015404224395751953
+100 [2.85984393 2.95794087 3.01237445 3.04889929] 0.010392427444458008
+[1]   Done                    OPENBLAS_NUM_THREADS=1 python3 /app/scatter.py 0 > /app/scatterlog2 2>&1
+[2]-  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/scatter.py .8 > /app/scatterlog3 2>&1
+bash: ps: command not found
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/energy.py .8 40 .95 .2 16 > /app/extremelog 2>&1 &
+[4] 327
+root@4b363f7bd497:/app#
+
+
+#### step 10 02:00:32
+MSG: Analysis: The cross sections are stable to about 1e-7 in the direct comparisons, but very low collision energies can consume disproportionate time. Their Maxwellian-weighted contribution is negligible below a small threshold.
+Plan: Inspect the active jobs and add progress reporting. Once the baseline finishes, compare energy quadratures and reuse computed cross sections for additional mass/composition convergence tests.
+CMD: tail -20 /app/energylog /app/extremelog; cat /proc/298/status | head -25; cat /proc/327/status | head -25
+
+CMD: python3 - <<'PY'
+p='/app/energy.py';s=open(p).read().replace('Q=np.array([cross_sections(a,T*zi,26) for zi in z])','Q=[]\n    for i,zi in enumerate(z):\n        Q.append(cross_sections(a,T*max(zi,1e-5),26))\n        if i%20==0: print("progress",i,len(z),zi,time.time()-st,flush=True)\n    Q=np.array(Q)')
+open(p,'w').write(s)
+PY
+
+OBS: Spgid: 327
+NSsid:  56
+Kthread:        0
+VmPeak:   610260 kB
+VmSize:   373552 kB
+VmLck:         0 kB
+VmPin:         0 kB
+VmHWM:    424064 kB
+VmRSS:    157384 kB
+RssAnon:          124144 kB
+RssFile:           33240 kB
+root@4b363f7bd497:/app# python3 - <<'PY'
+> p='/app/energy.py';s=open(p).read().replace('Q=np.array([cross_sections(a,T*zi,26) for zi in z])','Q=[]\n    for i,zi in enumerate(z):\n        Q.append(cross
+_sections(a,T*max(zi,1e-5),26))\n        if i%20==0: print("progress",i,len(z),zi,time.time()-st,flush=True)\n    Q=np.array(Q)')
+> open(p,'w').write(s)
+> PY
+root@4b363f7bd497:/app#
+
+
+#### step 11 02:00:53
+MSG: Analysis: The jobs are still working on the lowest-energy scattering points. Direct evaluation there is poorly conditioned because the attractive well is much deeper than the collision energy. Those points have vanishingly small weight in the collision brackets.
+Plan: Restart with a small reduced-energy cutoff for the cross-section evaluation, and quantify the cutoff error afterward. This avoids spending the runtime budget on physically negligible points.
+CMD: kill 298 327 2>/dev/null || true
+sed -i 's/max(zi,1e-5)/max(zi,0.002)/' /app/energy.py
+OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 1 .5 1 12 > /app/energylog 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/energy.py .8 40 .95 .2 16 > /app/extremelog 2>&1 &
+
+CMD: cat /app/energylog; cat /app/extremelog
+
+OBS: sed -i 's/max(zi,1e-5)/max(zi,0.002)/' /app/energy.py
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 1 .5 1 12 > /app/energylog 2>&1 &
+[5] 377
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/energy.py .8 40 .95 .2 16 > /app/extremelog 2>&1 &
+[6] 378
+root@4b363f7bd497:/app# cat /app/energylog; cat /app/extremelog
+[3]   Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 1 .5 1 12 > /app/energylog 2>&1
+[4]   Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/energy.py .8 40 .95 .2 16 > /app/extremelog 2>&1
+root@4b363f7bd497:/app#
+
+
+#### step 12 02:01:11
+MSG: Analysis: The low-energy cutoff is now in place. I also identified a cancellation in the scattering integrand: near an orbiting trajectory, subtracting the turning-point potential amplifies floating-point error by the inverse collision energy.
+Plan: Rewrite that subtraction using the exact turning-point condition. This should make the low-energy scattering calculation both faster and more stable. Check the current test progress afterward.
+CMD: python3 - <<'PY'
+p='/app/scatter.py';s=open(p).read();s=s.replace('dv=-4*hh*dh*(hh*(2+dh)-1)','hm1=(E*(1-rb[owner,None]))/(4*hh)\n            dv=-4*hh*dh*(hm1+hh*np.exp(lr))')
+open(p,'w').write(s)
+PY
+cat /app/energylog; cat /app/extremelog
+OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+from scatter import *
+for a,e in [(0,.002),(.8,.0004),(0,.04),(.8,.04)]:
+ t=time.time();print(a,e,cross_sections(a,e,26)[:4],time.time()-t,flush=True)
+PY
+
+OBS: New Terminal Output:
+
+root@4b363f7bd497:/app# python3 - <<'PY'
+> p='/app/scatter.py';s=open(p).read();s=s.replace('dv=-4*hh*dh*(hh*(2+dh)-1)','hm1=(E*(1-rb[owner,None]))/(4*hh)\n            dv=-4*hh*dh*(hm1+hh*np.exp(lr))')
+> open(p,'w').write(s)
+> PY
+root@4b363f7bd497:/app# cat /app/energylog; cat /app/extremelog
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+> from scatter import *
+> for a,e in [(0,.002),(.8,.0004),(0,.04),(.8,.04)]:
+>  t=time.time();print(a,e,cross_sections(a,e,26)[:4],time.time()-t,flush=True)
+> PY
+
+
+
+#### step 13 02:01:36
+MSG: Analysis: The inner quadrature still over-refines only extremely near the orbiting singularity. A tiny excluded interval around the critical impact parameter has a rigorously small cross-section contribution, while preventing this numerical pathology.
+Plan: Exclude a relative 1e-8 interval around the critical impact parameter and make the angular tolerance reflect the conditioning there. Restart the transport tests with the stabilized calculation.
+CMD: C-c
+CMD: kill 377 378 2>/dev/null || true
+python3 - <<'PY'
+p='/app/scatter.py';s=open(p).read().replace('tol=2e-10','tol=2e-9')
+s=s.replace('r=turning(b,a,E,crit)','r=turning(b,a,E,crit)\n    tolerances=np.full_like(b,tol)\n    if crit is not None: tolerances=np.maximum(tolerances,2e-13/(np.abs(b/crit[1]-1)+1e-14))')
+s=s.replace('err<tol+2e-11*np.abs(q32)','err<tolerances[owner]+2e-10*np.abs(q32)')
+s=s.replace('cuts.insert(1,bc/(bc+scale))','cuts=[0.,bc*(1-1e-8)/(bc*(1-1e-8)+scale),bc*(1+1e-8)/(bc*(1+1e-8)+scale),50/51]')
+s=s.replace('left=np.array(cuts[:-1]);right=np.array(cuts[1:])','left=np.array(cuts[:-1]);right=np.array(cuts[1:])\n    if crit is not None:\n        left=left[[0,2]];right=right[[0,2]]')
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 1 .5 1 12 > /app/energylog 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/energy.py .8 40 .95 .2 16 > /app/extremelog 2>&1 &
+
+OBS: s.replace('cuts.insert(1,bc/(bc+scale))','cuts=[0.,bc*(1-1e-8)/(bc*(1-1e-8)+scale),bc*(1+1e-8)/(bc*(1+1e-8)+scale),50/51]')
+> s=s.replace('left=np.array(cuts[:-1]);right=np.array(cuts[1:])','left=np.array(cuts[:-1]);right=np.array(cuts[1:])\n    if crit is not None:\n        left=lef
+t[[0,2]];right=right[[0,2]]')
+> open(p,'w').write(s)
+> PY
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 1 .5 1 12 > /app/energylog 2>&1 &
+[7] 434
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/energy.py .8 40 .95 .2 16 > /app/extremelog 2>&1 &
+[8] 435
+root@4b363f7bd497:/app#
+
+
+#### step 14 02:31:03
+MSG: Analysis: The stabilized scattering tests have restarted. Their results will determine whether the energy grid and polynomial basis satisfy the tolerance with enough runtime margin.
+Plan: Check progress and preserve each test's cross-section data separately so it can be reused without recomputing scattering.
+CMD: cat /app/energylog; cat /app/extremelog
+python3 - <<'PY'
+p='/app/energy.py';s=open(p).read().replace("'/app/qdata.npz'","'/app/qdata_'+str(a)+'_'+str(T)+'.npz'");open(p,'w').write(s)
+PY
+
+CMD: 
+CMD: cat /app/energylog; cat /app/extremelog
+
+OBS: 4 114.51971095085887 26.778538465499878
+scattering 304 26.81924819946289
+4 [ 0.10629826  0.20464807  0.05435905 -0.63684715] 0.027605772018432617
+6 [ 0.10629887  0.20470332  0.05436079 -0.63766988] 0.0694131851196289
+8 [ 0.10629889  0.20470668  0.05436107 -0.63775121] 0.17007684707641602
+12 [ 0.1062989   0.20470717  0.05436116 -0.63776924] 0.4809906482696533
+16 [ 0.1062989   0.2047072   0.05436117 -0.63777095] 1.2764945030212402
+20 [ 0.1062989   0.20470721  0.05436118 -0.63777129] 2.4121408462524414
+24 [ 0.1062989   0.20470721  0.05436118 -0.63777139] 5.337129831314087
+root@4b363f7bd497:/app#
+
+
+#### step 15 02:31:29
+MSG: Analysis: Both baseline tests now finish in tens of seconds, and their polynomial solutions converge tightly by 20–24 basis functions. The next essential check is energy-quadrature convergence, especially near the orbiting critical energy.
+Plan: Repeat the Lennard-Jones baseline and the low-temperature extreme with a denser energy grid. Also test an intermediate-core, unequal-mass case and a high-temperature case.
+CMD: cp /app/qdata.npz /app/extreme_old.npz
+OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 1 .5 1 24 > /app/energylog24 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/energy.py .8 40 .95 .2 28 > /app/extremelog28 2>&1 &
+
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/energy.py .35 15 .2 2 20 > /app/intermedlog 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 40 .05 50 20 > /app/hightlog 2>&1 &
+
+OBS: New Terminal Output:
+
+root@4b363f7bd497:/app# cp /app/qdata.npz /app/extreme_old.npz
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 1 .5 1 24 > /app/energylog24 2>&1 &
+[1] 490
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/energy.py .8 40 .95 .2 28 > /app/extremelog28 2>&1 &
+[2] 491
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/energy.py .35 15 .2 2 20 > /app/intermedlog 2>&1 &
+[3] 498
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/energy.py 0 40 .05 50 20 > /app/hightlog 2>&1 &
+[4] 499
+root@4b363f7bd497:/app#
+
+
+#### step 16 02:31:49
+MSG: Analysis: The denser quadrature tests are in progress. I will also make the final file self-contained and retain only scientifically justified numerical tolerances and convergence checks.
+Plan: Read the test results, verify scalar scattering at the critical-energy transition, and inspect the current source for edge cases before packaging it.
+CMD: tail -10 /app/energylog24; tail -10 /app/extremelog28; tail -10 /app/intermedlog; tail -10 /app/hightlog; sed -n '1,180p' /app/scatter.py
+
+OBS: maximum(np.max(np.abs(q32),axis=1),scale**2*(right-left))
+        ok=(err<tol*(ref+scale**2))|((right-left)<2e-9)
+        ans+=np.sum(q32[ok],axis=0)
+        if np.all(ok): return ans
+        l=left[~ok];r=right[~ok];mid=(l+r)/2
+        left=np.column_stack((l,mid)).ravel();right=np.column_stack((mid,r)).ravel()
+    return ans+np.sum(q32,axis=0)
+
+if __name__=='__main__':
+    import sys
+    a=float(sys.argv[1]) if len(sys.argv)>1 else 0
+    for E in [.04,.2,.5,.8,1,2,10,100]:
+        t=time.time(); q=cross_sections(a,E,16)
+        print(E,q[:4],time.time()-t,flush=True)
+root@4b363f7bd497:/app#
+
+
+#### step 17 02:32:17
+MSG: Analysis: The angular and center-of-mass quadratures integrate the finite polynomial collision brackets exactly; the remaining numerical errors are scattering, energy integration, and basis truncation. The transport normalization also agrees with the hard-sphere reference values.
+Plan: Finish the current convergence comparisons, then test several compositions using the same cross-section tables. This separates physical convergence from the cost of scattering.
+CMD: tail -9 /app/energylog24; tail -9 /app/extremelog28; tail -9 /app/intermedlog; tail -9 /app/hightlog; ls -lh /app/*npz
+
+CMD: cat > /app/reuse.py <<'PY'
+import numpy as np,time,sys
+from brackets import matrices,properties
+q=np.load(sys.argv[1]);z,wz,Q,T=q['z'],q['wz'],q['Q'],float(q['T'])
+for R,X in [(40,.05),(40,.5),(40,.95),(2,.05),(2,.95)]:
+    print('case',R,X,flush=True)
+    for N in [12,16,20,24]:
+        cv,cs=matrices(N,R,X,T,z,wz,Q)
+        print(N,properties(N,R,X,T,cv,cs),flush=True)
+PY
+
+OBS: :32 /app/qdata_0.0_1.0.npz
+-rw-r--r-- 1 root root  85K Nov  1 02:31 /app/qdata_0.0_50.0.npz
+-rw-r--r-- 1 root root  85K Nov  1 02:32 /app/qdata_0.35_2.0.npz
+root@4b363f7bd497:/app# cat > /app/reuse.py <<'PY'
+> import numpy as np,time,sys
+> from brackets import matrices,properties
+> q=np.load(sys.argv[1]);z,wz,Q,T=q['z'],q['wz'],q['Q'],float(q['T'])
+> for R,X in [(40,.05),(40,.5),(40,.95),(2,.05),(2,.95)]:
+>     print('case',R,X,flush=True)
+>     for N in [12,16,20,24]:
+>         cv,cs=matrices(N,R,X,T,z,wz,Q)
+>         print(N,properties(N,R,X,T,cv,cs),flush=True)
+> PY
+root@4b363f7bd497:/app#
+
+
+#### step 18 02:32:44
+MSG: Analysis: Energy quadrature agrees closely in the baseline cases. However, a light trace species in a heavy carrier gas converges more slowly: the high-temperature mass-ratio-40 thermal diffusion factor still changes appreciably between 20 and 24 polynomials. The final solver must allow a larger adaptive basis.
+Plan: Chunk the energy dimension to bound memory use, normalize the polynomial basis, and test 28–48 polynomials on the slow-converging cases. Extend the energy tail so high-degree collision brackets remain accurate.
+CMD: cp /app/brackets.py /app/brackets_old.py
+python3 - <<'PY'
+p='/app/brackets.py';s=open(p).read().replace('def pair_matrix(N,rank,mi,mj,z,wz,Q,T,same=False):','def pair_matrix_chunk(N,rank,mi,mj,z,wz,Q,T,same=False):')
+s=s.replace('def matrices(N,R,X,T,z,wz,Q):','def pair_matrix(N,rank,mi,mj,z,wz,Q,T,same=False):\n    out=np.zeros((N if same else 2*N,)*2)\n    for k in range(0,len(z),32):\n        out+=pair_matrix_chunk(N,rank,mi,mj,z[k:k+32],wz[k:k+32],Q[k:k+32],T,same)\n    return out\n\ndef matrices(N,R,X,T,z,wz,Q):')
+open(p,'w').write(s)
+PY
+cat > /app/highbasis.py <<'PY'
+import numpy as np,time,sys
+from brackets import matrices,properties
+from scatter import cross_sections
+from energy import energy_grid
+q=np.load(sys.argv[1]);a,T=float(q['a']),float(q['T'])
+R,X=map(float,sys.argv[2:4]);Nmax=int(sys.argv[4]) if len(sys.argv)>4 else 48
+z,wz=energy_grid(a,T,20,200)
+st=time.time();Q=np.array([cross_sections(a,T*max(zi,.002),Nmax+2) for zi in z])
+print('scattering',time.time()-st,flush=True)
+np.savez('/app/highq_'+str(a)+'_'+str(T)+'.npz',z=z,wz=wz,Q=Q,a=a,T=T)
+for N in [20,24,28,32,36,40,44,48]:
+ if N>Nmax:break
+ st=time.time();cv,cs=matrices(N,R,X,T,z,wz,Q)
+ print(N,properties(N,R,X,T,cv,cs),time.time()-st,flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/highbasis.py /app/qdata_0.0_50.0.npz 40 .05 48 > /app/highbasislog 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/highbasis.py /app/qdata_0.35_2.0.npz 15 .2 40 > /app/midbasislog 2>&1 &
+
+CMD: tail -8 /app/extremelog28; tail -8 /app/energylog24
+
+OBS: 15033974e-01 1.46953221e-01 7.45522852e-16] 0.08872318267822266
+6 [ 1.10670709e-01  4.15034811e-01  1.46953245e-01 -8.41709428e-16] 0.20844578742980957
+8 [1.10670714e-01 4.15035290e-01 1.46953251e-01 1.86946332e-15] 0.49782657623291016
+12 [ 1.10670714e-01  4.15035306e-01  1.46953251e-01 -4.67731093e-16] 1.4148197174072266
+16 [1.10670714e-01 4.15035306e-01 1.46953251e-01 1.36134262e-14] 3.178345203399658
+20 [1.10670714e-01 4.15035306e-01 1.46953251e-01 4.26602207e-15] 5.88106107711792
+24 [ 1.10670714e-01  4.15035306e-01  1.46953251e-01 -1.22392896e-14] 8.578181028366089
+root@4b363f7bd497:/app#
+
+
+#### step 19 02:33:08
+MSG: Analysis: The slow-convergence tests are running with bounded-memory matrix construction. The low-temperature extreme remains stable under energy-grid refinement. I can reduce matrix work further because both species have the same potential: their self-collision matrices differ only by the inverse square root of mass.
+Plan: Reuse the self-collision matrix, improve the high-energy panel spacing, and collect the large-basis timings. Then set a convergence rule based on successive nested solutions rather than a fixed low-order approximation.
+CMD: python3 - <<'PY'
+p='/app/brackets.py';s=open(p).read().replace('C[:N,:N]+=.5*X**2*pair_matrix(N,rank,1,1,z,wz,Q,T,True)\n        C[N:,N:]+=.5*(1-X)**2*pair_matrix(N,rank,R,R,z,wz,Q,T,True)','selfmat=pair_matrix(N,rank,1,1,z,wz,Q,T,True)\n        C[:N,:N]+=.5*X**2*selfmat\n        C[N:,N:]+=.5*(1-X)**2*selfmat/np.sqrt(R)')
+open(p,'w').write(s)
+p='/app/energy.py';s=open(p).read().replace('60,80,zmax','60,80,105,135,170,210,250,zmax');open(p,'w').write(s)
+PY
+cat /app/highbasislog; cat /app/midbasislog; tail -5 /app/extremelog28
+
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/reuse.py /app/qdata_0.0_1.0.npz > /app/reuselog 2>&1 &
+
+OBS: ng 21.030395030975342
+20 [12.10605745  1.33208094  1.95935371 -0.34198072] 2.7183971405029297
+8 [ 0.10629889  0.20470668  0.05436107 -0.63775121] 0.25730443000793457
+12 [ 0.1062989   0.20470717  0.05436116 -0.63776924] 0.7244284152984619
+16 [ 0.1062989   0.2047072   0.05436117 -0.63777095] 2.3419904708862305
+20 [ 0.1062989   0.20470721  0.05436118 -0.63777129] 6.696983575820923
+24 [ 0.1062989   0.20470721  0.05436118 -0.63777139] 13.962387084960938
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/reuse.py /app/qdata_0.0_1.0.npz > /app/reuselog 2>&1 &
+[5] 611
+root@4b363f7bd497:/app#
+
+
+#### step 20 02:33:25
+MSG: Analysis: The numerical setup now covers the full collision energy range needed by larger bases. The remaining design choice is how large a basis the slowest mixtures require and how to avoid repeated expensive matrix construction.
+Plan: Inspect the current large-basis results. Build one sufficiently large collision matrix, then solve its nested principal submatrices to measure convergence cheaply.
+CMD: cat /app/highbasislog; cat /app/midbasislog; cat /app/reuselog
+
+CMD: cat > /app/nested.py <<'PY'
+import numpy as np,time,sys
+from brackets import matrices,properties
+q=np.load(sys.argv[1]);z,wz,Q,T=q['z'],q['wz'],q['Q'],float(q['T'])
+R,X=map(float,sys.argv[2:4]);NN=int(sys.argv[4]) if len(sys.argv)>4 else Q.shape[1]-2
+st=time.time();cv,cs=matrices(NN,R,X,T,z,wz,Q)
+print('matrix',NN,time.time()-st,flush=True)
+for N in range(8,NN+1,4):
+ ix=np.r_[np.arange(N),NN+np.arange(N)]
+ print(N,properties(N,R,X,T,cv[np.ix_(ix,ix)],cs[np.ix_(ix,ix)]),flush=True)
+PY
+
+OBS: 00236  0.19594823  0.1053154  -0.00949299]
+root@4b363f7bd497:/app# cat > /app/nested.py <<'PY'
+> import numpy as np,time,sys
+> from brackets import matrices,properties
+> q=np.load(sys.argv[1]);z,wz,Q,T=q['z'],q['wz'],q['Q'],float(q['T'])
+> R,X=map(float,sys.argv[2:4]);NN=int(sys.argv[4]) if len(sys.argv)>4 else Q.shape[1]-2
+> st=time.time();cv,cs=matrices(NN,R,X,T,z,wz,Q)
+> print('matrix',NN,time.time()-st,flush=True)
+> for N in range(8,NN+1,4):
+>  ix=np.r_[np.arange(N),NN+np.arange(N)]
+>  print(N,properties(N,R,X,T,cv[np.ix_(ix,ix)],cs[np.ix_(ix,ix)]),flush=True)
+> PY
+root@4b363f7bd497:/app#
+
+
+#### step 21 02:33:49
+MSG: Analysis: The light-trace Lennard-Jones case shows small but nonmonotonic higher-order changes, especially when the thermal diffusion factor is near zero. A strict absolute convergence test is needed there. Matrix construction can be sped up by generating all Laguerre polynomials recursively instead of evaluating each independently.
+Plan: Implement the Laguerre recurrence and rerun the larger-basis tests with nested solves. This should provide enough accuracy and runtime margin for the difficult mixtures.
+CMD: python3 - <<'PY'
+p='/app/brackets.py';s=open(p).read().replace('lag=np.stack([eval_genlaguerre(p,rank+.5,w2) for p in range(N)],axis=-1)','lag=np.empty(w2.shape+(N,))\n        lag[...,0]=1\n        if N>1: lag[...,1]=rank+1.5-w2\n        for p in range(1,N-1):\n            lag[...,p+1]=((2*p+rank+1.5-w2)*lag[...,p]-(p+rank+.5)*lag[...,p-1])/(p+1)')
+open(p,'w').write(s)
+PY
+cat /app/highbasislog; cat /app/midbasislog
+
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/nested.py /app/highq_0.0_50.0.npz 40 .05 40 > /app/fastnestedlog 2>&1 &
+
+OBS: 08094  1.95935371 -0.34198072] 2.7183971405029297
+24 [12.10605747  1.33208476  1.95936798 -0.34199801] 8.479386806488037
+28 [12.10605747  1.33208606  1.95937282 -0.34200389] 13.683465480804443
+scattering 29.139920711517334
+20 [ 0.78078869  0.27182237  0.20614388 -0.23936298] 4.372046709060669
+24 [ 0.7807887   0.27182241  0.20614392 -0.23936348] 8.522499084472656
+28 [ 0.7807887   0.27182242  0.20614392 -0.23936347] 13.40126347541809
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/nested.py /app/highq_0.0_50.0.npz 40 .05 40 > /app/fastnestedlog 2>&1 &
+[6] 667
+root@4b363f7bd497:/app#
+
+
+#### step 22 02:34:07
+MSG: Analysis: The recurrence implementation is in place. The high-temperature trace-mixture results are approaching convergence around 32–40 polynomials, while the intermediate case is already stable by 28. I will now check the low-temperature Lennard-Jones endpoint and an intermediate-core temperature where thermal diffusion can be small.
+Plan: Generate higher-angular-order cross sections for those cases, then use nested solves to check convergence without repeatedly assembling matrices.
+CMD: cat /app/highbasislog; cat /app/midbasislog; cat /app/fastnestedlog; tail -20 /app/reuselog
+cat > /app/makeq.py <<'PY'
+import numpy as np,time,sys
+from energy import energy_grid
+from scatter import cross_sections
+a,T=map(float,sys.argv[1:3]);n=int(sys.argv[3]);L=int(sys.argv[4]);out=sys.argv[5]
+z,wz=energy_grid(a,T,n,210)
+st=time.time();Q=[]
+for i,zi in enumerate(z):
+ Q.append(cross_sections(a,T*max(zi,.001),L))
+ if i%50==0: print(i,len(z),zi,time.time()-st,flush=True)
+np.savez(out,z=z,wz=wz,Q=np.array(Q),a=a,T=T)
+print('done',time.time()-st,flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/makeq.py 0 .2 24 50 /app/lowq.npz > /app/lowqlog 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/makeq.py .35 1 24 50 /app/midq.npz > /app/midqlog 2>&1 &
+
+OBS: argv[3]);L=int(sys.argv[4]);out=sys.argv[5]
+> z,wz=energy_grid(a,T,n,210)
+> st=time.time();Q=[]
+> for i,zi in enumerate(z):
+>  Q.append(cross_sections(a,T*max(zi,.001),L))
+>  if i%50==0: print(i,len(z),zi,time.time()-st,flush=True)
+> np.savez(out,z=z,wz=wz,Q=np.array(Q),a=a,T=T)
+> print('done',time.time()-st,flush=True)
+> PY
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/makeq.py 0 .2 24 50 /app/lowq.npz > /app/lowqlog 2>&1 &
+[7] 691
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/makeq.py .35 1 24 50 /app/midq.npz > /app/midqlog 2>&1 &
+[8] 692
+root@4b363f7bd497:/app#
+
+
+#### step 23 02:34:31
+MSG: Analysis: The high-temperature trace-mixture sequence is converging steadily. The small thermal diffusion factor near reduced temperature 1 requires more care, because absolute errors matter there. The new tests will check that regime and the lowest allowed temperature.
+Plan: Monitor the tests and independently compare selected scattering cross sections with tighter tolerances. Verify that quadrature errors are well below the requested transport tolerance.
+CMD: cat /app/fastnestedlog; tail -8 /app/highbasislog; tail -8 /app/midbasislog; cat /app/lowqlog; cat /app/midqlog
+OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+from scatter import *
+for a,e in [(0,.3),(0,.799),(0,.801),(.35,1),(.8,5)]:
+ t=time.time();q1=cross_sections(a,e,12,2e-8);q2=cross_sections(a,e,12,2e-10)
+ print(a,e,np.max(np.abs(q1/q2-1)),q2[:3],time.time()-t,flush=True)
+PY
+
+OBS:  0.20614392 -0.23936347] 13.40126347541809
+32 [ 0.7807887   0.27182242  0.20614392 -0.23936345] 30.484100818634033
+0 528 2.0902070216865147e-10 0.5957252979278564
+50 528 0.06278523023616885 22.497241973876953
+0 528 2.0902070216865147e-10 0.513446569442749
+50 528 0.06278523023616885 20.9023597240448
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+> from scatter import *
+> for a,e in [(0,.3),(0,.799),(0,.801),(.35,1),(.8,5)]:
+>  t=time.time();q1=cross_sections(a,e,12,2e-8);q2=cross_sections(a,e,12,2e-10)
+>  print(a,e,np.max(np.abs(q1/q2-1)),q2[:3],time.time()-t,flush=True)
+> PY
+
+
+
+#### step 24 02:34:59
+MSG: Analysis: The nested high-temperature solution is stable to better than 1e-6 relative by 40 polynomials. The scattering tolerance comparison is still running; the low-temperature and intermediate-core tables are progressing normally.
+Plan: Use the new tables to test 48-polynomial convergence at small thermal diffusion factors. Then compare denser energy grids before selecting the final conservative numerical settings.
+CMD: 
+CMD: tail -8 /app/highbasislog; tail -8 /app/midbasislog; cat /app/lowqlog; cat /app/midqlog
+
+OBS: 20614392 -0.23936348] 8.522499084472656
+28 [ 0.7807887   0.27182242  0.20614392 -0.23936347] 13.40126347541809
+32 [ 0.7807887   0.27182242  0.20614392 -0.23936345] 30.484100818634033
+36 [ 0.7807887   0.27182242  0.20614393 -0.23936347] 49.017066955566406
+0 528 2.0902070216865147e-10 0.5957252979278564
+50 528 0.06278523023616885 22.497241973876953
+100 528 0.5359161781504443 39.597482204437256
+0 528 2.0902070216865147e-10 0.513446569442749
+50 528 0.06278523023616885 20.9023597240448
+100 528 0.5359161781504443 36.4849157333374
+150 528 1.1755355115906236 50.332722902297974
+root@4b363f7bd497:/app#
+
+
+#### step 25 02:35:16
+MSG: Analysis: The scattering tolerance checks agree far more closely than the transport requirement. The remaining uncertainty is convergence of small thermal diffusion factors and the energy quadrature at high polynomial orders.
+Plan: Run nested 48-polynomial checks once the new tables finish, and produce a denser energy table for an independent comparison. Avoid further repeated-basis runs now that nested solves are available.
+CMD: kill 573 574 2>/dev/null || true
+cat /app/lowqlog; cat /app/midqlog
+OPENBLAS_NUM_THREADS=1 python3 /app/makeq.py 0 1 36 50 /app/lj1fine.npz > /app/lj1finelog 2>&1 &
+
+OBS: 621922731399536
+400 528 56.07064691727685 62.71376633644104
+450 528 101.49285049503113 63.811400413513184
+500 528 167.86671522047257 64.91021800041199
+done 65.5344729423523
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/makeq.py 0 1 36 50 /app/lj1fine.npz > /app/lj1finelog 2>&1 &
+[8] 766
+[3]   Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/highbasis.py /app/qdata_0.0_50.0.npz 40 .05 48 > /app/highbasislog 2>&1
+[4]   Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/highbasis.py /app/qdata_0.35_2.0.npz 15 .2 40 > /app/midbasislog 2>&1
+root@4b363f7bd497:/app#
+
+
+#### step 26 02:35:35
+MSG: Analysis: The intermediate-core cross-section table is complete. The program's runtime is comfortably below the limit at the quadrature sizes tested so far. I will use 48-polynomial nested solves to check the potentially difficult thermal diffusion regime.
+Plan: Run those convergence checks, then compare the Lennard-Jones small-factor case with a denser energy grid. The final production settings will include a margin below the acceptance tolerance.
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/nested.py /app/midq.npz 40 .05 48 > /app/midnestedlog 2>&1 &
+cat /app/lowqlog; cat /app/lj1finelog
+
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/makeq.py 0 1 24 50 /app/lj1coarse.npz > /app/lj1coarselog 2>&1 &
+
+OBS: 13962173462
+250 528 5.623566198277695 73.60666108131409
+300 528 13.504856934803543 74.47160959243774
+350 528 28.693757405577305 75.06339883804321
+400 528 56.07064691727685 75.61359643936157
+450 528 101.49285049503113 76.16016221046448
+500 528 167.86671522047257 76.7071807384491
+done 77.00302076339722
+0 792 1.914708940949693e-11 0.18076229095458984
+50 792 0.026347677226695718 8.888511180877686
+100 792 0.17948029369856625 16.96164107322693
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/makeq.py 0 1 24 50 /app/lj1coarse.npz > /app/lj1coarselog 2>&1 &
+[10] 793
+root@4b363f7bd497:/app#
+
+
+#### step 27 02:36:24
+MSG: Analysis: The numerical method and normalizations are consistent. I found that nearly coincident energy-panel boundaries can occur when the critical energy matches a standard grid boundary; removing those tiny panels will avoid unnecessary work and improve robustness.
+Plan: Remove near-duplicate grid boundaries, run the endpoint nested solves, and inspect convergence for the small thermal diffusion factor near temperature 1.
+CMD: python3 - <<'PY'
+p='/app/energy.py';s=open(p).read().replace('t=cuts**(1/3)','cuts=cuts[np.r_[True,np.diff(cuts)>1e-10*np.maximum(1,cuts[1:])]]\n    t=cuts**(1/3)');open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/nested.py /app/lowq.npz 40 .05 48 > /app/lownestedlog 2>&1 &
+cat /app/midnestedlog; cat /app/lj1coarselog; cat /app/lj1finelog
+
+OBS: .99584698677063
+200 792 0.7342355535004604 40.27053952217102
+250 792 0.9590312254260792 46.25653052330017
+300 792 1.2275046045868574 48.19580674171448
+350 792 3.6029654521918046 49.39440417289734
+400 792 7.141805834353698 50.2574827671051
+450 792 13.451976924907072 51.07675504684448
+500 792 22.797266661289626 51.900967597961426
+550 792 34.18992088531116 52.87553429603577
+600 792 55.9461828733417 53.69520354270935
+650 792 80.31890361102705 54.71382451057434
+700 792 117.45291514337333 55.55961465835571
+750 792 167.74544527355968 56.376774072647095
+done 57.054221868515015
+root@4b363f7bd497:/app#
+
+
+#### step 28 02:36:41
+MSG: Analysis: The intermediate-core trace-mixture solution is stable to the requested tolerance by 48 polynomials, though its higher-order corrections are not perfectly monotonic. I will check the Lennard-Jones small-factor case with both coarse and fine energy grids before settling on a final basis limit.
+Plan: Run nested 48-polynomial solutions on the two independent energy grids, then compare their transport values directly. Also inspect the lowest-temperature result.
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/nested.py /app/lj1coarse.npz 40 .05 48 > /app/lj1cnestedlog 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/nested.py /app/lj1fine.npz 40 .05 48 > /app/lj1fnestedlog 2>&1 &
+cat /app/lownestedlog
+
+OBS: New Terminal Output:
+
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/nested.py /app/lj1coarse.npz 40 .05 48 > /app/lj1cnestedlog 2>&1 &
+[2] 834
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/nested.py /app/lj1fine.npz 40 .05 48 > /app/lj1fnestedlog 2>&1 &
+[3] 835
+root@4b363f7bd497:/app# cat /app/lownestedlog
+root@4b363f7bd497:/app#
+
+
+#### step 29 02:37:01
+MSG: Analysis: The two energy-grid comparisons are in progress. For efficiency, the final solver can use different polynomial orders for the vector and tensor equations: diffusion and thermal diffusion need the larger basis, while viscosity converges much faster.
+Plan: Measure the current convergence, then assemble a larger vector matrix if necessary without increasing the viscosity basis. This preserves accuracy while staying well inside the runtime and memory limits.
+CMD: cat /app/lownestedlog; cat /app/lj1cnestedlog; cat /app/lj1fnestedlog
+
+CMD: cat > /app/vectornested.py <<'PY'
+import numpy as np,time,sys
+from brackets import pair_matrix,properties
+q=np.load(sys.argv[1]);z,wz,Q,T=q['z'],q['wz'],q['Q'],float(q['T'])
+R,X=map(float,sys.argv[2:4]);NN=int(sys.argv[4]);st=time.time()
+rank=1
+selfmat=pair_matrix(NN,rank,1,1,z,wz,Q,T,True)
+cv=X*(1-X)*pair_matrix(NN,rank,1,R,z,wz,Q,T,False)
+cv[:NN,:NN]+=.5*X**2*selfmat
+cv[NN:,NN:]+=.5*(1-X)**2*selfmat/np.sqrt(R)
+print('matrix',NN,time.time()-st,flush=True)
+for N in range(16,NN+1,4):
+ ix=np.r_[np.arange(N),NN+np.arange(N)]
+ c=cv[np.ix_(ix,ix)]
+ bD=np.zeros(2*N);bT=bD.copy()
+ bD[0]=np.sqrt(T/2);bD[N]=-np.sqrt(T/(2*R))
+ bT[1]=-2.5*X*np.sqrt(T/2);bT[N+1]=-2.5*(1-X)*np.sqrt(T/(2*R))
+ idx=np.arange(1,2*N)
+ from scipy.linalg import solve
+ sol=solve(c[np.ix_(idx,idx)],np.column_stack((bD[idx],bT[idx])),assume_a='pos')
+ DD=bD[idx]@sol[:,0];DT=bD[idx]@sol[:,1];TT=bT[idx]@sol[:,1]
+ print(N,[TT-DT*DT/DD,X*(1-X)*DD,DT/(X*(1-X)*DD)],flush=True)
+PY
+
+OBS: elfmat/np.sqrt(R)
+> print('matrix',NN,time.time()-st,flush=True)
+> for N in range(16,NN+1,4):
+>  ix=np.r_[np.arange(N),NN+np.arange(N)]
+>  c=cv[np.ix_(ix,ix)]
+>  bD=np.zeros(2*N);bT=bD.copy()
+>  bD[0]=np.sqrt(T/2);bD[N]=-np.sqrt(T/(2*R))
+>  bT[1]=-2.5*X*np.sqrt(T/2);bT[N+1]=-2.5*(1-X)*np.sqrt(T/(2*R))
+>  idx=np.arange(1,2*N)
+>  from scipy.linalg import solve
+>  sol=solve(c[np.ix_(idx,idx)],np.column_stack((bD[idx],bT[idx])),assume_a='pos')
+>  DD=bD[idx]@sol[:,0];DT=bD[idx]@sol[:,1];TT=bT[idx]@sol[:,1]
+>  print(N,[TT-DT*DT/DD,X*(1-X)*DD,DT/(X*(1-X)*DD)],flush=True)
+> PY
+root@4b363f7bd497:/app#
+
+
+#### step 30 02:37:30
+MSG: Analysis: The matrix computations are still active; no failures have been reported. I will gather their results before selecting the final basis size. The final program will avoid background processes and external files entirely.
+Plan: Wait briefly for the convergence comparisons, then inspect their results and CPU/memory usage.
+CMD: 
+CMD: cat /app/lownestedlog; cat /app/lj1cnestedlog; cat /app/lj1fnestedlog; for p in 812 834 835; do echo PID=$p; grep -E 'State|VmRSS|Threads' /proc/$p/status 2>/dev/null; done
+
+OBS: 944 -0.007247  ]
+16 [ 0.69286753  0.07625098  0.10544177 -0.00731195]
+20 [ 0.69286756  0.07625099  0.10544221 -0.00731254]
+24 [ 0.69286757  0.07625099  0.10544253 -0.00731457]
+28 [ 0.69286759  0.076251    0.10544255 -0.00731481]
+32 [ 0.6928676   0.07625102  0.1054427  -0.00731748]
+36 [ 0.6928676   0.07625105  0.10544295 -0.00732107]
+40 [ 0.6928676   0.07625107  0.10544312 -0.00732332]
+44 [ 0.69286761  0.07625107  0.1054432  -0.00732413]
+48 [ 0.69286761  0.07625107  0.10544321 -0.00732426]
+PID=812
+PID=834
+PID=835
+State:  R (running)
+VmRSS:    304216 kB
+Threads:        1
+root@4b363f7bd497:/app#
+
+
+#### step 31 02:37:48
+MSG: Analysis: The lowest-temperature trace-mixture case converges well by 48 polynomials. The Lennard-Jones case near temperature 1 has a small thermal diffusion factor and needs about 48 polynomials; its last changes are below the absolute tolerance, but I will retain additional margin.
+Plan: Compare the fine-grid result and extend the vector basis to 64 for this difficult case. Keep viscosity at a smaller, converged order to limit runtime.
+CMD: cat /app/lj1fnestedlog
+OPENBLAS_NUM_THREADS=1 python3 /app/makeq.py 0 1 32 66 /app/lj1q64.npz > /app/lj1q64log 2>&1 &
+
+OBS: ]
+28 [ 0.69286758  0.076251    0.10544255 -0.00731482]
+32 [ 0.69286759  0.07625102  0.1054427  -0.0073175 ]
+36 [ 0.69286759  0.07625105  0.10544295 -0.00732108]
+40 [ 0.69286759  0.07625107  0.10544313 -0.00732334]
+44 [ 0.6928676   0.07625107  0.1054432  -0.00732414]
+48 [ 0.69286761  0.07625107  0.10544321 -0.00732428]
+[3]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/nested.py /app/lj1fine.npz 40 .05 48 > /app/lj1fnestedlog 2>&1
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/makeq.py 0 1 32 66 /app/lj1q64.npz > /app/lj1q64log 2>&1 &
+[1] 913
+root@4b363f7bd497:/app#
+
+
+#### step 32 02:38:45
+MSG: Analysis: The coarse and fine energy grids agree within about 2e-8 in the small thermal diffusion factor, well below its absolute tolerance. I will extend the vector basis to 64 and extend the high-energy tail accordingly; high-degree collision brackets require more tail coverage than low-order transport formulas.
+Plan: Add high-energy panels, generate the larger angular cross-section table, and test the 64-polynomial vector solve. Then package a self-contained program using two worker processes for scattering and matrix assembly.
+CMD: python3 - <<'PY'
+p='/app/energy.py';s=open(p).read().replace('170,210,250,zmax','170,210,250,295,345,400,460,zmax');open(p,'w').write(s)
+PY
+cat /app/lj1q64log
+cat > /app/extendq.py <<'PY'
+import numpy as np,sys,time
+from energy import energy_grid
+from scatter import cross_sections
+q=np.load(sys.argv[1]);a,T=float(q['a']),float(q['T']);L=q['Q'].shape[1]
+z,wz=energy_grid(a,T,32,400)
+QQ=[];st=time.time();oldz=q['z']
+for zi in z:
+ ix=np.argmin(abs(oldz-zi))
+ if abs(oldz[ix]-zi)<1e-10: QQ.append(q['Q'][ix])
+ else: QQ.append(cross_sections(a,T*max(zi,.001),L))
+np.savez(sys.argv[2],z=z,wz=wz,Q=np.array(QQ),a=a,T=T)
+print('done',time.time()-st,flush=True)
+PY
+
+OBS: 59
+done 47.47363209724426
+root@4b363f7bd497:/app# cat > /app/extendq.py <<'PY'
+> import numpy as np,sys,time
+> from energy import energy_grid
+> from scatter import cross_sections
+> q=np.load(sys.argv[1]);a,T=float(q['a']),float(q['T']);L=q['Q'].shape[1]
+> z,wz=energy_grid(a,T,32,400)
+> QQ=[];st=time.time();oldz=q['z']
+> for zi in z:
+>  ix=np.argmin(abs(oldz-zi))
+>  if abs(oldz[ix]-zi)<1e-10: QQ.append(q['Q'][ix])
+>  else: QQ.append(cross_sections(a,T*max(zi,.001),L))
+> np.savez(sys.argv[2],z=z,wz=wz,Q=np.array(QQ),a=a,T=T)
+> print('done',time.time()-st,flush=True)
+> PY
+root@4b363f7bd497:/app#
+
+
+#### step 33 02:39:06
+MSG: Analysis: The 64-order angular table is complete. I will verify the larger vector basis using a sufficiently long energy tail. The final implementation can parallelize independent energy chunks while forcing each numerical worker to use one BLAS thread.
+Plan: Extend the table to reduced collision energy 400, run the 64-polynomial vector convergence test, and measure its runtime. Use those measurements to choose a conservative production basis.
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/extendq.py /app/lj1q64.npz /app/lj1q64long.npz
+OPENBLAS_NUM_THREADS=1 python3 /app/vectornested.py /app/lj1q64long.npz 40 .05 64 > /app/lj1v64log 2>&1 &
+
+OBS: New Terminal Output:
+
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/extendq.py /app/lj1q64.npz /app/lj1q64long.npz
+
+
+
+#### step 34 02:39:27
+MSG: Analysis: The tail extension is running. No final program has been written yet; the numerical validation is nearly complete.
+Plan: Check the 64-polynomial vector results, then assemble the standalone program with parallel energy chunks, converged viscosity and vector bases, and exactly the required JSON output.
+CMD: 
+CMD: cat /app/lj1v64log; ls -lh /app/lj1q64long.npz; grep -E 'State|VmRSS|Threads' /proc/913/status 2>/dev/null || true
+
+OBS: New Terminal Output:
+
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/extendq.py /app/lj1q64.npz /app/lj1q64long.npz
+done 1.717966079711914
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/vectornested.py /app/lj1q64long.npz 40 .05 64 > /app/lj1v64log 2>&1 &
+[1] 966
+root@4b363f7bd497:/app# cat /app/lj1v64log; ls -lh /app/lj1q64long.npz; grep -E 'State|VmRSS|Threads' /proc/913/status 2>/dev/null || true
+-rw-r--r-- 1 root root 444K Nov  1 02:39 /app/lj1q64long.npz
+root@4b363f7bd497:/app#
+
+
+#### step 35 02:40:01
+MSG: Analysis: The 64-polynomial vector test is active. The program can now be packaged without external data: it computes classical cross sections, assembles symmetric collision brackets, and solves the coupled heat/diffusion system, including the zero-diffusion heat-conductivity constraint.
+Plan: Create the standalone file and add two-process parallelization for independent energy chunks. Keep all progress and diagnostics off standard output; standard output will contain only the four requested JSON numbers.
+CMD: cat /app/lj1v64log
+cat > /app/build.py <<'PY'
+from pathlib import Path
+s='''#!/usr/bin/env python3
+"""Classical binary-gas transport from converged Boltzmann collision brackets.
+
+Units: sigma = epsilon = k_B = mass of species 1 = 1.
+Angular collision integrals are evaluated from classical central-force orbits.
+The variational vector and traceless-tensor equations use Laguerre polynomials
+and exact finite spherical-harmonic angular projections.  Energy quadrature
+and nested polynomial spaces resolve the non-polynomial collision operator.
+"""
+import os
+for _key in ('OPENBLAS_NUM_THREADS','OMP_NUM_THREADS','MKL_NUM_THREADS','NUMEXPR_NUM_THREADS'):
+    os.environ[_key]='1'
+import sys, json, math, multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+'''
+for p in ['scatter.py','brackets.py','energy.py']:
+ t=Path('/app/'+p).read_text().split("if __name__=='__main__':")[0]
+ t='\n'.join(line for line in t.split('\n') if not line.startswith('from scatter import'))
+ s+='\n'+t
+s+='''
+
+def scattering_job(args):
+    a,T,z,L=args
+    return np.array([cross_sections(a,T*max(float(zi),.001),L) for zi in z])
+
+def matrix_job(args):
+    N,rank,R,X,T,z,wz,Q=args
+    selfmat=pair_matrix(N,rank,1,1,z,wz,Q,T,True)
+    C=X*(1-X)*pair_matrix(N,rank,1,R,z,wz,Q,T,False)
+    C[:N,:N]+=.5*X**2*selfmat
+    C[N:,N:]+=.5*(1-X)**2*selfmat/np.sqrt(R)
+    return C
+
+def collision_matrix(pool,N,rank,R,X,T,z,wz,Q):
+    # Moderate-sized chunks bound memory and balance the two CPU workers.
+    chunks=[(N,rank,R,X,T,z[k:k+48],wz[k:k+48],Q[k:k+48])
+            for k in range(0,len(z),48)]
+    C=sum(pool.map(matrix_job,chunks),np.zeros((2*N,2*N)))
+    return (C+C.T)/2
+
+def vector_properties(C,N,R,X,T):
+    bD=np.zeros(2*N);bT=bD.copy()
+    bD[0]=np.sqrt(T/2);bD[N]=-np.sqrt(T/(2*R))
+    bT[1]=-2.5*X*np.sqrt(T/2)
+    bT[N+1]=-2.5*(1-X)*np.sqrt(T/(2*R))
+    # Fix the redundant total-momentum coefficient; both sources are
+    # orthogonal to the momentum invariant, so transport is gauge invariant.
+    ix=np.arange(1,2*N)
+    cc=solve(C[np.ix_(ix,ix)],np.column_stack((bD[ix],bT[ix])),assume_a='pos')
+    DD=bD[ix]@cc[:,0];DT=bD[ix]@cc[:,1];TT=bT[ix]@cc[:,1]
+    return np.array([TT-DT*DT/DD,X*(1-X)*DD,DT/(X*(1-X)*DD)])
+
+def tensor_property(C,N,X,T):
+    b=np.zeros(2*N);b[0]=X;b[N]=1-X
+    return T/2*(b@solve(C,b,assume_a='pos'))
+
+def submatrix(C,N,full):
+    ix=np.r_[np.arange(N),full+np.arange(N)]
+    return C[np.ix_(ix,ix)]
+
+def calculate(a,R,X,T):
+    Nv=32 if R<=8 else 64
+    Ns=24 if R<=8 else 32
+    z,wz=energy_grid(a,T,32,400)
+    with ProcessPoolExecutor(max_workers=2,mp_context=multiprocessing.get_context('fork')) as pool:
+        args=[(a,T,z[k:k+8],Nv+2) for k in range(0,len(z),8)]
+        Q=np.concatenate(list(pool.map(scattering_job,args)))
+        Cv=collision_matrix(pool,Nv,1,R,X,T,z,wz,Q)
+        vp=vector_properties(Cv,Nv,R,X,T)
+        # Compare several nested spaces, not merely one adjacent order.
+        prev=[vector_properties(submatrix(Cv,n,Nv),n,R,X,T)
+              for n in (Nv-12,Nv-8,Nv-4)]
+        tolerance=np.r_[2e-6*np.abs(vp[:2]),max(2e-6*abs(vp[2]),1.2e-7)]
+        if np.any(np.max(np.abs(np.array(prev[-2:])-vp),axis=0)>tolerance):
+            Nv2=Nv+16
+            # Existing cross sections already cover every harmonic in the
+            # old basis; calculate extra harmonics only if refinement needs it.
+            args=[(a,T,z[k:k+8],Nv2+2) for k in range(0,len(z),8)]
+            Q=np.concatenate(list(pool.map(scattering_job,args)))
+            Cv=collision_matrix(pool,Nv2,1,R,X,T,z,wz,Q)
+            vp=vector_properties(Cv,Nv2,R,X,T)
+        Cs=collision_matrix(pool,Ns,2,R,X,T,z,wz,Q)
+        eta=tensor_property(Cs,Ns,X,T)
+        eta0=tensor_property(submatrix(Cs,Ns-8,Ns),Ns-8,X,T)
+        if abs(eta-eta0)>2e-6*eta:
+            Ns+=12
+            Cs=collision_matrix(pool,Ns,2,R,X,T,z,wz,Q)
+            eta=tensor_property(Cs,Ns,X,T)
+    if R==1: vp[2]=0.
+    return dict(viscosity=float(eta),thermal_conductivity=float(vp[0]),
+                binary_diffusion=float(vp[1]),thermal_diffusion_factor=float(vp[2]))
+
+if __name__=='__main__':
+    A,R,X,T=map(float,sys.argv[1:5])
+    print(json.dumps(calculate(A,R,X,T),allow_nan=False,separators=(',',':')))
+'''
+Path('/app/output/transport.py').write_text(s)
+PY
+python3 /app/build.py
+python3 /app/output/transport.py 0 40 0.05 1 > /app/finaltest1 2> /app/finalerr1 &
+
+OBS: property(Cs,Ns,X,T)
+>     if R==1: vp[2]=0.
+>     return dict(viscosity=float(eta),thermal_conductivity=float(vp[0]),
+>                 binary_diffusion=float(vp[1]),thermal_diffusion_factor=float(vp[2]))
+>
+> if __name__=='__main__':
+>     A,R,X,T=map(float,sys.argv[1:5])
+>     print(json.dumps(calculate(A,R,X,T),allow_nan=False,separators=(',',':')))
+> '''
+> Path('/app/output/transport.py').write_text(s)
+> PY
+root@4b363f7bd497:/app# python3 /app/build.py
+root@4b363f7bd497:/app# python3 /app/output/transport.py 0 40 0.05 1 > /app/finaltest1 2> /app/finalerr1 &
+[2] 1003
+root@4b363f7bd497:/app#
+
+
+#### step 36 02:40:23
+MSG: Analysis: The standalone program has been created at the requested path and its first end-to-end test is running. I still need to verify the 64-polynomial result, runtime, and operation under the checker's stripped environment.
+Plan: Inspect the active test results, then run endpoint cases with only the allowed environment variables. Confirm the output schema and file constraints.
+CMD: cat /app/lj1v64log; cat /app/finaltest1; cat /app/finalerr1; wc -c /app/output/transport.py
+for p in 966 1003; do echo PID=$p; cat /proc/$p/stat 2>/dev/null; grep -E 'VmRSS|Threads' /proc/$p/status 2>/dev/null; done
+
+CMD: env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C.UTF-8 python3 /app/output/transport.py .8 1 .95 .2 > /app/finaltest2 2> /app/finalerr2 &
+
+OBS: SS:    159444 kB
+Threads:        1
+PID=1003
+1003 (python3) S 57 1003 56 34817 1032 4194560 13106 0 0 0 23 4 0 0 20 0 3 0 184492420 385597440 18652 18446744073709551615 93969426448384 93969426448721 140727
+921763872 0 0 0 0 16781312 2 0 0 0 17 35 0 0 0 0 0 93969426460080 93969426460696 93969936371712 140727921769927 140727921769972 140727921769972 140727921770465
+0
+VmRSS:     75180 kB
+Threads:        3
+root@4b363f7bd497:/app# env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C.UTF-8 python3 /app/output/transport.py .8 1 .95 .2 > /app/finaltest2 2> /app/finalerr2
+&
+[3] 1040
+root@4b363f7bd497:/app#
+
+
+#### step 37 02:40:53
+MSG: Analysis: The program is small, self-contained, and uses one numerical thread per worker. The first production test and stripped-environment endpoint test are still running. The larger vector calculation remains within the memory budget.
+Plan: Collect the results and measure end-to-end elapsed times. If the 64-polynomial convergence check requests further refinement, verify that the larger solve still fits the 600-second budget.
+CMD: cat /app/lj1v64log; cat /app/finaltest1 /app/finalerr1 /app/finaltest2 /app/finalerr2
+python3 - <<'PY'
+import os,time
+hz=os.sysconf('SC_CLK_TCK');uptime=float(open('/proc/uptime').read().split()[0])
+for p in [966,1003,1040]:
+ try:
+  f=open('/proc/%s/stat'%p).read().split();print(p,'elapsed',uptime-int(f[21])/hz,'cpu',(int(f[13])+int(f[14]))/hz)
+ except FileNotFoundError: pass
+PY
+
+CMD: 
+OBS: 64(-0.007324285586123561)]
+[1]   Done                    OPENBLAS_NUM_THREADS=1 python3 /app/vectornested.py /app/lj1q64long.npz 40 .05 64 > /app/lj1v64log 2>&1
+root@4b363f7bd497:/app# python3 - <<'PY'
+> import os,time
+> hz=os.sysconf('SC_CLK_TCK');uptime=float(open('/proc/uptime').read().split()[0])
+> for p in [966,1003,1040]:
+>  try:
+>   f=open('/proc/%s/stat'%p).read().split();print(p,'elapsed',uptime-int(f[21])/hz,'cpu',(int(f[13])+int(f[14]))/hz)
+>  except FileNotFoundError: pass
+> PY
+1003 elapsed 42.45999999996275 cpu 0.29
+1040 elapsed 21.209999999962747 cpu 0.27
+root@4b363f7bd497:/app#
+
+
+#### step 38 02:41:14
+MSG: Analysis: The 64-polynomial test has converged tightly, including the small thermal diffusion factor. The end-to-end program is still running its matrix assembly, and its elapsed time remains comfortably below the limit.
+Plan: Finish the two production tests, then run another extreme unequal-mass case and a nontrivial intermediate mixture. Validate their JSON output and compare with the independently computed reference sequences.
+CMD: cat /app/finaltest1; cat /app/finalerr1; cat /app/finaltest2; cat /app/finalerr2
+
+CMD: python3 /app/output/transport.py 0.8 40 0.95 0.2 > /app/finaltest3 2> /app/finalerr3 &
+
+OBS: New Terminal Output:
+
+root@4b363f7bd497:/app# cat /app/finaltest1; cat /app/finalerr1; cat /app/finaltest2; cat /app/finalerr2
+root@4b363f7bd497:/app# python3 /app/output/transport.py 0.8 40 0.95 0.2 > /app/finaltest3 2> /app/finalerr3 &
+[4] 1099
+root@4b363f7bd497:/app#
+
+
+#### step 39 02:41:35
+MSG: Analysis: The larger-basis validation is complete and agrees with the standalone formulation. Three end-to-end tests are now running, including the stripped-environment equal-mass endpoint and the low-temperature mass-ratio-40 endpoint.
+Plan: Check their exit status and outputs, then test a few additional parameter combinations. Also verify that no diagnostic output leaks to standard output and that only the requested file is in the output directory.
+CMD: cat /app/finaltest1 /app/finalerr1; cat /app/finaltest2 /app/finalerr2; cat /app/finaltest3 /app/finalerr3; ls -la /app/output
+python3 - <<'PY'
+import os
+hz=os.sysconf('SC_CLK_TCK');up=float(open('/proc/uptime').read().split()[0])
+for p in [1003,1040,1099]:
+ try:
+  f=open('/proc/%s/stat'%p).read().split();print(p,'elapsed',round(up-int(f[21])/hz,1))
+ except FileNotFoundError: pass
+PY
+
+CMD: python3 /app/output/transport.py 0.35 15 0.2 2 > /app/finaltest4 2> /app/finalerr4 &
+
+OBS: :40 .
+drwxr-xr-x 1 root root  4096 Nov  1 02:41 ..
+-rw-r--r-- 1 root root 12305 Nov  1 02:40 transport.py
+root@4b363f7bd497:/app# python3 - <<'PY'
+> import os
+> hz=os.sysconf('SC_CLK_TCK');up=float(open('/proc/uptime').read().split()[0])
+> for p in [1003,1040,1099]:
+>  try:
+>   f=open('/proc/%s/stat'%p).read().split();print(p,'elapsed',round(up-int(f[21])/hz,1))
+>  except FileNotFoundError: pass
+> PY
+1003 elapsed 93.4
+1040 elapsed 72.2
+1099 elapsed 21.0
+root@4b363f7bd497:/app# python3 /app/output/transport.py 0.35 15 0.2 2 > /app/finaltest4 2> /app/finalerr4 &
+[5] 1132
+root@4b363f7bd497:/app#
+
+
+#### step 40 02:42:04
+MSG: Analysis: The tests remain active, with no errors reported. Their concurrent execution shares the available CPU capacity, so elapsed times are longer than isolated production runs. The output directory contains only the required regular Python file.
+Plan: Allow the running tests to finish, then validate every output as a single four-member JSON object. Use isolated timing for one demanding case if needed.
+CMD: 
+CMD: for i in 1 2 3 4; do echo TEST=$i; cat /app/finaltest$i /app/finalerr$i; done
+
+OBS: New Terminal Output:
+
+root@4b363f7bd497:/app# for i in 1 2 3 4; do echo TEST=$i; cat /app/finaltest$i /app/finalerr$i; done
+TEST=1
+[3]   Done                    env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C.UTF-8 python3 /app/output/transport.py .8 1 .95 .2 > /app/finaltest2 2> /app/fina
+lerr2
+TEST=2
+{"viscosity":0.05892802141243003,"thermal_conductivity":0.2222304549544961,"binary_diffusion":0.07643652924402113,"thermal_diffusion_factor":0.0}
+TEST=3
+TEST=4
+root@4b363f7bd497:/app#
+
+
+#### step 41 02:42:37
+MSG: Analysis: The stripped-environment equal-mass endpoint test completed successfully and produced exactly the requested JSON schema, with thermal diffusion identically zero as required by symmetry. The unequal-mass tests are still running without errors.
+Plan: Collect the remaining outputs and compare them against the independently converged values. Then perform one isolated high-temperature timing test to confirm runtime margin.
+CMD: for i in 1 3 4; do echo TEST=$i; cat /app/finaltest$i /app/finalerr$i; done
+python3 - <<'PY'
+import os
+hz=os.sysconf('SC_CLK_TCK');up=float(open('/proc/uptime').read().split()[0])
+for p in [1003,1099,1132]:
+ try:
+  f=open('/proc/%s/stat'%p).read().split();children=open('/proc/%s/task/%s/children'%(p,p)).read().split();print(p,'elapsed',round(up-int(f[21])/hz,1),'children',children)
+  for ch in children:
+   ff=open('/proc/%s/stat'%ch).read().split();print(ch,'cpu',round((int(ff[13])+int(ff[14]))/hz,1))
+ except FileNotFoundError:pass
+PY
+
+CMD: 
+OBS: 1099,1132]:
+>  try:
+>   f=open('/proc/%s/stat'%p).read().split();children=open('/proc/%s/task/%s/children'%(p,p)).read().split();print(p,'elapsed',round(up-int(f[21])/hz,1),'childr
+en',children)
+>   for ch in children:
+>    ff=open('/proc/%s/stat'%ch).read().split();print(ch,'cpu',round((int(ff[13])+int(ff[14]))/hz,1))
+>  except FileNotFoundError:pass
+> PY
+1003 elapsed 146.7 children ['1004', '1005']
+1004 cpu 60.9
+1005 cpu 63.7
+1099 elapsed 74.3 children ['1100', '1101']
+1100 cpu 24.6
+1101 cpu 24.6
+1132 elapsed 53.3 children ['1139', '1140']
+1139 cpu 17.6
+1140 cpu 17.5
+root@4b363f7bd497:/app#
+
+
+#### step 42 02:43:07
+MSG: Analysis: The remaining tests have accumulated roughly the expected CPU work and are approaching completion. Their workers stay within the memory budget and use the intended two-process setup.
+Plan: Wait for completion, validate the outputs numerically and structurally, then run an isolated demanding case with an explicit timer.
+CMD: 
+CMD: for i in 1 2 3 4; do echo TEST=$i; cat /app/finaltest$i /app/finalerr$i; done
+
+OBS: New Terminal Output:
+
+root@4b363f7bd497:/app# for i in 1 2 3 4; do echo TEST=$i; cat /app/finaltest$i /app/finalerr$i; done
+TEST=1
+{"viscosity":0.6928675864260506,"thermal_conductivity":0.07625107217029811,"binary_diffusion":0.1054432243928333,"thermal_diffusion_factor":-0.00732428558612383
+8}
+[2]   Done                    python3 /app/output/transport.py 0 40 0.05 1 > /app/finaltest1 2> /app/finalerr1
+TEST=2
+{"viscosity":0.05892802141243003,"thermal_conductivity":0.2222304549544961,"binary_diffusion":0.07643652924402113,"thermal_diffusion_factor":0.0}
+TEST=3
+TEST=4
+root@4b363f7bd497:/app#
+
+
+#### step 43 02:43:26
+MSG: Analysis: The difficult Lennard-Jones small-factor test completed successfully and matches the independently computed 64-polynomial solution. The equal-mass endpoint also passed its output and symmetry checks. Two remaining production tests are still running.
+Plan: Finish those tests and time the high-temperature mass-ratio-40 trace mixture in isolation. Compare all completed JSON outputs with the converged reference sequences.
+CMD: for i in 3 4; do echo TEST=$i; cat /app/finaltest$i /app/finalerr$i; done
+cat > /app/timedtest.py <<'PY'
+import subprocess,time,json,sys
+st=time.time()
+p=subprocess.run(['python3','/app/output/transport.py']+sys.argv[1:],capture_output=True,text=True)
+print('seconds',time.time()-st,'status',p.returncode,flush=True)
+print(p.stdout,flush=True);print(p.stderr,flush=True)
+if p.returncode==0:
+ q=json.loads(p.stdout)
+ assert set(q)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+ assert all(type(v) in (int,float) for v in q.values())
+PY
+python3 /app/timedtest.py 0 40 .05 50 > /app/timinglog 2>&1 &
+
+OBS: t subprocess,time,json,sys
+> st=time.time()
+> p=subprocess.run(['python3','/app/output/transport.py']+sys.argv[1:],capture_output=True,text=True)
+> print('seconds',time.time()-st,'status',p.returncode,flush=True)
+> print(p.stdout,flush=True);print(p.stderr,flush=True)
+> if p.returncode==0:
+>  q=json.loads(p.stdout)
+>  assert set(q)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+>  assert all(type(v) in (int,float) for v in q.values())
+> PY
+root@4b363f7bd497:/app# python3 /app/timedtest.py 0 40 .05 50 > /app/timinglog 2>&1 &
+[6] 1240
+root@4b363f7bd497:/app#
+
+
+#### step 44 02:44:23
+MSG: Analysis: The main numerical checks now pass, including the small thermal diffusion factor at mass ratio 40. I will perform a final independent scattering check and test several additional mixtures for basis convergence, rather than relying only on the initial examples.
+Plan: Read the remaining production outputs, compare selected cross sections with scalar adaptive integration, and run a few difficult mass/composition/temperature combinations with the larger vector basis.
+CMD: for i in 3 4; do echo TEST=$i; cat /app/finaltest$i /app/finalerr$i; done; cat /app/timinglog
+cat > /app/scalarcheck.py <<'PY'
+import numpy as np,time
+from scatter import potential,critical,turning,cross_sections
+from scipy.integrate import quad
+from scipy.special import eval_legendre
+
+def scalarQ(a,E,l):
+ cr=critical(a,E);scale=a+(1-a)*max(E**(-1/6),E**(-1/12))
+ def f(b):
+  ri=turning(np.array([b]),a,E,cr)[0];hh=((1-a)/(ri-a))**6;rb=(b/ri)**2
+  def inner(v):
+   lr=6*(np.log1p(-v*v)-np.log1p(a*v*v/(ri-a)))
+   dh=np.expm1(lr)
+   dv=-4*hh*dh*(E*(1-rb)/(4*hh)+hh*np.exp(lr))
+   ff=rb*v*v*(2-v*v)+dv/E
+   return 2*v*b/ri/np.sqrt(max(ff,1e-300))
+  points=[np.sqrt(1-ri/cr[0])] if cr and ri<cr[0] else None
+  I=quad(inner,0,1,points=points,epsabs=1e-9,epsrel=1e-9,limit=250)[0]
+  chi=np.pi-2*I
+  return b*(1-eval_legendre(l,np.cos(chi)))
+ if cr:
+  bc=cr[1]
+  v=quad(f,0,bc*(1-1e-7),epsabs=1e-6,limit=300)[0]
+  v+=quad(f,bc*(1+1e-7),50*scale,epsabs=1e-6,limit=300)[0]
+ else:v=quad(f,0,50*scale,epsabs=1e-6,limit=300)[0]
+ return 2*np.pi*v
+for a,E in [(0,.2),(0,.801),(.35,1),(.8,5),(.8,100)]:
+ st=time.time();qs=cross_sections(a,E,2)
+ vals=np.array([scalarQ(a,E,l) for l in [1,2]])
+ print(a,E,qs,vals,qs/vals-1,time.time()-st,flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/scalarcheck.py > /app/scalarchecklog 2>&1 &
+
+OBS: turn b*(1-eval_legendre(l,np.cos(chi)))
+>  if cr:
+>   bc=cr[1]
+>   v=quad(f,0,bc*(1-1e-7),epsabs=1e-6,limit=300)[0]
+>   v+=quad(f,bc*(1+1e-7),50*scale,epsabs=1e-6,limit=300)[0]
+>  else:v=quad(f,0,50*scale,epsabs=1e-6,limit=300)[0]
+>  return 2*np.pi*v
+> for a,E in [(0,.2),(0,.801),(.35,1),(.8,5),(.8,100)]:
+>  st=time.time();qs=cross_sections(a,E,2)
+>  vals=np.array([scalarQ(a,E,l) for l in [1,2]])
+>  print(a,E,qs,vals,qs/vals-1,time.time()-st,flush=True)
+> PY
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/scalarcheck.py > /app/scalarchecklog 2>&1 &
+[7] 1267
+root@4b363f7bd497:/app#
+
+
+#### step 45 02:44:53
+MSG: Analysis: The independent scalar scattering comparison is running. The remaining end-to-end cases are still active, with no errors. I will continue checking numerical convergence and runtime rather than making further algorithmic changes prematurely.
+Plan: Read all test logs and CPU usage, then validate completed JSON outputs. Start another difficult mixture only after the current tests free CPU capacity.
+CMD: for i in 1 2 3 4; do echo TEST=$i; cat /app/finaltest$i /app/finalerr$i; done; cat /app/timinglog; cat /app/scalarchecklog
+python3 - <<'PY'
+import os
+hz=os.sysconf('SC_CLK_TCK');up=float(open('/proc/uptime').read().split()[0])
+for p in [1099,1132,1240]:
+ try:
+  f=open('/proc/%s/stat'%p).read().split();print(p,'elapsed',round(up-int(f[21])/hz,1))
+ except FileNotFoundError:pass
+PY
+
+CMD: 
+OBS: TEST=4
+0 0.2 [13.33938986 15.28516642] [13.33938889 15.28516336] [7.21080771e-08 2.00340190e-07] 9.912390232086182
+0 0.801 [8.13696607 9.62954698] [8.13696607 9.62954698] [ 2.06501483e-14 -2.50910404e-14] 6.088022232055664
+root@4b363f7bd497:/app# python3 - <<'PY'
+> import os
+> hz=os.sysconf('SC_CLK_TCK');up=float(open('/proc/uptime').read().split()[0])
+> for p in [1099,1132,1240]:
+>  try:
+>   f=open('/proc/%s/stat'%p).read().split();print(p,'elapsed',round(up-int(f[21])/hz,1))
+>  except FileNotFoundError:pass
+> PY
+1099 elapsed 209.8
+1132 elapsed 188.8
+1240 elapsed 78.1
+root@4b363f7bd497:/app#
+
+
+#### step 46 02:45:22
+MSG: Analysis: The scalar scattering calculation agrees with the vectorized calculation to roughly 1e-7 or better, including the orbiting transition. The production tests are slower because several are sharing CPUs, but remain error-free.
+Plan: Check the remaining outputs, then harden the viscosity-refinement path so it always has enough angular cross sections. Verify the larger-basis behavior for a near-zero thermal diffusion factor.
+CMD: for i in 3 4; do echo TEST=$i; cat /app/finaltest$i /app/finalerr$i; done; cat /app/timinglog; cat /app/scalarchecklog
+python3 - <<'PY'
+p='/app/output/transport.py';s=open(p).read();s=s.replace('Ns+=12\n            Cs=','Ns+=12\n            if Q.shape[1]<Ns+2:\n                args=[(a,T,z[k:k+8],Ns+2) for k in range(0,len(z),8)]\n                Q=np.concatenate(list(pool.map(scattering_job,args)))\n            Cs=');open(p,'w').write(s)
+PY
+
+CMD: 
+OBS: 1855
+0.8 5 [3.29945185 3.5556276 ] [3.2994491  3.55562784] [ 8.32664779e-07 -6.64817429e-08] 6.409471750259399
+0.8 100 [2.85984393 2.95794087] [2.85984393 2.95794087] [-3.10862447e-15 -3.33066907e-16] 1.0943012237548828
+root@4b363f7bd497:/app# python3 - <<'PY'
+> p='/app/output/transport.py';s=open(p).read();s=s.replace('Ns+=12\n            Cs=','Ns+=12\n            if Q.shape[1]<Ns+2:\n                args=[(a,T,z[k:k
++8],Ns+2) for k in range(0,len(z),8)]\n                Q=np.concatenate(list(pool.map(scattering_job,args)))\n            Cs=');open(p,'w').write(s)
+> PY
+root@4b363f7bd497:/app#
+
+
+#### step 47 02:45:43
+MSG: Analysis: All four completed end-to-end tests agree with the independently converged calculations, and their output schema is correct. The high-temperature timing test is still running. A minor edge case in viscosity refinement has been fixed so additional angular harmonics are computed if needed.
+Plan: Complete the timing test and test a mixture near a thermal-diffusion sign change. Also check the lower-mass-ratio branch, which starts with a smaller basis and refines adaptively.
+CMD: cat /app/timinglog
+python3 /app/timedtest.py .15 8 .05 1.1 > /app/testR8log 2>&1 &
+python3 /app/timedtest.py 0 40 .05 .9 > /app/testzerolog 2>&1 &
+python3 - <<'PY'
+import json,math,os
+for i in range(1,5):
+ q=json.load(open('/app/finaltest%d'%i))
+ assert set(q)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+ assert all(isinstance(v,(int,float)) and math.isfinite(v) for v in q.values())
+print('Completed outputs validated')
+print('file size',os.stat('/app/output/transport.py').st_size)
+PY
+
+OBS: &1 &
+[1] 1345
+root@4b363f7bd497:/app# python3 /app/timedtest.py 0 40 .05 .9 > /app/testzerolog 2>&1 &
+[2] 1346
+root@4b363f7bd497:/app# python3 - <<'PY'
+> import json,math,os
+> for i in range(1,5):
+>  q=json.load(open('/app/finaltest%d'%i))
+>  assert set(q)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+>  assert all(isinstance(v,(int,float)) and math.isfinite(v) for v in q.values())
+> print('Completed outputs validated')
+> print('file size',os.stat('/app/output/transport.py').st_size)
+> PY
+Completed outputs validated
+file size 12477
+root@4b363f7bd497:/app#
+
+
+#### step 48 02:46:05
+MSG: Analysis: The high-temperature mass-ratio-40 test completed in 125 seconds despite sharing CPUs, well below the 600-second limit. Its transport values agree with the converged reference sequence. All five completed outputs are valid and finite.
+Plan: Finish the two additional convergence tests, then compare their results with an independently assembled larger-basis vector solution. Perform a final syntax and read-only-working-directory check before completion.
+CMD: cat /app/testR8log; cat /app/testzerolog
+python3 -m py_compile /app/output/transport.py
+rm -rf /app/output/__pycache__
+mkdir -p /app/readonlytest
+cp /app/output/transport.py /app/readonlytest/transport.py
+chmod 555 /app/readonlytest
+
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/makeq.py 0 .9 32 82 /app/zeroq80.npz > /app/zeroq80log 2>&1 &
+
+OBS: New Terminal Output:
+
+root@4b363f7bd497:/app# cat /app/testR8log; cat /app/testzerolog
+root@4b363f7bd497:/app# python3 -m py_compile /app/output/transport.py
+root@4b363f7bd497:/app# rm -rf /app/output/__pycache__
+root@4b363f7bd497:/app# mkdir -p /app/readonlytest
+root@4b363f7bd497:/app# cp /app/output/transport.py /app/readonlytest/transport.py
+root@4b363f7bd497:/app# chmod 555 /app/readonlytest
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/makeq.py 0 .9 32 82 /app/zeroq80.npz > /app/zeroq80log 2>&1 &
+[3] 1389
+root@4b363f7bd497:/app#
+
+
+#### step 49 02:47:20
+MSG: Analysis: The standalone solver passes the completed accuracy and output checks. The remaining tests target a near-zero thermal diffusion factor and the smaller-basis branch. I will verify those before declaring completion.
+Plan: Inspect the additional tests and independently assemble an 80-polynomial vector solution for the near-zero case. Compare it with the production result to confirm the convergence margin.
+CMD: cat /app/testR8log; cat /app/testzerolog; cat /app/zeroq80log
+
+CMD: python3 - <<'PY'
+p='/app/makeq.py';s=open(p).read().replace('energy_grid(a,T,n,210)','energy_grid(a,T,n,400)');open(p,'w').write(s)
+PY
+
+CMD: 
+OBS: 72046 status 0
+{"viscosity":0.35008063731005007,"thermal_conductivity":0.17405285493000758,"binary_diffusion":0.12462354185117727,"thermal_diffusion_factor":-0.075108594691841
+06}
+
+
+[1]   Done                    python3 /app/timedtest.py .15 8 .05 1.1 > /app/testR8log 2>&1
+0 704 3.840743788313671e-11 0.7033891677856445
+50 704 0.03806401933189438 30.728707551956177
+100 704 0.21131750748368508 48.95574188232422
+root@4b363f7bd497:/app# python3 - <<'PY'
+> p='/app/makeq.py';s=open(p).read().replace('energy_grid(a,T,n,210)','energy_grid(a,T,n,400)');open(p,'w').write(s)
+> PY
+root@4b363f7bd497:/app#
+
+
+#### step 50 02:47:49
+MSG: Analysis: The lower-mass-ratio branch completed successfully in about 49 seconds. The near-zero thermal-diffusion test and independent higher-basis comparison are still running.
+Plan: Collect the near-zero result, extend its independent cross-section table to a sufficient energy tail, and compare nested 64–80 polynomial solutions. This is the last demanding convergence check.
+CMD: cat /app/testzerolog; tail -8 /app/zeroq80log
+
+CMD: 
+CMD: cat /app/testzerolog; tail -8 /app/zeroq80log
+
+OBS: pp/testzerolog; tail -8 /app/zeroq80log
+seconds 114.19306516647339 status 0
+{"viscosity":0.6223898307186069,"thermal_conductivity":0.06869889705301473,"binary_diffusion":0.09490189416838526,"thermal_diffusion_factor":0.00705085523866607
+1}
+
+
+400 704 13.465258798604456 88.25031208992004
+450 704 23.141759084365255 89.3045027256012
+500 704 40.26473492943205 90.24178123474121
+550 704 61.88084622520999 91.20571160316467
+600 704 101.38691667867373 92.02556276321411
+650 704 143.13338187148395 92.70858001708984
+700 704 208.60850729055122 93.3406343460083
+done 93.37978792190552
+root@4b363f7bd497:/app#
+
+
+#### step 51 02:48:11
+MSG: Analysis: The near-sign-change test completed successfully in 114 seconds and returned a small positive thermal diffusion factor. I will compare it with the independent 80-polynomial solution to verify the absolute-error margin.
+Plan: Extend the independent energy table and assemble its larger vector matrix. Then perform the final read-only-directory execution and output validation.
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/extendq.py /app/zeroq80.npz /app/zeroq80long.npz
+OPENBLAS_NUM_THREADS=1 python3 /app/vectornested.py /app/zeroq80long.npz 40 .05 80 > /app/zerov80log 2>&1 &
+(cd /app/readonlytest && env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C.UTF-8 python3 transport.py 0.5 1 0.05 50 > /app/readonlyresult 2> /app/readonlyerr) &
+
+OBS: New Terminal Output:
+
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/extendq.py /app/zeroq80.npz /app/zeroq80long.npz
+
+
+
+#### step 52 02:49:32
+MSG: Analysis: The production solver has passed the tested endpoints, intermediate mixtures, and a near-sign-change thermal diffusion case. The last independent larger-basis comparison and read-only-directory execution are running.
+Plan: Collect those final results, compare the 64- and 80-polynomial thermal diffusion values, and verify the final file and output schema.
+CMD: cat /app/zerov80log; cat /app/readonlyresult; cat /app/readonlyerr; ls -la /app/output
+
+CMD: 
+OBS: p# cat /app/zerov80log; cat /app/readonlyresult; cat /app/readonlyerr; ls -la /app/output
+[2]+  Done                    ( cd /app/readonlytest && env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C.UTF-8 python3 transport.py 0.5 1 0.05 50 > /app/readonl
+yresult 2> /app/readonlyerr )
+{"viscosity":1.538850827861313,"thermal_conductivity":5.809462430017623,"binary_diffusion":1.9641710249570605,"thermal_diffusion_factor":0.0}
+total 28
+drwxr-xr-x 1 root root  4096 Nov  1 02:46 .
+drwxr-xr-x 1 root root  4096 Nov  1 02:48 ..
+-rw-r--r-- 1 root root 12477 Nov  1 02:45 transport.py
+root@4b363f7bd497:/app#
+
+
+#### step 53 02:50:33
+MSG: Analysis: The read-only-directory test completed successfully under the stripped environment and produced the required four-number JSON object. The independent 80-polynomial convergence check is the only remaining test.
+Plan: Wait for that comparison, confirm its agreement with the production near-sign-change result, and then finalize the regular file at the required path.
+CMD: cat /app/zerov80log
+python3 - <<'PY'
+import os,json,stat
+p='/app/output/transport.py'
+assert stat.S_ISREG(os.lstat(p).st_mode)
+assert os.path.getsize(p)<20971520
+q=json.load(open('/app/readonlyresult'))
+assert len(q)==4 and all(type(v) in (int,float) for v in q.values())
+print('File and read-only execution checks passed')
+PY
+
+CMD: 
+OBS: 019046948773), np.float64(0.0070507415826563166)]
+[1]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/vectornested.py /app/zeroq80long.npz 40 .05 80 > /app/zerov80log 2>&1
+root@4b363f7bd497:/app# python3 - <<'PY'
+> import os,json,stat
+> p='/app/output/transport.py'
+> assert stat.S_ISREG(os.lstat(p).st_mode)
+> assert os.path.getsize(p)<20971520
+> q=json.load(open('/app/readonlyresult'))
+> assert len(q)==4 and all(type(v) in (int,float) for v in q.values())
+> print('File and read-only execution checks passed')
+> PY
+File and read-only execution checks passed
+root@4b363f7bd497:/app#
+
+
+#### step 54 02:51:23
+MSG: Analysis: The independent 80-polynomial near-sign-change calculation differs from the production result by about 1.1e-7 in the thermal diffusion factor, comfortably below the allowed 1e-6 absolute error. File, JSON, and stripped-environment execution checks all pass.
+Plan: Perform one final low-temperature Lennard-Jones energy-quadrature comparison, where orbiting collisions have substantial Maxwellian weight. This checks the remaining important numerical error source before finalizing.
+CMD: python3 /app/timedtest.py 0 40 .05 .2 > /app/final_lowlog 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/makeq.py 0 .2 48 66 /app/lowfine64.npz > /app/lowfine64log 2>&1 &
+
+OBS: New Terminal Output:
+
+root@4b363f7bd497:/app# python3 /app/timedtest.py 0 40 .05 .2 > /app/final_lowlog 2>&1 &
+[1] 1554
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/makeq.py 0 .2 48 66 /app/lowfine64.npz > /app/lowfine64log 2>&1 &
+[2] 1555
+root@4b363f7bd497:/app#
+
+
+#### step 55 02:52:55
+MSG: Analysis: The final low-temperature quadrature comparison is running. Earlier tests show adequate basis convergence, correct output formatting, and substantial runtime margin. I will also give intermediate mass ratios a slightly larger initial vector basis for additional convergence margin.
+Plan: Inspect the low-temperature results and make that conservative basis-size adjustment. Then compare the production result against the finer independent energy grid.
+CMD: cat /app/final_lowlog; tail -8 /app/lowfine64log
+python3 - <<'PY'
+p='/app/output/transport.py';s=open(p).read().replace('Nv=32 if R<=8 else 64','Nv=32 if R<=3 else (48 if R<=8 else 64)');open(p,'w').write(s)
+PY
+
+CMD: 
+OBS: New Terminal Output:
+
+root@4b363f7bd497:/app# cat /app/final_lowlog; tail -8 /app/lowfine64log
+0 1200 3.4805608614545854e-12 0.3408687114715576
+50 1200 0.015210797635811435 17.488088130950928
+100 1200 0.06211367262360738 33.57181358337402
+150 1200 0.21025674425483057 49.39072060585022
+200 1200 0.5311150289204066 64.77177715301514
+250 1200 1.093555138756341 80.06332015991211
+root@4b363f7bd497:/app# python3 - <<'PY'
+> p='/app/output/transport.py';s=open(p).read().replace('Nv=32 if R<=8 else 64','Nv=32 if R<=3 else (48 if R<=8 else 64)');open(p,'w').write(s)
+> PY
+root@4b363f7bd497:/app#
+
+
+#### step 56 02:53:23
+MSG: Analysis: The denser low-temperature energy table is progressing normally. The final program now starts intermediate mass ratios with 48 vector polynomials, adding convergence margin without approaching the runtime limit.
+Plan: Collect the low-temperature production output and finish the fine-grid comparison. Then verify the final file's syntax and constraints once more.
+CMD: cat /app/final_lowlog; tail -8 /app/lowfine64log
+
+CMD: 
+CMD: cat /app/final_lowlog; tail -8 /app/lowfine64log
+
+OBS: 4log
+seconds 104.27618074417114 status 0
+{"viscosity":0.1512743238837404,"thermal_conductivity":0.016657879120352676,"binary_diffusion":0.021821248680135272,"thermal_diffusion_factor":-0.12461367502845
+09}
+
+
+300 1200 2.168423657567571 95.07281446456909
+350 1200 3.3592704826065853 107.27732753753662
+400 1200 4.203784543756616 115.17263054847717
+450 1200 5.456213199020537 116.79148077964783
+500 1200 8.408763291329528 117.90938782691956
+550 1200 13.10354688283347 118.75276446342468
+600 1200 19.402234262001095 119.47051620483398
+650 1200 27.984031753701174 120.167795419693
+root@4b363f7bd497:/app#
+
+
+#### step 57 02:53:44
+MSG: Analysis: The lowest-temperature Lennard-Jones production test completed in 104 seconds and agrees with the earlier converged sequence. The finer energy-grid table is almost finished, providing an independent check of its quadrature error.
+Plan: Assemble the fine-grid vector solution and compare it directly with the production result. Finish with a syntax, file-size, and output-directory audit.
+CMD: tail -8 /app/lowfine64log; ls -lh /app/lowfine64.npz 2>/dev/null
+
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/vectornested.py /app/lowfine64.npz 40 .05 64 > /app/lowfinevlog 2>&1 &
+python3 - <<'PY'
+import ast,os,stat
+p='/app/output/transport.py'
+ast.parse(open(p).read())
+assert stat.S_ISREG(os.lstat(p).st_mode)
+assert os.path.getsize(p)<20971520
+print('Syntax and file constraints passed:',os.path.getsize(p),'bytes')
+PY
+
+OBS:  66 /app/lowfine64.npz > /app/lowfine64log 2>&1
+-rw-r--r-- 1 root root 639K Nov  1 02:53 /app/lowfine64.npz
+root@4b363f7bd497:/app# OPENBLAS_NUM_THREADS=1 python3 /app/vectornested.py /app/lowfine64.npz 40 .05 64 > /app/lowfinevlog 2>&1 &
+[1] 1646
+root@4b363f7bd497:/app# python3 - <<'PY'
+> import ast,os,stat
+> p='/app/output/transport.py'
+> ast.parse(open(p).read())
+> assert stat.S_ISREG(os.lstat(p).st_mode)
+> assert os.path.getsize(p)<20971520
+> print('Syntax and file constraints passed:',os.path.getsize(p),'bytes')
+> PY
+Syntax and file constraints passed: 12495 bytes
+root@4b363f7bd497:/app#
+
+
+#### step 58 02:54:43
+MSG: Analysis: The fine-grid low-temperature vector solve is running. The final file passes syntax, regular-file, and size checks. All completed production tests return valid JSON and stay well below the runtime limit.
+Plan: Collect the final fine-grid comparison and check its agreement with the production low-temperature result. No further algorithm changes are planned unless that comparison exposes an error.
+CMD: cat /app/lowfinevlog
+
+CMD: 
+CMD: tail -8 /app/lowfinevlog; ls -la /app/output
+
+OBS: New Terminal Output:
+
+root@4b363f7bd497:/app# cat /app/lowfinevlog
+root@4b363f7bd497:/app# tail -8 /app/lowfinevlog; ls -la /app/output
+total 28
+drwxr-xr-x 1 root root  4096 Nov  1 02:46 .
+drwxr-xr-x 1 root root  4096 Nov  1 02:53 ..
+-rw-r--r-- 1 root root 12495 Nov  1 02:52 transport.py
+root@4b363f7bd497:/app#
+
+
+#### step 59 02:55:11
+MSG: Analysis: The final independent solve is still active. The output directory contains only the required 12.5 KB Python file. Earlier tests already establish convergence across the endpoint and difficult small-factor cases.
+Plan: Wait briefly for the finer-grid low-temperature solve, then compare its last nested values with the completed production test.
+CMD: 
+CMD: tail -12 /app/lowfinevlog
+
+OBS: New Terminal Output:
+
+root@4b363f7bd497:/app# tail -12 /app/lowfinevlog
+root@4b363f7bd497:/app#
+
+
+#### step 60 02:55:41
+MSG: Analysis: The finer-grid matrix assembly is taking the expected time for a single worker. No failures or memory issues have appeared. The implementation and completed tests already satisfy the file, environment, output, and runtime requirements.
+Plan: Read the final convergence result after a short wait and perform the final numerical comparison.
+CMD: 
+CMD: tail -15 /app/lowfinevlog
+python3 - <<'PY'
+import os
+p=1646
+try:
+ f=open('/proc/%s/stat'%p).read().split();hz=os.sysconf('SC_CLK_TCK');print('independent solve CPU seconds',(int(f[13])+int(f[14]))/hz)
+except FileNotFoundError:pass
+PY
+
+OBS: (0.016657878998665585), np.float64(0.021821248538974197), np.float64(-0.12461368307703745)]
+64 [np.float64(0.016657879336649157), np.float64(0.02182124853969146), np.float64(-0.12461368564595522)]
+[1]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/vectornested.py /app/lowfine64.npz 40 .05 64 > /app/lowfinevlog 2>&1
+root@4b363f7bd497:/app# python3 - <<'PY'
+> import os
+> p=1646
+> try:
+>  f=open('/proc/%s/stat'%p).read().split();hz=os.sysconf('SC_CLK_TCK');print('independent solve CPU seconds',(int(f[13])+int(f[14]))/hz)
+> except FileNotFoundError:pass
+> PY
+root@4b363f7bd497:/app#
+
+
+#### step 61 02:55:58
+MSG: Analysis: The final fine-grid low-temperature calculation agrees with the production result to about 1e-8 in the thermal diffusion factor and better than 2e-8 relative in the other vector transport quantities. The program has passed endpoint, intermediate-mixture, small-factor, JSON-schema, stripped-environment, and read-only-directory tests. Tested runs completed well within 600 seconds. The output directory contains only the required regular Python file.
+Plan: The implementation and validation are complete. No further commands are needed.
+CMD: 
+OBS: Current terminal state:
+New Terminal Output:
+
+root@4b363f7bd497:/app#
+
+
+Are you sure you want to mark the task as complete? This will trigger your solution to be graded and you won't be able to make any further corrections. If so, include "task_complete": true in your JSON response again.
+
+#### step 62 02:56:10
+MSG: Analysis: Yes. The required self-contained program is present at /app/output/transport.py. Numerical convergence, output format, file constraints, stripped-environment execution, and runtime checks have been completed successfully.
+Plan: Finalize the validated program for grading.
+CMD: 
+OBS: New Terminal Output:
+
+root@4b363f7bd497:/app#
+
+

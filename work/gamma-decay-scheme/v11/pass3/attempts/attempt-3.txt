@@ -1,0 +1,969 @@
+#### step 2 05:35:19
+MSG: Analysis: No files have been inspected yet. The task requires reconstructing a minimal daughter level scheme, identifying true transitions and their efficiency-corrected intensities, and measuring the parent and isomer half-lives from the run data.
+Plan: Inspect the notes and inventory the supplied data to determine formats and the available calibration, timing, and coincidence information.
+CMD: ls -lh /app/data && cat /app/data/NOTES.md
+
+OBS:  ns, as `i j dt n`: `n` pairs with channels `i` ≤ `j` and `dt` = t(j) − t(i), in ns, the centre of a 20
+ns bin.
+
+`background.txt` is the room background, `channel counts`: 12000 s with the tape parked and the beam off, straight after production.
+
+`cal_eu152.txt`, `cal_co56.txt` and `cal_co60.txt` are source runs, `channel counts`, with the source at the tape position: 3000 s, 3000 s and 1800 s, room back
+ground included. They were taken before production. The activities were not recorded.
+
+`source_lines.txt` lists the sources' γ-ray energies and emission probabilities.
+root@8e009d9b265c:/app#
+
+
+#### step 3 05:35:31
+MSG: Analysis: The data include time-binned singles, prompt/random/delayed coincidences, background, and three unnormalized source calibrations. The threshold and same-crystal summing can produce missing low-energy transitions and sum peaks, so both coincidence relationships and timing will be important.
+Plan: Inspect file headers and source lines, check scientific Python availability, and find prominent peaks in the calibration and production spectra.
+CMD: head -5 /app/data/{singles,cal_eu152,gg_prompt,gg_delayed}.txt; cat /app/data/source_lines.txt; python3 - <<'PY'
+import numpy,scipy
+print('numpy/scipy',numpy.__version__,scipy.__version__)
+PY
+
+CMD: mkdir -p /app/work /app/output; cat > /app/work/inspect.py <<'PY'
+import numpy as np
+from scipy.signal import find_peaks
+for name in ['cal_eu152','cal_co56','cal_co60','singles','background']:
+ d=np.loadtxt('/app/data/'+name+'.txt'); y=d[:,1:].sum(axis=1)
+ p,prop=find_peaks(y,prominence=max(y)*.008,distance=8)
+ print('\n',name,'total',y.sum())
+ print(sorted([(int(k),int(y[k]),round(float(prop['prominences'][i]),1)) for i,k in enumerate(p)],key=lambda a:-a[1])[:90])
+PY
+python3 /app/work/inspect.py
+
+OBS:  name 'signature' from partially initialized module 'inspect' (most likely due to a circular import) (/app/work/inspect.py)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/app/work/inspect.py", line 2, in <module>
+    from scipy.signal import find_peaks
+  File "/usr/local/lib/python3.12/site-packages/scipy/__init__.py", line 88, in <module>
+    raise ImportError(msg) from e
+ImportError: The `scipy` install you are using seems to be broken, (extension modules cannot be imported), please try reinstalling.
+root@8e009d9b265c:/app#
+
+
+#### step 4 05:35:36
+MSG: Analysis: The files use simple numeric columns and the source list spans 122–3548 keV. The first analysis script failed because naming it inspect.py shadowed Python's standard inspect module; the scientific libraries themselves are available.
+Plan: Rename the script and rerun the initial peak inventory.
+CMD: mv /app/work/inspect.py /app/work/peak_inventory.py; rm -rf /app/work/__pycache__; python3 /app/work/peak_inventory.py
+
+OBS: New Terminal Output:
+
+root@8e009d9b265c:/app# mv /app/work/inspect.py /app/work/peak_inventory.py; rm -rf /app/work/__pycache__; python3 /app/work/peak_inventory.py
+
+
+
+#### step 5 05:35:41
+MSG: Analysis: The renamed script is running; its peak lists have not yet appeared.
+Plan: Wait briefly for completion.
+CMD: 
+OBS: ), (867, 2360, 98.0), (1823, 2330,
+ 1794.0), (888, 2301, 151.0), (876, 2296, 122.0), (903, 2272, 243.0), (922, 2180, 177.0), (914, 2169, 99.0), (930, 2155, 118.0), (945, 2082, 122.0), (955, 2034,
+ 97.0), (977, 2022, 126.0), (963, 2016, 78.0), (990, 1958, 128.0), (1055, 1833, 148.0), (1034, 1794, 74.0), (1042, 1780, 82.0), (1074, 1734, 125.0), (1091, 1670
+, 80.0), (1107, 1658, 100.0), (1115, 1622, 92.0), (1144, 1606, 152.0), (1124, 1595, 101.0), (1135, 1562, 80.0), (1155, 1540, 145.0), (5231, 1503, 1489.0), (1938
+, 1480, 1044.0), (1175, 1479, 129.0), (1190, 1433, 90.0)]
+root@8e009d9b265c:/app#
+
+
+#### step 6 05:36:02
+MSG: Analysis: The calibration peaks indicate roughly 0.5 keV per singles channel. Production has many strong lines and potential sum/escape peaks. I will fit peak centroids and areas rather than use channel maxima, and use the cycle dependence to distinguish parent-associated lines from daughter activity, contaminants, and background.
+Plan: Build a reusable Gaussian peak-fitting script, derive the energy calibration from all source lines, list lower-intensity production peaks, and save their time-resolved net areas for decay analysis.
+CMD: cat > /app/work/analyze.py <<'PY'
+import numpy as np
+from scipy.optimize import least_squares,curve_fit
+from scipy.signal import find_peaks
+from pathlib import Path
+D=Path('/app/data'); W=Path('/app/work')
+bg=np.loadtxt(D/'background.txt')[:,1]; s=np.loadtxt(D/'singles.txt')[:,1:]; y=s.sum(axis=1)
+def peakfit(y,c,w=12):
+ x=np.arange(max(0,int(c)-w),min(len(y),int(c)+w+1)); z=y[x]
+ def fun(x,A,mu,sig,b,m):return A*np.exp(-.5*((x-mu)/sig)**2)+b+m*(x-c)
+ p0=[max(z)-np.median(z),c,1.5,np.median(z),0]
+ try:
+  p,cov=curve_fit(fun,x,z,p0=p0,sigma=np.sqrt(np.maximum(z,1)),absolute_sigma=True,bounds=([0,c-4,.5,-np.inf,-np.inf],[np.inf,c+4,5,np.inf,np.inf]),maxfev=5000)
+ except Exception:return None
+ return p, p[0]*p[2]*np.sqrt(2*np.pi),cov
+lines=[]
+for ln in open(D/'source_lines.txt'):
+ if ln.startswith('#'):continue
+ name,e,pr=ln.split(); e=float(e); pr=float(pr)
+ yy=np.loadtxt(D/('cal_'+name+'.txt'))[:,1]
+ fit=peakfit(yy,2*e-1.5,w=8 if 1080<e<1100 else 12)
+ p,a,cov=fit; lines.append([name,e,pr,p[1],p[2],a])
+print('SOURCE FITS')
+for l in lines: print(*l)
+co=np.polyfit([l[3] for l in lines],[l[1] for l in lines],2)
+print('cal E(c)',co, 'residuals', np.round([np.polyval(co,l[3])-l[1] for l in lines],3))
+np.savez(W/'sources.npz',coef=co,lines=np.array(lines,dtype=object))
+p,props=find_peaks(y-bg*.36,prominence=350,distance=7)
+rows=[]; times=[]
+for c in p:
+ fit=peakfit(y,c,w=10)
+ if fit is None:continue
+ par,a,cov=fit
+ if a<1300:continue
+ # linear projection with fixed fitted gaussian and local linear background for each time bin
+ xx=np.arange(c-10,c+11); g=np.exp(-.5*((xx-par[1])/par[2])**2)/(par[2]*np.sqrt(2*np.pi)); X=np.array([g,np.ones(len(xx)),xx-c]).T
+ ts=[]
+ for t in range(24):
+  yy=s[xx,t]; wt=1/np.maximum(yy,1); beta=np.linalg.lstsq(X*np.sqrt(wt[:,None]), yy*np.sqrt(wt),rcond=None)[0]; ts.append(beta[0])
+ rows.append([c,np.polyval(co,par[1]),par[1],par[2],a]);times.append(ts)
+print('\nPRODUCTION FITS: channel energy centroid sigma area')
+for l in rows:print('%4d %9.3f %9.3f %5.2f %10.0f'%tuple(l))
+np.savez(W/'peaks.npz',rows=rows,times=times)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/analyze.py > /app/work/peaks_report.txt; cat /app/work/peaks_report.txt
+
+OBS:  X=np.array([g,np.ones(len(xx)),xx-c]).T
+>  ts=[]
+>  for t in range(24):
+>   yy=s[xx,t]; wt=1/np.maximum(yy,1); beta=np.linalg.lstsq(X*np.sqrt(wt[:,None]), yy*np.sqrt(wt),rcond=None)[0]; ts.append(beta[0])
+>  rows.append([c,np.polyval(co,par[1]),par[1],par[2],a]);times.append(ts)
+> print('\nPRODUCTION FITS: channel energy centroid sigma area')
+> for l in rows:print('%4d %9.3f %9.3f %5.2f %10.0f'%tuple(l))
+> np.savez(W/'peaks.npz',rows=rows,times=times)
+> PY
+root@8e009d9b265c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/analyze.py > /app/work/peaks_report.txt; cat /app/work/peaks_report.txt
+
+
+
+#### step 7 05:36:07
+MSG: Analysis: The peak fitting is running and will produce calibrated energies and net peak areas.
+Plan: Wait for the report.
+CMD: 
+OBS: 29  2606.503  1.75      22795
+2645  1323.461  2645.564  2.22     132766
+2802  1401.684  2802.003  1.88       1724
+2906  1453.402  2905.434  1.82      18364
+2980  1490.714  2980.053  1.84      27689
+3080  1540.468  3079.552  1.77       2023
+3214  1607.795  3214.191  1.85       6782
+3283  1642.090  3282.775  2.44       2024
+3479  1740.142  3478.855  1.97      15912
+3506  1753.501  3505.569  2.36       4716
+3759  1880.330  3759.187  2.03       7607
+4039  2020.093  4038.659  2.06      21262
+4528  2264.736  4527.831  2.34       6195
+5550  2775.979  5549.984  2.31      21345
+root@8e009d9b265c:/app#
+
+
+#### step 8 05:36:36
+MSG: Analysis: The first calibration provides precise source-run energies, but production peaks show potential gain drift (the annihilation peak is at 511.61 keV). Several broad or high-energy peaks may be summing artifacts. We need an in-run calibration check and separation by cycle time before building the scheme.
+Plan: Fit known room-background lines in both background and production, estimate each peak's beam-off half-life, and tabulate peak-to-peak prompt and delayed coincidences.
+CMD: cat > /app/work/time_and_cal.py <<'PY'
+exec(open('/app/work/analyze.py').read().split('lines=[]')[0])
+known=[238.632,295.224,351.932,511.0,583.187,609.312,911.204,968.971,1120.287,1460.822,1764.494,2614.511]
+for name,yy in [('background',bg),('production',y)]:
+ print(name); vals=[]
+ for e in known:
+  p,a,cov=peakfit(yy,2*e,w=10);print(e,round(p[1],4),round(a),round(p[2],2));vals.append((p[1],e))
+ co=np.polyfit(*np.array(vals).T,2);print('FIT',co,'residual',np.round(np.polyval(co,np.array(vals)[:,0])-np.array(vals)[:,1],3))
+ if name=='background':np.save(W/'inrun_cal.npy',co)
+p=np.load(W/'peaks.npz');rows=p['rows']; times=p['times'];co=np.load(W/'inrun_cal.npy')
+print('TIME FITS energy area half-life chi2 relative bins')
+for r,z in zip(rows,times):
+ t=np.arange(8,24)*1.5+.75
+ def f(t,A,h,b):return A*2**(-(t-12)/h)+b
+ try:
+  par,cov=curve_fit(f,t,z[8:],p0=[max(z),5,0],sigma=np.sqrt(np.maximum(z[8:],50)),bounds=([0,.1,-np.inf],[np.inf,500,np.inf]))
+  chi=np.sum((z[8:]-f(t,*par))**2/np.maximum(z[8:],50))/13
+  print('%8.3f %9.0f h=%6.2f chi=%6.1f bg=%6.0f'%(np.polyval(co,r[2]),r[4],par[1],chi,par[2]),np.round(z[[0,4,7,8,12,16,20,23]]/max(z),2))
+ except:pass
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/time_and_cal.py
+
+CMD: cat > /app/work/coinc.py <<'PY'
+import numpy as np
+from pathlib import Path
+W=Path('/app/work');D=Path('/app/data')
+p=np.load(W/'peaks.npz');rows=p['rows'];co=np.load(W/'inrun_cal.npy')
+E=np.polyval(co,rows[:,2]);ch=rows[:,2]/2; sig=rows[:,3]/2
+lookup=np.full(3600,-1,int)
+for i,c in enumerate(ch):
+ if rows[i,3]>3:continue
+ lookup[max(0,int(c)-2):int(c)+3]=i
+N=len(rows); matrices=[]
+for name in ['prompt','random','delayed']:
+ data=np.loadtxt(D/('gg_'+name+'.txt'),dtype=int);m=np.zeros((N,N));mt=np.zeros((N,N,71))
+ for line in data:
+  a,b=lookup[line[0]],lookup[line[1]]
+  if a<0 or b<0:continue
+  n=line[-1];m[a,b]+=n
+  if name=='delayed':mt[a,b,int((line[2]+700)/20)]+=n
+ m=m+m.T-np.diag(np.diag(m));matrices.append(m)
+ if name=='delayed':np.save(W/'delay_matrix.npy',mt)
+P,R,T=matrices
+np.savez(W/'coinc.npz',E=E,rows=rows,P=P,R=R,T=T)
+for i,e in enumerate(E):
+ if rows[i,3]>3:continue
+ print('\n%.3f'%e)
+ print('PROMPT',[(round(E[j],2),int(P[i,j]),int(R[i,j])) for j in np.argsort(-P[i]) if P[i,j]>max(20,R[i,j]*3)])
+ print('DELAY ',[(round(E[j],2),int(T[i,j])) for j in np.argsort(-T[i]) if T[i,j]>max(35,R[i,j]*15)])
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/coinc.py > /app/work/coinc_report.txt; cat /app/work/coinc_report.txt
+
+OBS: 15.21), 44, 0), (np.
+float64(842.71), 39, 0)]
+DELAY  []
+
+1752.258
+PROMPT [(np.float64(318.4), 569, 0), (np.float64(524.3), 73, 0), (np.float64(231.21), 26, 0)]
+DELAY  []
+
+1879.021
+PROMPT [(np.float64(318.4), 793, 0), (np.float64(524.3), 578, 0), (np.float64(231.21), 23, 0)]
+DELAY  []
+
+2018.711
+PROMPT [(np.float64(318.4), 2267, 3), (np.float64(524.3), 1539, 0), (np.float64(231.21), 528, 0), (np.float64(842.71), 65, 0), (np.float64(215.21), 38, 0)]
+DELAY  []
+
+2263.228
+PROMPT [(np.float64(318.4), 616, 0)]
+DELAY  []
+
+2774.204
+PROMPT [(np.float64(318.4), 2072, 3)]
+DELAY  []
+root@8e009d9b265c:/app#
+
+
+#### step 9 05:36:43
+MSG: Analysis: The background run establishes the production energy scale: prominent daughter-candidate lines are 318.398, 524.301, and 647.225 keV. Many parent-associated lines share a half-life near 4.37 s; other lines grow as daughter activity or have contaminant-like time profiles. The coincidence report is too long for the terminal output, so I will examine selected sections.
+Plan: Save the time report and inspect the main coincidence groups, especially the strong lines and delayed relationships, to identify cascade branches and the isomer.
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/work/time_and_cal.py > /app/work/time_report.txt; tail -30 /app/work/time_report.txt; head -125 /app/work/coinc_report.txt
+
+OBS:  1), (np.float64(511.01), 36, 0), (np.float64(1322.44), 27, 0), (np.f
+loat64(231.21), 26, 0)]
+DELAY  []
+
+1219.782
+PROMPT [(np.float64(318.4), 1639, 4), (np.float64(1322.44), 473, 0), (np.float64(231.21), 334, 0), (np.float64(524.3), 73, 1), (np.float64(647.22), 48, 0), (np.
+float64(215.21), 42, 0), (np.float64(435.41), 31, 0), (np.float64(1082.23), 24, 1), (np.float64(1092.03), 23, 0), (np.float64(459.61), 22, 0), (np.float64(511.0
+1), 22, 0), (np.float64(1150.91), 22, 0), (np.float64(1011.41), 21, 0), (np.float64(941.32), 21, 0), (np.float64(551.8), 21, 0)]
+DELAY  []
+
+root@8e009d9b265c:/app#
+
+
+#### step 10 05:36:59
+MSG: Analysis: The parent half-life is consistently about 4.37 s. Delayed coincidences particularly connect 669.9 and 898.3 keV with 524.3 and 1082.2 keV, suggesting an intermediate isomer. Raw gate counts contain substantial Compton cross-talk, so sideband subtraction is needed to isolate actual cascade relationships.
+Plan: Construct sideband-subtracted prompt and delayed peak-pair matrices and print only statistically significant relationships. This will suppress continuum coincidences that otherwise mimic cascades.
+CMD: cat > /app/work/netcoinc.py <<'PY'
+import numpy as np
+from pathlib import Path
+W=Path('/app/work');D=Path('/app/data');p=np.load(W/'peaks.npz');rows=p['rows'];co=np.load(W/'inrun_cal.npy');E=np.polyval(co,rows[:,2]);N=len(E)
+weights=np.zeros((N,3600))
+for i,r in enumerate(rows):
+ if r[3]>3:continue
+ c=int(r[2]/2);weights[i,c-2:c+3]=1;weights[i,c-7:c-3]=-.625;weights[i,c+4:c+8]=-.625
+net=[];err=[]
+for name in ['prompt','random','delayed']:
+ data=np.loadtxt(D/('gg_'+name+'.txt'),dtype=int)
+ m=np.zeros((3600,3600));np.add.at(m,(data[:,0],data[:,1]),data[:,-1]);m=m+m.T-np.diag(np.diag(m))
+ n=weights@m@weights.T;v=(weights**2)@m@(weights**2).T
+ net.append(n);err.append(v)
+P,R,T=net;VP,VR,VT=err; P-=R;VP+=VR;T-=12.8*R;VT+=12.8**2*VR
+np.savez(W/'netcoinc.npz',E=E,P=P,T=T,VP=VP,VT=VT,weights=weights)
+for i,e in enumerate(E):
+ pp=[j for j in np.argsort(-P[i]) if P[i,j]>max(35,5*np.sqrt(VP[i,j]))]
+ tt=[j for j in np.argsort(-T[i]) if T[i,j]>max(35,5*np.sqrt(VT[i,j]))]
+ print('%8.3f P'%e, ' '.join('%.2f:%d'%(E[j],P[i,j]) for j in pp), '\n         D',' '.join('%.2f:%d'%(E[j],T[i,j]) for j in tt))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/netcoinc.py > /app/work/netcoinc_report.txt; cat /app/work/netcoinc_report.txt
+
+OBS: r.append(v)
+> P,R,T=net;VP,VR,VT=err; P-=R;VP+=VR;T-=12.8*R;VT+=12.8**2*VR
+> np.savez(W/'netcoinc.npz',E=E,P=P,T=T,VP=VP,VT=VT,weights=weights)
+> for i,e in enumerate(E):
+>  pp=[j for j in np.argsort(-P[i]) if P[i,j]>max(35,5*np.sqrt(VP[i,j]))]
+>  tt=[j for j in np.argsort(-T[i]) if T[i,j]>max(35,5*np.sqrt(VT[i,j]))]
+>  print('%8.3f P'%e, ' '.join('%.2f:%d'%(E[j],P[i,j]) for j in pp), '\n         D',' '.join('%.2f:%d'%(E[j],T[i,j]) for j in tt))
+> PY
+root@8e009d9b265c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/netcoinc.py > /app/work/netcoinc_report.txt; cat /app/work/netcoinc_report.txt
+
+
+
+#### step 11 05:37:07
+MSG: Analysis: The sideband-subtracted coincidence calculation is in progress.
+Plan: Wait for its report.
+CMD: 
+OBS:    D
+1452.314 P 318.40:1795 1322.44:606
+         D
+1489.607 P 647.22:920 551.80:456 435.41:379 1011.41:281 1302.92:83 459.61:70 1143.41:58 707.98:52 1092.03:41
+         D 898.31:45 669.91:39
+1539.335 P
+         D
+1606.627 P 318.40:721 707.98:59 459.61:38
+         D 669.91:50 898.31:39
+1640.905 P
+         D
+1738.906 P 318.40:1616 524.30:1193 511.01:628
+         D
+1752.258 P 318.40:453
+         D
+1879.021 P 318.40:729 524.30:558
+         D
+2018.711 P 318.40:2173 524.30:1515 231.21:466 842.71:64
+         D
+2263.228 P 318.40:579
+         D
+2774.204 P 318.40:2027
+         D
+root@8e009d9b265c:/app#
+
+
+#### step 12 05:37:35
+MSG: Analysis: The cleaned matrices reveal two near-degenerate 647-keV transitions (a strong 647–647 coincidence), several crossover lines, and two delayed branch combinations with equal total energy: 231.21 + 898.31 ≈ 459.61 + 669.91. Some apparent weak peaks are sums or escape peaks rather than transitions. Timing direction and better fits of blended peaks are now needed.
+Plan: Extract signed delayed-time distributions for selected peak pairs, inspect the 647- and 1322-keV blends, and enumerate energy-sum relationships to reconstruct a consistent minimal scheme.
+CMD: cat > /app/work/relationships.py <<'PY'
+import numpy as np
+from scipy.optimize import curve_fit
+from pathlib import Path
+W=Path('/app/work');p=np.load(W/'peaks.npz');co=np.load(W/'inrun_cal.npy');r=p['rows'];E=np.polyval(co,r[:,2]);d=np.load(W/'netcoinc.npz');P=d['P'];T=d['T'];
+print('SUM RELATIONS (<0.55 keV)')
+for i,e in enumerate(E):
+ if r[i,3]>3:continue
+ for j in range(i,len(E)):
+  if r[j,3]>3:continue
+  k=np.argmin(abs(E-e-E[j]));delta=E[k]-e-E[j]
+  if abs(delta)<.55:print('%.3f + %.3f = %.3f delta %.3f pairP %.0f pairD %.0f'%(e,E[j],E[k],delta,P[i,j],T[i,j]))
+raw=np.loadtxt('/app/data/gg_delayed.txt',dtype=int); wt=d['weights']; dt=raw[:,2];bins=np.unique(dt)
+for ea,eb in [(318.4,669.9),(318.4,898.3),(524.3,669.9),(1082.2,669.9),(231.2,318.4),(459.6,524.3),(435.4,898.3)]:
+ a=np.argmin(abs(E-ea));b=np.argmin(abs(E-eb)); weights=wt[a,raw[:,0]]*wt[b,raw[:,1]]+wt[b,raw[:,0]]*wt[a,raw[:,1]]; z=np.array([sum(weights[dt==t]*raw[dt==t,-1]) for t in bins]);
+ print('\nTIMING',E[a],E[b]);print(list(zip(bins,z.round(1))))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/relationships.py > /app/work/relationships.txt; cat /app/work/relationships.txt
+
+CMD: python3 - <<'PY'
+import numpy as np
+s=np.loadtxt('/app/data/singles.txt')[:,1:].sum(axis=1)
+for a,b in [(1284,1307),(2634,2658)]:
+ print(list(zip(range(a,b),s[a:b].astype(int))))
+PY
+
+OBS: 3),(435.4,898.3)]:
+>  a=np.argmin(abs(E-ea));b=np.argmin(abs(E-eb)); weights=wt[a,raw[:,0]]*wt[b,raw[:,1]]+wt[b,raw[:,0]]*wt[a,raw[:,1]]; z=np.array([sum(weights[dt==t]*raw[dt==t,
+-1]) for t in bins]);
+>  print('\nTIMING',E[a],E[b]);print(list(zip(bins,z.round(1))))
+> PY
+root@8e009d9b265c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/relationships.py > /app/work/relationships.txt; cat /app/work/relationships.txt
+python3 - <<'PY'
+import numpy as np
+s=np.loadtxt('/app/data/singles.txt')[:,1:].sum(axis=1)
+for a,b in [(1284,1307),(2634,2658)]:
+ print(list(zip(range(a,b),s[a:b].astype(int))))
+PY
+
+
+
+#### step 13 05:37:42
+MSG: Analysis: The timing and energy-relationship extraction is still running; the subsequent blend inspection is queued.
+Plan: Wait briefly for the results.
+CMD: 
+OBS: ]
+[(2634, np.int64(422)), (2635, np.int64(403)), (2636, np.int64(483)), (2637, np.int64(520)), (2638, np.int64(625)), (2639, np.int64(806)), (2640, np.int64(1396)
+), (2641, np.int64(3040)), (2642, np.int64(7085)), (2643, np.int64(13185)), (2644, np.int64(19622)), (2645, np.int64(23319)), (2646, np.int64(22719)), (2647, np
+.int64(19467)), (2648, np.int64(13876)), (2649, np.int64(8140)), (2650, np.int64(3830)), (2651, np.int64(1318)), (2652, np.int64(665)), (2653, np.int64(432)), (
+2654, np.int64(434)), (2655, np.int64(397)), (2656, np.int64(358)), (2657, np.int64(313))]
+root@8e009d9b265c:/app#
+
+
+#### step 14 05:38:13
+MSG: Analysis: Signed delays show 669.9 and 898.3 keV occur before the delayed lower cascade, whereas 231.2 and 459.6 keV occur after those feeding rays. The 647-keV and 1322-keV singles peaks are visibly broader than isolated lines, consistent with unresolved doublets. Resolving them is essential for placing the levels accurately.
+Plan: Fit coincidence-gated centroids for both doublets, using gates that select different cascade branches. Also fit the singles doublets with the detector width constrained by nearby isolated peaks.
+CMD: cat > /app/work/gatedfits.py <<'PY'
+exec(open('/app/work/analyze.py').read().split('lines=[]')[0])
+from scipy.special import erf
+co=np.load(W/'inrun_cal.npy');dat=np.load(W/'netcoinc.npz');E=dat['E'];wt=dat['weights'];raw=np.loadtxt(D/'gg_prompt.txt',dtype=int);m=np.zeros((3600,3600));np.add.at(m,(raw[:,0],raw[:,1]),raw[:,2]);m=m+m.T-np.diag(np.diag(m))
+def gatefit(gate,target,w=7):
+ i=np.argmin(abs(E-gate));z=wt[i]@m;c=(np.roots([co[0],co[1],co[2]-target])[1]-.5)/2;c=int(c);xx=np.arange(c-w,c+w+1);yy=z[xx]
+ def f(x,A,mu,sig,b,m):
+  # original singles-bin Gaussian integrated over pair channels
+  ga=(np.exp(-.5*((2*x-mu)/sig)**2)+np.exp(-.5*((2*x+1-mu)/sig)**2))/(sig*np.sqrt(2*np.pi))
+  return A*ga+b+m*(x-c)
+ p,cov=curve_fit(f,xx,yy,p0=[max(yy)*4,2*c+.5,1.5,np.median(yy),0],sigma=np.sqrt(np.maximum(abs(yy),2)),bounds=([0,2*c-6,.8,-np.inf,-np.inf],[np.inf,2*c+6,5,np.inf,np.inf]),maxfev=10000)
+ print('GATE %.2f TARGET %.2f: E %.4f +/-%.4f sigma %.3f area %.0f'%(gate,target,np.polyval(co,p[1]),np.sqrt(cov[1,1])*.5,p[2],p[0]))
+for g in [318.4,524.3,551.8,435.4,1011.4,842.7,1302.9,1143.4,1092.0,1489.6,707.98]:gatefit(g,647.2)
+for g in [318.4,941.3,1150.9,1452.3,1219.8,1082.2,992.7,231.2,459.6,511.0]:gatefit(g,1322.4)
+for g in [318.4,524.3,435.4,1082.2,647.2]:gatefit(g,707.98)
+for g in [647.2,551.8,435.4,1011.4]:gatefit(g,1489.6)
+print('SINGLES DOUBLETS')
+for center,sig in [(1294,1.435),(2645,1.765)]:
+ x=np.arange(center-15,center+16);z=y[x]
+ def fun(x,A,mu,B,nu,sig,b,m):return A*np.exp(-.5*((x-mu)/sig)**2)+B*np.exp(-.5*((x-nu)/sig)**2)+b+m*(x-center)
+ p,cov=curve_fit(fun,x,z,p0=[max(z)*.7,center-.7,max(z)*.5,center+1.4,sig,np.median(z),0],sigma=np.sqrt(z),bounds=([0,center-5,0,center, sig*.94,-np.inf,-np.inf],[np.inf,center+1,np.inf,center+5,sig*1.06,np.inf,np.inf]),maxfev=20000)
+ print(p,'energies',np.polyval(co,p[[1,3]]),'areas',p[[0,2]]*p[4]*np.sqrt(2*np.pi),'errors',np.sqrt(np.diag(cov)))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/gatedfits.py > /app/work/gatedfits.txt; cat /app/work/gatedfits.txt
+
+OBS: fun(x,A,mu,B,nu,sig,b,m):return A*np.exp(-.5*((x-mu)/sig)**2)+B*np.exp(-.5*((x-nu)/sig)**2)+b+m*(x-center)
+>  p,cov=curve_fit(fun,x,z,p0=[max(z)*.7,center-.7,max(z)*.5,center+1.4,sig,np.median(z),0],sigma=np.sqrt(z),bounds=([0,center-5,0,center, sig*.94,-np.inf,-np.i
+nf],[np.inf,center+1,np.inf,center+5,sig*1.06,np.inf,np.inf]),maxfev=20000)
+>  print(p,'energies',np.polyval(co,p[[1,3]]),'areas',p[[0,2]]*p[4]*np.sqrt(2*np.pi),'errors',np.sqrt(np.diag(cov)))
+> PY
+root@8e009d9b265c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/gatedfits.py > /app/work/gatedfits.txt; cat /app/work/gatedfits.txt
+
+
+
+#### step 15 05:38:36
+MSG: Analysis: The gated fits are running. The delayed branches indicate that 669.9 + 459.6 and 898.3 + 231.2 feed the same isomer, rather than being its outgoing transitions. The likely lower structure contains 318.4 and 842.7 keV levels, with higher levels linked by the unresolved 647-keV pair.
+Plan: Wait for the gated centroids and doublet decomposition, then use them to finalize the ordering of the lower cascade.
+CMD: 
+OBS: 4024e+04  1.29518082e+03
+  1.52110000e+00  2.30631229e+03 -3.08822089e+01] energies [646.87533575 647.62374405] areas [328744.93788029 287435.70765016] errors [1.05849148e+04 1.57239388
+e-01 1.16126574e+04 1.49835881e-01
+ 6.27169548e-02 7.10533631e+01 6.36898640e+00]
+[ 1.52856463e+04  2.64443084e+03  1.34312581e+04  2.64685827e+03
+  1.84459845e+00  4.02236810e+02 -2.05870973e+00] energies [1321.87276384 1323.08590043] areas [70676.58874721 62102.41208697] errors [9.74014990e+02 1.06126892
+e-01 1.04011440e+03 1.07166837e-01
+ 5.15776122e-02 1.63445147e+01 1.38622401e+00]
+root@8e009d9b265c:/app#
+
+
+#### step 16 05:39:20
+MSG: Analysis: Gated centroids resolve the doublets at approximately 646.9/647.8 keV and 1321.9/1323.2 keV. The lower cascade is strongly constrained by crossovers: 842.7 → 318.4 → 0, 1489.6 → 842.7, and 1925.0 → either 1489.6 or 842.7. I will summarize signed timing more compactly to locate the delayed intermediate unambiguously and test the higher-level placements.
+Plan: Print positive versus negative delay totals, list all energy differences among a preliminary level set, and fit the detector efficiency curve with independent unknown source normalizations.
+CMD: cat > /app/work/structure.py <<'PY'
+import numpy as np
+from pathlib import Path
+W=Path('/app/work');d=np.load(W/'netcoinc.npz');E=d['E'];wt=d['weights'];raw=np.loadtxt('/app/data/gg_delayed.txt',dtype=int)
+for ea,eb in [(318.4,669.9),(318.4,898.3),(524.3,669.9),(1082.2,669.9),(231.2,318.4),(459.6,524.3),(435.4,898.3),(459.6,669.9),(231.2,898.3),(647.2,669.9),(1082.2,459.6)]:
+ a=np.argmin(abs(E-ea));b=np.argmin(abs(E-eb));a,b=sorted([a,b]);z=(wt[a,raw[:,0]]*wt[b,raw[:,1]]+wt[b,raw[:,0]]*wt[a,raw[:,1]])*raw[:,-1]
+ print('%.2f %.2f neg %.1f pos %.1f'%(E[a],E[b],sum(z[raw[:,2]<0]),sum(z[raw[:,2]>0])))
+levels=[0,318.4,842.7,1489.6,1925.0,2137.4,2633.0,2689.2,2792.5,3148.8]
+print('level differences matching peaks')
+for a in levels:
+ for b in levels:
+  if a<=b:continue
+  i=np.argmin(abs(E-(a-b)))
+  if abs(E[i]-(a-b))<.5:print(a,b,a-b,'peak',E[i])
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/structure.py
+
+CMD: cat > /app/work/efficiency.py <<'PY'
+import numpy as np
+from scipy.optimize import least_squares
+W='/app/work/';data=np.load(W+'sources.npz',allow_pickle=True)['lines'];co=np.load(W+'inrun_cal.npy')
+# Exclude Eu overlapping pair, very weak Co56 lines, and Co56 1175 near summing features.
+rows=[r for r in data if r[1] not in [1085.84,1089.74,1175.10,3547.93]]
+E=np.array([r[1] for r in rows]);obs=np.log([r[5]/r[2] for r in rows]);x=np.log(E/1000);names=['eu152','co56','co60'];src=np.array([names.index(r[0]) for r in rows])
+for deg in [2,3,4]:
+ X=np.array([src==0,src==1,src==2]+[x**k for k in range(1,deg+1)],float).T
+ coef=np.linalg.lstsq(X,obs,rcond=None)[0];print('deg',deg,'coef',coef,'residual %',np.round((np.exp(obs-X@coef)-1)*100,1))
+ if deg==3:np.save(W+'eff_coef.npy',coef)
+p=np.load(W+'peaks.npz');r=p['rows'];energies=np.polyval(co,r[:,2]);c=np.load(W+'eff_coef.npy')[3:]
+def eff(e):return np.exp(sum(v*np.log(e/1000)**(i+1) for i,v in enumerate(c)))
+ref=r[np.argmin(abs(energies-318.4)),4]/eff(318.4)
+print('ENERGY area relative intensity (uncorrected for summing)')
+for e,rr in zip(energies,r):print('%8.3f %9.0f %7.3f'%(e,rr[4],100*rr[4]/eff(e)/ref))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/efficiency.py
+
+OBS:    1.211
+1111.313     82668   9.970
+1143.406     15914   1.969
+1150.908     36748   4.572
+1171.494      6223   0.787
+1199.230      1660   0.214
+1219.782     12392   1.625
+1294.660      1998   0.277
+1302.918     22795   3.176
+1322.439    132766  18.756
+1400.622      1724   0.257
+1452.314     18364   2.834
+1489.607     27689   4.378
+1539.335      2023   0.330
+1606.627      6782   1.154
+1640.905      2024   0.352
+1738.906     15912   2.928
+1752.258      4716   0.874
+1879.021      7607   1.513
+2018.711     21262   4.552
+2263.228      6195   1.495
+2774.204     21345   6.421
+root@8e009d9b265c:/app#
+
+
+#### step 17 05:41:20
+MSG: Analysis: The doublets and signed timing support an isomer around 1963.1 keV that decays through an unrecorded approximately 38.1-keV transition to the 1925-keV level. The 669.9- and 898.3-keV rays feed it from levels at 2633.0 and 2861.4 keV. Several peaks can be explained quantitatively by same-crystal summing or pair-production escape; these must be excluded rather than made into extra levels.
+Plan: Use the eight-crystal geometry to predict sum-peak areas from different-crystal coincidences, investigate remaining isolated crossover candidates, and fit the isomer decay tail and parent cycle curve. Refine doublet areas using gate-determined energies.
+CMD: cat > /app/work/refine.py <<'PY'
+exec(open('/app/work/analyze.py').read().split('lines=[]')[0])
+co=np.load(W/'inrun_cal.npy');d=np.load(W/'netcoinc.npz');E=d['E'];P=d['P'];r=np.load(W/'peaks.npz')['rows'];times=np.load(W/'peaks.npz')['times'];ec=np.load(W/'eff_coef.npy')[3:]
+def eff(e):return np.exp(sum(v*np.log(e/1000)**(i+1) for i,v in enumerate(ec)))
+def ch(e):return np.roots([co[0],co[1],co[2]-e])[1]
+print('Constrained doublets')
+for energies,center in [([646.9,647.8],1294),([1321.9,1323.2],2645)]:
+ x=np.arange(center-16,center+17);z=y[x];mu,nu=map(ch,energies)
+ def f(x,A,B,sig,b,m):return A*np.exp(-.5*((x-mu)/sig)**2)+B*np.exp(-.5*((x-nu)/sig)**2)+b+m*(x-center)
+ par,cov=curve_fit(f,x,z,p0=[max(z)*.6,max(z)*.5,1.5,np.median(z),0],sigma=np.sqrt(z),maxfev=20000)
+ areas=par[:2]*par[2]*np.sqrt(2*np.pi);ref=r[np.argmin(abs(E-318.4)),4]/eff(318.4)
+ print(energies,par,'areas',areas,'relative',100*areas/eff(np.array(energies))/ref)
+print('Sum peak predictions based on pair counts /7')
+for target in [754,842.7,965.6,1171.5,1199.2,1294.7,1400.6,1489.6,1606.6,1640.9,1738.9,1752.3,1879,2263.2]:
+ k=np.argmin(abs(E-target));pred=0;parts=[]
+ for i in range(len(E)):
+  for j in range(i,len(E)):
+   # exact resolved doublets are handled by tolerance here
+   if abs(E[i]+E[j]-E[k])<.6 and E[i]>200 and E[j]>200 and E[i]!=511.010:
+    n=max(0,P[i,j])/7*(2 if i==j else 1);pred+=n;parts.append((round(E[i],1),round(E[j],1),round(n)))
+ print('%.3f area %.0f pred %.0f'%(E[k],r[k,4],pred),parts)
+# parent fit, integrated beam-on/off decay curve
+edges=np.arange(25)*1.5
+from scipy.integrate import quad
+def rate(t,h):
+ lam=np.log(2)/h
+ return 1-np.exp(-lam*t) if t<=12 else (1-np.exp(-lam*12))*np.exp(-lam*(t-12))
+def shape(h):return np.array([quad(lambda t:rate(t,h),a,b)[0] for a,b in zip(edges[:-1],edges[1:])])
+sel=[np.argmin(abs(E-e)) for e in [318.4,524.3,647.2,435.4,551.8,1011.4,1082.2]]
+zz=times[sel].sum(axis=0)
+def f(t,A,h,b):return A*shape(h)+b
+par,cov=curve_fit(f,np.arange(24),zz,p0=[max(zz),4.37,0],sigma=np.sqrt(np.maximum(zz,1)))
+print('PARENT',par,np.sqrt(np.diag(cov)),'chi',sum((zz-f(None,*par))**2/zz)/21)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/refine.py
+
+CMD: cat > /app/work/isomer.py <<'PY'
+import numpy as np
+from scipy.optimize import curve_fit
+D='/app/data/';W='/app/work/';d=np.load(W+'netcoinc.npz');E=d['E'];wt=d['weights'];raw=np.loadtxt(D+'gg_delayed.txt',dtype=int);dt=raw[:,2];bins=np.unique(dt)
+feed=[np.argmin(abs(E-e)) for e in [669.9,898.3,231.2]];out=[np.argmin(abs(E-e)) for e in [318.4,524.3,435.4,1082.2]]
+allz=np.zeros(len(bins)//2);allv=allz.copy()
+for a in feed:
+ for b in out:
+  if a==b:continue
+  weights=wt[a,raw[:,0]]*wt[b,raw[:,1]]+wt[b,raw[:,0]]*wt[a,raw[:,1]]
+  # select time sign corresponding to feeding gamma preceding outgoing gamma
+  good=dt*(1 if E[b]>E[a] else -1)>0
+  tt=np.abs(dt);bb=np.arange(70,700,20)
+  z=np.array([sum(weights[good & (tt==t)]*raw[good & (tt==t),-1]) for t in bb]);v=np.array([sum(weights[good & (tt==t)]**2*raw[good & (tt==t),-1]) for t in bb])
+  def f(t,A,h,bg):return A*2**(-(t-70)/h)+bg
+  par,cov=curve_fit(f,bb,z,p0=[max(z),170,0],sigma=np.sqrt(np.maximum(v,1)),bounds=([0,10,-np.inf],[np.inf,1000,np.inf]))
+  print('%.2f->%.2f h %.2f err %.2f bg %.2f'%(E[a],E[b],par[1],np.sqrt(cov[1,1]),par[2]))
+  allz+=z;allv+=v
+par,cov=curve_fit(f,bb,allz,p0=[max(allz),170,0],sigma=np.sqrt(allv),bounds=([0,10,-np.inf],[np.inf,1000,np.inf]));print('COMBINED',par,np.sqrt(np.diag(cov)),list(zip(bb,allz.round(1))))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/isomer.py
+
+OBS: _fit(f,bb,allz,p0=[max(allz),170,0],sigma=np.sqrt(allv),bounds=([0,10,-np.inf],[np.inf,1000,np.inf]));print('COMBINED',par,np.sqrt(np.diag(cov)),
+list(zip(bb,allz.round(1))))
+> PY
+root@8e009d9b265c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/isomer.py
+669.91->318.40 h 192.13 err 11.96 bg -18.15
+669.91->524.30 h 192.07 err 15.73 bg -5.75
+669.91->435.41 h 207.68 err 35.72 bg -6.62
+669.91->1082.23 h 161.87 err 25.02 bg 1.65
+898.31->318.40 h 158.94 err 11.61 bg 4.89
+898.31->524.30 h 189.62 err 19.25 bg -5.10
+898.31->435.41 h 164.57 err 27.19 bg 1.15
+898.31->1082.23 h 166.81 err 26.88 bg -1.11
+
+
+
+#### step 18 05:42:20
+MSG: Analysis: The parent fit gives 4.3734 s. A consistent higher cascade now anchors the previously inferred isomer: the 3092.6-keV level feeds 2633.0 and 2861.4 keV by 459.6 and 231.2 keV, respectively; those feed a 1963.1-keV isomer by 669.9 and 898.3 keV. Its unrecorded 38.1-keV decay reaches 1925.0 keV. The remaining work is to separate genuine crossover intensity from sum and escape contributions, particularly at 2263 keV.
+Plan: Read the completed isomer fit, test escape-peak signatures in gated spectra, and refine true peak areas and summing corrections before writing the final scheme.
+CMD: 
+CMD: cat > /app/work/check_scheme.py <<'PY'
+import numpy as np
+W='/app/work/';d=np.load(W+'netcoinc.npz');E=d['E'];r=np.load(W+'peaks.npz')['rows'];P=d['P'];levels=[0,318.4,842.7,1489.6,1640.3,1641.6,1925.0,1963.1,2137.4,2581.6,2633.0,2689.2,2721.7,2792.5,2861.4,3092.6,3148.8]
+for i,e in enumerate(E):
+ pairs=[(a,b) for a in levels for b in levels if a>b and abs(a-b-e)<.4]
+ print('%.3f area %.0f'%(e,r[i,4]),pairs)
+# original count windows around single and double escape peaks from 2774.2 and any high-energy lines
+s=np.loadtxt('/app/data/singles.txt')[:,1:].sum(axis=1); co=np.load(W+'inrun_cal.npy')
+for base in [2774.2,2263.2,2018.7,1879,1738.9,1489.6,1452.3,1323.2,1321.9]:
+ print('ESCAPES OF',base)
+ for en in [base,base-511,base-1022]:
+  if en<60:continue
+  c=int(np.roots([co[0],co[1],co[2]-en])[1]);xx=np.arange(c-6,c+7);net=sum(s[xx])-13*np.mean(s[np.r_[c-12:c-7,c+8:c+13]])
+  print(en,c,round(net))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/check_scheme.py
+
+OBS: 99999999998 2483 -62
+ESCAPES OF 2018.7
+2018.7 4038 21404
+1507.7 3016 1507
+996.7 1993 -1533
+ESCAPES OF 1879
+1879 3759 7645
+1368 2736 382
+857 1714 310
+ESCAPES OF 1738.9
+1738.9 3478 16019
+1227.9 2456 -337
+716.9000000000001 1433 618
+ESCAPES OF 1489.6
+1489.6 2980 27917
+978.5999999999999 1957 88
+467.5999999999999 934 -72853
+ESCAPES OF 1452.3
+1452.3 2905 18656
+941.3 1882 40968
+430.29999999999995 860 -117456
+ESCAPES OF 1323.2
+1323.2 2647 130686
+812.2 1624 -440
+301.20000000000005 601 -340
+ESCAPES OF 1321.9
+1321.9 2644 131459
+810.9000000000001 1621 306
+299.9000000000001 599 -612
+root@8e009d9b265c:/app#
+
+
+#### step 19 05:42:51
+MSG: Analysis: A 16–17-level candidate scheme accounts for the true cascade energies, but some apparent direct transitions are still likely artifacts: 965.6, 1171.5, 1199.2, 1294.7, 1400.6, and 1640.9 keV are consistent with sums; 1752.2 and 2263.2 keV match escape peaks of the 2774.2-keV line. The 707.98-keV peak contains both parent-associated and slower activity. The combined delayed fit gives an isomer half-life near 175 ns.
+Plan: Quantify the parent-only component at 708 keV, inspect the 842.7-keV and other crossovers for sum contamination, check for overlooked weak true lines, and examine the 2263-keV gate relationships before deciding whether it contains a real transition.
+CMD: cat > /app/work/final_checks.py <<'PY'
+exec(open('/app/work/analyze.py').read().split('lines=[]')[0])
+d=np.load(W/'netcoinc.npz');E=d['E'];P=d['P'];T=d['T'];rows=np.load(W/'peaks.npz')['rows'];tm=np.load(W/'peaks.npz')['times'];co=np.load(W/'inrun_cal.npy')
+for e in [511,842.7,941.3,1092,1738.9,1752.2,2263.2,2774.2]:
+ i=np.argmin(abs(E-e));print('PAIR',E[i],[(round(E[j],3),round(P[i,j],1),round(T[i,j],1)) for j in range(len(E)) if P[i,j]>15])
+# fit 708 with parent time profile plus slow contaminant shape from 471.8
+ip=np.argmin(abs(E-318.4));ic=np.argmin(abs(E-471.8));i=np.argmin(abs(E-708));
+X=np.array([tm[ip]/sum(tm[ip]),tm[ic]/sum(tm[ic]),np.ones(24)]).T
+z=tm[i];weights=1/np.maximum(z,100);beta=np.linalg.lstsq(X*np.sqrt(weights[:,None]),z*np.sqrt(weights),rcond=None)[0];print('708 components',beta,'chi',sum((z-X@beta)**2*weights)/21)
+print('small isolated peaks missed by first inventory')
+from scipy.ndimage import gaussian_filter1d,median_filter
+net=y-bg*.36;sm=gaussian_filter1d(net,1);cont=median_filter(sm,size=35);ps,_=find_peaks(sm-cont,prominence=70,distance=8)
+for c in ps:
+ if min(abs(rows[:,0]-c))<6:continue
+ fit=peakfit(y,c,10)
+ if fit is None:continue
+ par,a,cov=fit;e=np.polyval(co,par[1]);
+ if a>350 and par[2]<3.2:print(c,round(e,3),round(a),round(par[2],2))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/final_checks.py > /app/work/final_checks.txt; cat /app/work/final_checks.txt
+
+OBS: 'small isolated peaks missed by first inventory')
+> from scipy.ndimage import gaussian_filter1d,median_filter
+> net=y-bg*.36;sm=gaussian_filter1d(net,1);cont=median_filter(sm,size=35);ps,_=find_peaks(sm-cont,prominence=70,distance=8)
+> for c in ps:
+>  if min(abs(rows[:,0]-c))<6:continue
+>  fit=peakfit(y,c,10)
+>  if fit is None:continue
+>  par,a,cov=fit;e=np.polyval(co,par[1]);
+>  if a>350 and par[2]<3.2:print(c,round(e,3),round(a),round(par[2],2))
+> PY
+root@8e009d9b265c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/final_checks.py > /app/work/final_checks.txt; cat /app/work/final_checks.txt
+
+
+
+#### step 20 05:42:57
+MSG: Analysis: The final diagnostic script is running. The scheme is nearly constrained; the main unresolved questions are blended activity at 708 keV and whether the 2263-keV peak is entirely an escape peak.
+Plan: Wait for the diagnostic report.
+CMD: 
+OBS: 027.1), np.float64(-14.4))]
+708 components [33363.14078332 24773.20479148   -72.81427094] chi 5.106385572059434
+small isolated peaks missed by first inventory
+249 124.884 389 0.5
+471 237.814 2317 1.64
+530 265.72 426 2.23
+546 273.128 540 1.97
+690 345.559 692 1.48
+749 374.431 368 0.5
+1217 609.266 4047 1.5
+1433 716.321 373 0.98
+1556 777.857 680 1.57
+1659 829.306 727 1.81
+1919 959.584 366 0.81
+2260 1129.458 385 1.59
+2456 1227.811 399 1.13
+2520 1259.832 665 2.12
+2737 1368.236 432 1.9
+2846 1422.584 429 1.73
+2939 1469.184 431 1.51
+3016 1507.75 1606 2.2
+3319 1658.819 1276 2.26
+root@8e009d9b265c:/app#
+
+
+#### step 21 05:43:35
+MSG: Analysis: The 2263- and 1752-keV peaks have only the 318-keV partner, with coincidence-to-singles ratios matching the 2774-keV line; this confirms escape peaks rather than extra transitions. The 842.7-keV peak has a genuine direct transition plus a significant sum contribution. The 708-keV peak contains a daughter-decay contribution, as shown by its coincidences with daughter-associated 403- and 215-keV lines. A few newly found weak peaks need checking against the 0.5 intensity cutoff.
+Plan: Fit the 708-keV time profile as a parent component plus daughter activity, estimate corrected direct crossover intensities, and inspect the few weak peaks potentially above the cutoff. Then validate the complete minimal scheme.
+CMD: cat > /app/work/last_refinements.py <<'PY'
+exec(open('/app/work/analyze.py').read().split('lines=[]')[0])
+co=np.load(W/'inrun_cal.npy');d=np.load(W/'netcoinc.npz');E=d['E'];P=d['P'];r=np.load(W/'peaks.npz')['rows'];tm=np.load(W/'peaks.npz')['times'];ec=np.load(W/'eff_coef.npy')[3:]
+def eff(e):return np.exp(sum(v*np.log(e/1000)**(i+1) for i,v in enumerate(ec)))
+pidx=np.argmin(abs(E-318.4)); didx=np.argmin(abs(E-403.4)); i=np.argmin(abs(E-708));z=tm[i];X=np.array([tm[pidx]/sum(tm[pidx]),tm[didx]/sum(tm[didx]),np.ones(24)]).T;wt=1/np.maximum(z,100);beta=np.linalg.lstsq(X*np.sqrt(wt[:,None]),z*np.sqrt(wt),rcond=None)[0]
+print('708 parent,daughter,const',beta,'chi',sum((z-X@beta)**2*wt)/21,'relative',beta[0]/eff(708)/(r[pidx,4]/eff(318.4))*100)
+# More stable fit off cycle using daughter rate model with h_d and parent exponential.
+from scipy.integrate import quad
+hp=4.373386;lp=np.log(2)/hp;edges=np.arange(25)*1.5
+def rate(t,hd):
+ ld=np.log(2)/hd
+ if t<=12:return 1-(ld*np.exp(-lp*t)-lp*np.exp(-ld*t))/(ld-lp)
+ P0=1-np.exp(-lp*12);D0=1-(ld*np.exp(-lp*12)-lp*np.exp(-ld*12))/(ld-lp);u=t-12
+ return D0*np.exp(-ld*u)+ld*P0*(np.exp(-lp*u)-np.exp(-ld*u))/(ld-lp)
+def shape(hd):return np.array([quad(lambda t:rate(t,hd),a,b)[0] for a,b in zip(edges[:-1],edges[1:])])
+def fun(t,A,B,hd,C):return A*tm[pidx]/sum(tm[pidx])+B*shape(hd)/sum(shape(hd))+C
+pars,cov=curve_fit(fun,np.arange(24),z,p0=[30000,26000,18,0],sigma=np.sqrt(np.maximum(z,100)),bounds=([0,0,5,-np.inf],[1e6,1e6,100,np.inf]),maxfev=10000)
+print('708 physical',pars,np.sqrt(np.diag(cov)),'chi',sum((z-fun(None,*pars))**2/np.maximum(z,100))/20)
+print('weak peak times and corrected relative')
+for c in [471,530,546,690,1556,1659,2520,3016,3319]:
+ fit=peakfit(y,c,10);par,a,cov=fit;x=np.arange(c-10,c+11);g=np.exp(-.5*((x-par[1])/par[2])**2)/(par[2]*np.sqrt(2*np.pi));X=np.array([g,np.ones(len(x)),x-c]).T;zz=[]
+ for t in range(24):
+  wt=1/np.maximum(s[x,t],1);zz.append(np.linalg.lstsq(X*np.sqrt(wt[:,None]),s[x,t]*np.sqrt(wt),rcond=None)[0][0])
+ zz=np.array(zz);e=np.polyval(co,par[1]);rel=100*a/eff(e)/(r[pidx,4]/eff(318.4));print('%.3f area %.0f rel %.3f'%(e,a,rel),np.round(zz[[0,4,7,8,12,16,20,23]]/max(zz),2))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/last_refinements.py
+
+OBS: ]
+265.720 area 426 rel 0.019 [ 0.17 -0.14 -0.09  0.91 -0.    0.46 -0.07 -0.19]
+273.128 area 540 rel 0.025 [-0.18 -0.35  0.7   0.39 -0.31  0.21  0.09  0.1 ]
+345.559 area 692 rel 0.036 [-0.05  0.72  0.44  0.04 -0.07 -0.09  0.15  0.22]
+777.857 area 680 rel 0.061 [-0.07  0.07  0.36  0.73  0.37  0.08  0.07  0.02]
+829.306 area 727 rel 0.068 [-0.01  0.72  0.92  0.86  0.52  0.29 -0.17 -0.29]
+1259.832 area 665 rel 0.090 [0.09 0.81 0.73 0.91 0.11 0.   0.04 0.01]
+1507.750 area 1606 rel 0.257 [0.14 0.55 1.   0.96 0.33 0.15 0.05 0.06]
+1658.819 area 1276 rel 0.224 [0.12 0.85 1.   0.83 0.34 0.18 0.06 0.05]
+
+
+
+#### step 22 05:44:28
+MSG: Analysis: The parent-only 708-keV intensity is about 3.0 relative to the 318-keV line, after subtracting daughter decay. Newly found weak peaks are below the requested 0.5 cutoff. One remaining ambiguity is the 511-keV peak: it has selective coincidences with branches from 2581.6 keV, which could indicate a genuine transition as well as annihilation radiation. I will check its coincidence topology and calibrated escape-peak fractions before finalizing exclusions.
+Plan: Compare production escape ratios with the Co56 calibration, inspect the 511-keV coincidence partners across the full spectrum, and check whether a 3092.6 → 2581.6 transition is supported independently.
+CMD: cat > /app/work/escape_check.py <<'PY'
+exec(open('/app/work/analyze.py').read().split('lines=[]')[0])
+co=np.load(W/'inrun_cal.npy');cocal=np.load(W/'sources.npz')['coef'];yy=np.loadtxt(D/'cal_co56.txt')[:,1]
+def inv(e,coef):return np.roots([coef[0],coef[1],coef[2]-e])[1]
+print('CAL ESCAPE RATIOS')
+for e in [1238.29,1771.36,2034.79,2598.5,3253.42]:
+ aa=[]
+ for en in [e,e-511,e-1022]:
+  p,a,cov=peakfit(yy,inv(en,cocal),12);aa.append(a)
+ print(e,aa,np.array(aa)/aa[0])
+print('POTENTIAL HIGH PEAKS')
+for e in [1603.0,2249.9,2581.6,2721.7,3092.6,3148.8]:
+ p,a,cov=peakfit(y,inv(e,co),12);print(e,a,p)
+# gated spectrum for annihilation line, all prominent peak centroids
+raw=np.loadtxt(D/'gg_prompt.txt',dtype=int);m=np.zeros((3600,3600));np.add.at(m,(raw[:,0],raw[:,1]),raw[:,2]);m=m+m.T-np.diag(np.diag(m));dat=np.load(W/'netcoinc.npz');E=dat['E'];wt=dat['weights'];g=wt[np.argmin(abs(E-511))]@m
+from scipy.ndimage import median_filter
+p,_=find_peaks(g-median_filter(g,size=15),prominence=15,distance=4)
+print('511 GATE peaks')
+for c in p:print(round(np.polyval(co,2*c+.5),2),round(g[c],1))
+# relationship of 511 with primary branch gammas from 3092.6
+for e in [231.2,459.6,1452.3,2774.2]:
+ i=np.argmin(abs(E-511));j=np.argmin(abs(E-e));print('511 pair',E[j],dat['P'][i,j],np.sqrt(dat['VP'][i,j]))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/escape_check.py
+
+OBS: +01 3.21093537e+03 2.02634673e+00 2.97751349e+02
+ 1.91339050e+01]
+2249.9 117.82596951901881 [2.00126354e+01 4.50122838e+03 2.34880414e+00 5.83213681e+01
+ 2.43001157e-02]
+2581.6 60.392109527548406 [ 9.17537088e+00  5.16871461e+03  2.62583019e+00  3.11828784e+01
+ -4.03326879e-01]
+2721.7 13.002903338265284 [ 1.03748158e+01  5.44315089e+03  5.00000000e-01  2.86941359e+01
+ -1.19920793e-01]
+3092.6 272.1908266204022 [ 5.12614245e+01  6.18669563e+03  2.11832640e+00  5.36046548e+00
+ -1.62268123e-01]
+3148.8 11.29484553811879 [3.93316616e+00 6.30146711e+03 1.14563973e+00 4.35752505e+00
+ 1.29470746e-02]
+
+
+
+#### step 23 05:44:59
+MSG: Analysis: Calibration escape fractions confirm that the 1752- and 2263-keV peaks are explained by the 2774-keV line. However, the 511-keV peak also has strong coincidences with all three outgoing branches of the 2581.6-keV level and none with competing branches from 3092.6 keV. This supports a real 3092.6 → 2581.6 transition superimposed on annihilation radiation; its intensity should be extracted from these selective coincidences rather than the total singles peak.
+Plan: Read the remaining gate output and estimate the real 511-keV intensity from the known outgoing branch balance and efficiency-normalized coincidence ratios. Check the isolated 1879-keV branch for its minimal placement.
+CMD: 
+CMD: cat > /app/work/branch_intensities.py <<'PY'
+import numpy as np
+W='/app/work/';d=np.load(W+'netcoinc.npz');E=d['E'];P=d['P'];T=d['T'];r=np.load(W+'peaks.npz')['rows'];ec=np.load(W+'eff_coef.npy')[3:]
+def ix(e):return np.argmin(abs(E-e))
+def eff(e):return np.exp(sum(v*np.log(e/1000)**(i+1) for i,v in enumerate(ec)))
+# Determine absolute efficiency scale from clean cascades; crossovers are small.
+for top,below in [(524.3,318.4),(1082.2,318.4),(1738.9,318.4),(1879,318.4),(2774.2,318.4),(1322.4,318.4),(1011.4,647.2)]:
+ print(top,below,'P/A',P[ix(top),ix(below)]/r[ix(top),4], 'eps-scale',P[ix(top),ix(below)]/r[ix(top),4]/(.875*eff(below)))
+scale=P[ix(524.3),ix(318.4)]/r[ix(524.3),4]/(.875*eff(318.4))
+ref=r[ix(318.4),4]/(scale*eff(318.4))
+area511=0
+for out in [941.3,1738.9,1092.0]:
+ a=P[ix(511),ix(out)]/(.875*scale*eff(out));area511+=a
+ print('511 branch',out,'equivalent area',a)
+print('real 511 total area',area511,'relative',100*area511/(scale*eff(511))/ref)
+# derive direct842 intensity from gate ratios relative to524 for clean top branches
+for g in [435.4,551.8,1011.4,1082.2,1738.9,2018.7]:
+ print('842 gate',g,'branch I842/I524',P[ix(g),ix(842.7)]/max(P[ix(g),ix(524.3)],1)*eff(524.3)/eff(842.7))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/branch_intensities.py
+
+OBS: 5386395 eps-scale 0.10447925466302016
+511 branch 941.3 equivalent area 32495.03027572341
+511 branch 1738.9 equivalent area 22165.986107585304
+511 branch 1092.0 equivalent area 8798.822112783744
+real 511 total area 63459.83849609246 relative 4.163403428325453
+842 gate 435.4 branch I842/I524 0.06668212529684296
+842 gate 551.8 branch I842/I524 0.06152505652204715
+842 gate 1011.4 branch I842/I524 0.06201793745316647
+842 gate 1082.2 branch I842/I524 0.06145960070594781
+842 gate 1738.9 branch I842/I524 0.03993039499737044
+842 gate 2018.7 branch I842/I524 0.060640310029819566
+root@8e009d9b265c:/app#
+
+
+#### step 24 05:46:04
+MSG: Analysis: The selective 511-keV coincidences establish a genuine 3092.6 → 2581.6 transition, with relative intensity about 4.2 after separating annihilation contributions. The minimal consistent scheme contains 17 levels, including the inferred 1963.1-keV isomer. Sum and escape peaks can be excluded without adding levels. All remaining true transitions above the cutoff have been identified.
+Plan: Perform a least-squares energy fit to the proposed transition network, estimate modest coincidence-summing corrections to intensities, and explicitly check the ambiguous 459-keV branch and unresolved doublets. Then write and validate the requested JSON.
+CMD: cat > /app/work/build_scheme.py <<'PY'
+import numpy as np,json
+W='/app/work/';d=np.load(W+'netcoinc.npz');E=d['E'];P=d['P'];T=d['T'];r=np.load(W+'peaks.npz')['rows'];ec=np.load(W+'eff_coef.npy')[3:]
+def ix(e):return np.argmin(abs(E-e))
+def eff(e):return np.exp(sum(v*np.log(e/1000)**(i+1) for i,v in enumerate(ec)))
+levels=[0,318.4,842.7,1489.6,1640.3,1641.6,1925.0,1963.1,2137.4,2581.6,2633.0,2689.2,2721.7,2792.5,2861.4,3092.6,3148.8]
+# from,to,measured energy; precise doublet energies use selective gates
+triples=[(318.4,0,318.398),(842.7,318.4,524.301),(842.7,0,842.705),(1489.6,842.7,646.90),(1489.6,0,1489.607),(2137.4,1489.6,647.80),(1925,1489.6,435.407),(1925,842.7,1082.234),(1925,318.4,1606.627),(2689.2,2137.4,551.805),(3148.8,2137.4,1011.411),(2633,1925,707.975),(2633,1963.1,669.914),(2861.4,1963.1,898.312),(3092.6,2633,459.609),(3092.6,2861.4,231.208),(3092.6,2581.6,511.0),(2633,1640.3,992.727),(2633,1489.6,1143.406),(2792.5,1489.6,1302.918),(2792.5,1925,867.539),(2792.5,1641.6,1150.908),(2861.4,1641.6,1219.782),(2861.4,842.7,2018.711),(2581.6,1640.3,941.316),(2581.6,1489.6,1092.029),(2581.6,842.7,1738.906),(3092.6,1640.3,1452.314),(3092.6,318.4,2774.204),(1640.3,318.4,1321.90),(1641.6,318.4,1323.20),(2721.7,842.7,1879.021)]
+A=np.zeros((len(triples),len(levels)-1));b=[]
+for i,(a,z,e) in enumerate(triples):
+ A[i,levels.index(a)-1]=1
+ if z!=0:A[i,levels.index(z)-1]=-1
+ b.append(e)
+fitted=np.r_[0,np.linalg.lstsq(A,b,rcond=None)[0]]
+print('fitted levels',fitted)
+for (a,z,e),delta in zip(triples,A@fitted[1:]-b):print(a,z,e,'residual',round(delta,4))
+# Model true detected singles areas; subtract recognized sum contributions at crossovers.
+refarea=r[ix(318.4),4];ref=refarea/eff(318.4)
+areas={318.398:refarea,524.301:r[ix(524.3),4],842.705:r[ix(842.7),4]-P[ix(318.4),ix(524.3)]/7,646.90:389865.54,647.80:225778.97,1489.607:r[ix(1489.6),4]-800,1606.627:r[ix(1606.6),4]-P[ix(524.3),ix(1082.2)]/7,707.975:35907,511.0:63460,1452.314:r[ix(1452.3),4]-P[ix(511),ix(941.3)]/7,1321.90:76864.72,1323.20:55826.33}
+trans=[]
+for a,z,e in triples:
+ area=areas.get(e,r[ix(e),4]); rel=100*area/eff(e)/ref
+ # Estimate summing-out by associating coincident peak count /7, modest relative correction.
+ correction=(P[ix(e)].clip(0).sum()+T[ix(e)].clip(0).sum())/7/max(r[ix(e),4],1)
+ refcorr=(P[ix(318.4)].clip(0).sum()+T[ix(318.4)].clip(0).sum())/7/refarea
+ if e in [511.,646.90,647.80,1321.90,1323.20]: correction=min(correction,.08)
+ rel*= (1+correction)/(1+refcorr)
+ trans.append(dict(from_keV=round(fitted[levels.index(a)],3),to_keV=round(fitted[levels.index(z)],3),energy_keV=e,relative_intensity=round(rel,3)))
+ print('TRANS',a,z,e,round(rel,3),'sum correction',round(correction,3))
+result=dict(parent_half_life_s=4.3734,levels_keV=np.round(fitted,3).tolist(),transitions=trans,isomer=dict(level_keV=round(fitted[levels.index(1963.1)],3),half_life_ns=175.1))
+json.dump(result,open(W+'candidate.json','w'),indent=2)
+print('COUNT levels',len(levels),'transitions',len(trans))
+for ea,eb in [(459.6,551.8),(459.6,1011.4),(459.6,1143.4),(459.6,992.7)]:
+ i,j=ix(ea),ix(eb);print('ambiguous pair',E[i],E[j],P[i,j],np.sqrt(d['VP'][i,j]))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/build_scheme.py
+
+OBS: n 0.019
+TRANS 3092.6 318.4 2774.204 6.39 sum correction 0.014
+TRANS 1640.3 318.4 1321.9 10.878 sum correction 0.021
+TRANS 1641.6 318.4 1323.2 7.908 sum correction 0.021
+TRANS 2721.7 842.7 1879.021 1.523 sum correction 0.025
+COUNT levels 17 transitions 32
+ambiguous pair 459.60895214363705 551.8047148956814 63.375 31.189104730758945
+ambiguous pair 459.60895214363705 1011.4112835865678 -0.28125 22.684303752126713
+ambiguous pair 459.60895214363705 1143.4057481411896 348.4375 20.904241308583767
+ambiguous pair 459.60895214363705 992.7270227222567 223.359375 17.32484188915948
+root@8e009d9b265c:/app#
+
+
+#### step 25 05:46:36
+MSG: Analysis: The energy network fits all 32 proposed transitions with residuals below 0.06 keV, and the 17 fitted levels include the 1963.09-keV isomer. The 459-keV branch is supported from 3092.6 to 2633.0 keV, not the alternative sum-compatible placement. The half-life and intensity analyses are complete; I will make one final timing robustness check and then save the validated output.
+Plan: Recheck the isomer tail with different fit ranges and background assumptions, copy the candidate JSON to the requested output path, and verify exact keys, numeric values, transition-energy consistency, and unique levels/transitions.
+CMD: cat > /app/work/timing_robustness.py <<'PY'
+import numpy as np
+from scipy.optimize import curve_fit
+W='/app/work/';d=np.load(W+'netcoinc.npz');E=d['E'];wt=d['weights'];raw=np.loadtxt('/app/data/gg_delayed.txt',dtype=int);dt=raw[:,2];bb=np.arange(70,700,20);zz=np.zeros(32);vv=zz.copy();op=zz.copy()
+for ea in [669.9,898.3,231.2,459.6]:
+ for eb in [318.4,524.3,435.4,1082.2]:
+  a=np.argmin(abs(E-ea));b=np.argmin(abs(E-eb));w=wt[a,raw[:,0]]*wt[b,raw[:,1]]+wt[b,raw[:,0]]*wt[a,raw[:,1]];sgn=1 if E[b]>E[a] else -1
+  for i,t in enumerate(bb):
+   sel=dt==sgn*t;rev=dt==-sgn*t;zz[i]+=sum(w[sel]*raw[sel,-1]);vv[i]+=sum(w[sel]**2*raw[sel,-1]);op[i]+=sum(w[rev]*raw[rev,-1])
+print('opposite-side mean background',np.mean(op))
+for low in [70,90,110,150]:
+ use=bb>=low
+ for fixed in [True,False]:
+  if fixed:
+   def f(t,A,h):return A*2**(-(t-70)/h)+np.mean(op)
+   p0=[max(zz),175]
+  else:
+   def f(t,A,h,bg):return A*2**(-(t-70)/h)+bg
+   p0=[max(zz),175,0]
+  par,cov=curve_fit(f,bb[use],zz[use],p0=p0,sigma=np.sqrt(vv[use]));print('cut',low,'fixed',fixed,par,np.sqrt(np.diag(cov)))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/timing_robustness.py
+
+CMD: cp /app/work/candidate.json /app/output/decay_scheme.json; python3 - <<'PY'
+import json,math
+p='/app/output/decay_scheme.json';d=json.load(open(p));assert set(d)=={'parent_half_life_s','levels_keV','transitions','isomer'};assert set(d['isomer'])=={'level_keV','half_life_ns'}
+L=d['levels_keV'];assert len(L)==len(set(L));assert 0 in L;assert d['isomer']['level_keV'] in L
+seen=set()
+for t in d['transitions']:
+ assert set(t)=={'from_keV','to_keV','energy_keV','relative_intensity'}
+ assert all(isinstance(v,(float,int)) and math.isfinite(v) for v in t.values())
+ assert t['from_keV'] in L and t['to_keV'] in L
+ assert t['relative_intensity']>=.5
+ assert abs(t['from_keV']-t['to_keV']-t['energy_keV'])<.5
+ pair=(t['from_keV'],t['to_keV']);assert pair not in seen;seen.add(pair)
+print('Validated',p,'with',len(L),'levels and',len(d['transitions']),'transitions. Half-lives:',d['parent_half_life_s'],d['isomer'])
+PY
+
+OBS: et(L));assert 0 in L;assert d['isomer']['level_keV'] in L
+seen=set()
+for t in d['transitions']:
+ assert set(t)=={'from_keV','to_keV','energy_keV','relative_intensity'}
+ assert all(isinstance(v,(float,int)) and math.isfinite(v) for v in t.values())
+ assert t['from_keV'] in L and t['to_keV'] in L
+ assert t['relative_intensity']>=.5
+ assert abs(t['from_keV']-t['to_keV']-t['energy_keV'])<.5
+ pair=(t['from_keV'],t['to_keV']);assert pair not in seen;seen.add(pair)
+print('Validated',p,'with',len(L),'levels and',len(d['transitions']),'transitions. Half-lives:',d['parent_half_life_s'],d['isomer'])
+PY
+
+
+
+#### step 26 05:46:48
+MSG: Analysis: The final timing check and output validation are still running. The candidate file has been queued for copying to the required path.
+Plan: Wait for both commands to finish and inspect the timing robustness and validation results.
+CMD: 
+OBS:  all(isinstance(v,(float,int)) and math.isfinite(v) for v in t.values())
+>  assert t['from_keV'] in L and t['to_keV'] in L
+>  assert t['relative_intensity']>=.5
+>  assert abs(t['from_keV']-t['to_keV']-t['energy_keV'])<.5
+>  pair=(t['from_keV'],t['to_keV']);assert pair not in seen;seen.add(pair)
+> print('Validated',p,'with',len(L),'levels and',len(d['transitions']),'transitions. Half-lives:',d['parent_half_life_s'],d['isomer'])
+> PY
+Validated /app/output/decay_scheme.json with 17 levels and 32 transitions. Half-lives: 4.3734 {'level_keV': 1963.09, 'half_life_ns': 175.1}
+root@8e009d9b265c:/app#
+
+
+#### step 27 05:47:01
+MSG: Analysis: The output file passes all structural and energy-consistency checks. The final timing tests give 164–175 ns depending on fit range and background treatment; a central estimate of 168.5 ns is more robust than the earlier free-background-only estimate. The reconstructed scheme has 17 levels and 32 detected transitions above the intensity cutoff.
+Plan: Update the isomer half-life to the robust timing estimate and confirm the final file exists.
+CMD: python3 - <<'PY'
+import json
+p='/app/output/decay_scheme.json'
+d=json.load(open(p));d['isomer']['half_life_ns']=168.5
+with open(p,'w') as f:json.dump(d,f,indent=2);f.write('\n')
+print('Final output:',p,'| parent half-life',d['parent_half_life_s'],'s | isomer',d['isomer'])
+PY
+ls -l /app/output/decay_scheme.json
+
+CMD: 
+OBS: rint('Final output:',p,'| parent half-life',d['parent_half_life_s'],'s | isomer',d['isomer'])
+> PY
+Final output: /app/output/decay_scheme.json | parent half-life 4.3734 s | isomer {'level_keV': 1963.09, 'half_life_ns': 168.5}
+root@8e009d9b265c:/app# ls -l /app/output/decay_scheme.json
+-rw-r--r-- 1 root root 4478 Nov 12 05:47 /app/output/decay_scheme.json
+root@8e009d9b265c:/app#
+
+
+Are you sure you want to mark the task as complete? This will trigger your solution to be graded and you won't be able to make any further corrections. If so, include "task_complete": true in your JSON response again.
+
+#### step 28 05:47:21
+MSG: Analysis: The requested file has been written and validated. It contains the reconstructed 17-level scheme, 32 qualifying transitions, a parent half-life of 4.3734 s, and the 1963.09-keV isomer with a half-life of 168.5 ns.
+Plan: No further commands are needed.
+CMD: 
+OBS: New Terminal Output:
+n
+root@8e009d9b265c:/app#
+
+

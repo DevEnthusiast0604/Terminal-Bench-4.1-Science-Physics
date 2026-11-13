@@ -1,0 +1,1139 @@
+#### step 2 20:18:28
+MSG: Analysis: I need to inspect the run documentation and available data before extracting decay timing, daughter transitions, and the minimal level scheme.
+Plan: List the data files and read NOTES.md to identify formats, calibrations, and acquisition conditions.
+CMD: ls -lah /app/data && cat /app/data/NOTES.md
+
+OBS:  ns, as `i j dt n`: `n` pairs with channels `i` ≤ `j` and `dt` = t(j) − t(i), in ns, the centre of a 20
+ns bin.
+
+`background.txt` is the room background, `channel counts`: 12000 s with the tape parked and the beam off, straight after production.
+
+`cal_eu152.txt`, `cal_co56.txt` and `cal_co60.txt` are source runs, `channel counts`, with the source at the tape position: 3000 s, 3000 s and 1800 s, room back
+ground included. They were taken before production. The activities were not recorded.
+
+`source_lines.txt` lists the sources' γ-ray energies and emission probabilities.
+root@2adaf78a09e7:/app#
+
+
+#### step 3 20:18:38
+MSG: Analysis: The run includes time-binned singles, prompt/random/delayed coincidences, background, and calibration sources. Detector summing and unobserved radiation below 60 keV may matter, so peaks cannot all be treated as daughter transitions.
+Plan: Inspect file headers and source lines, confirm Python analysis libraries, and extract preliminary peak locations from all spectra.
+CMD: cat /app/data/source_lines.txt; for f in singles cal_eu152 cal_co56 cal_co60 gg_prompt gg_random gg_delayed background; do echo ==== $f; head -n 5 /app/data/$f.txt; done; python - <<'PY'
+import numpy, scipy
+print('numpy',numpy.__version__,'scipy',scipy.__version__)
+PY
+
+CMD: mkdir -p /app/work /app/output; cat > /app/work/inspect.py <<'PY'
+import numpy as np
+from scipy.signal import find_peaks
+for f in ['cal_eu152','cal_co56','cal_co60','singles','background']:
+ a=np.loadtxt('/app/data/'+f+'.txt'); y=a[:,1:].sum(axis=1)
+ p,pr=find_peaks(y,prominence=max(10,y.max()*.003),distance=7)
+ print('\n',f,'counts',y.sum(),'max',y.max())
+ for i in p: print(i, int(y[i]), int(y[max(0,i-4):i+5].sum()),end='; ')
+ print()
+PY
+python /app/work/inspect.py
+
+OBS:  name 'signature' from partially initialized module 'inspect' (most likely due to a circular import) (/app/work/inspect.py)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/app/work/inspect.py", line 2, in <module>
+    from scipy.signal import find_peaks
+  File "/usr/local/lib/python3.12/site-packages/scipy/__init__.py", line 88, in <module>
+    raise ImportError(msg) from e
+ImportError: The `scipy` install you are using seems to be broken, (extension modules cannot be imported), please try reinstalling.
+root@2adaf78a09e7:/app#
+
+
+#### step 4 20:18:43
+MSG: Analysis: The file formats and scientific libraries are available. My exploratory script's name accidentally shadowed Python's inspect module; this is a local naming issue, not a broken SciPy installation.
+Plan: Rename the script and run the initial peak inventory.
+CMD: mv /app/work/inspect.py /app/work/peak_inventory.py; rm -rf /app/work/__pycache__; python /app/work/peak_inventory.py
+
+OBS: New Terminal Output:
+
+root@2adaf78a09e7:/app# mv /app/work/inspect.py /app/work/peak_inventory.py; rm -rf /app/work/__pycache__; python /app/work/peak_inventory.py
+
+
+
+#### step 5 20:18:48
+MSG: Analysis: The renamed peak-inventory script is running.
+Plan: Wait briefly for its output.
+CMD: 
+OBS: 4 578; 3949 7
+3 539; 3981 75 561; 4009 75 517; 4071 68 516; 4079 71 522; 4119 64 484; 4141 76 489; 4190 74 492; 4209 395 2299; 4219 68 479; 4234 82 517; 4258 75 477; 4269 70
+503; 4294 67 517; 4310 73 525; 4339 71 468; 4360 66 478; 4369 66 472; 4378 70 500; 4410 264 1550; 4435 65 464; 4459 69 501; 4488 68 493; 4496 69 498; 4508 69 49
+7; 4538 71 482; 4551 73 539; 4574 75 512; 4611 78 539; 4624 74 512; 4647 73 499; 4675 78 541; 4693 82 616; 4718 83 605; 4742 76 596; 4751 79 583; 4820 49 333; 4
+851 56 349; 4948 52 350; 5001 47 321; 5100 52 314; 5231 1503 8206; 5530 38 234;
+root@2adaf78a09e7:/app#
+
+
+#### step 6 20:19:12
+MSG: Analysis: The spectra contain strong production peaks and numerous calibration/background lines. Approximate dispersion is 0.5 keV/channel, but the background and source peak positions differ slightly, so separate energy scales must be checked. Some production features are broad and may be detector artifacts rather than gamma lines.
+Plan: Build reusable Gaussian peak fitting, calibrate against the source energies, and obtain a statistically filtered production peak list with peak areas and widths.
+CMD: cat > /app/work/analyze.py <<'PY'
+import numpy as np
+from scipy.optimize import least_squares
+from scipy.special import erf
+from scipy.ndimage import gaussian_filter1d, median_filter
+from scipy.signal import find_peaks
+D='/app/data/'
+singles=np.loadtxt(D+'singles.txt')[:,1:]
+spec=singles.sum(1)
+bg=np.loadtxt(D+'background.txt')[:,1]
+def gauss(x,mu,sig):
+ return .5*(erf((x+.5-mu)/(2**.5*sig))-erf((x-.5-mu)/(2**.5*sig)))
+def fit(y,c,w=14):
+ x=np.arange(max(0,int(c)-w),min(len(y),int(c)+w+1)); z=y[x]; b=np.percentile(z,30)
+ p=[max(1,(z.max()-b)*5),c,1.8,max(.01,b),0]
+ def model(p): return p[0]*gauss(x,p[1],p[2])+p[3]+p[4]*(x-c)
+ r=least_squares(lambda p:(model(p)-z)/np.sqrt(np.maximum(z,1)),p,bounds=([0,c-5,.5,0,-np.inf],[np.inf,c+5,10,np.inf,np.inf]))
+ cov=np.linalg.pinv(r.jac.T@r.jac)
+ return r.x,np.sqrt(np.diag(cov)),np.sum(r.fun**2)/(len(x)-5)
+if __name__=='__main__':
+ lines=[]
+ for l in open(D+'source_lines.txt'):
+  if l.startswith('#'):continue
+  s,e,p=l.split(); lines.append((s,float(e),float(p)))
+ cal=[]
+ for s in ['eu152','co56','co60']:
+  y=np.loadtxt(D+'cal_'+s+'.txt')[:,1]
+  for ss,e,p in lines:
+   if ss!=s:continue
+   q,err,chi=fit(y,(e-.8)*2,w=11 if e in [1085.84,1089.74] else 14)
+   print('CAL',s,e,'ch %.4f area %.0f sig %.2f chi %.1f'%(q[1],q[0],q[2],chi))
+   cal.append([e,q[1],err[1],q[0],p,s])
+ good=[r for r in cal if r[0] not in [1085.84,1089.74] and r[2]<.1]
+ coeff=np.polyfit([r[1] for r in good],[r[0] for r in good],2,w=[1/r[2] for r in good]);print('CALIBRATION',coeff)
+ np.savez('/app/work/cal.npz',coeff=coeff,rows=np.array(cal,dtype=object))
+ smooth=gaussian_filter1d(spec,1); base=median_filter(spec, size=41)
+ score=(smooth-gaussian_filter1d(base,1))/np.sqrt(np.maximum(gaussian_filter1d(spec,1),1))
+ ps,_=find_peaks(score,height=7,prominence=5,distance=7)
+ results=[]
+ for c in ps:
+  q,err,chi=fit(spec,c)
+  if q[0]/err[0]<7:continue
+  results.append([*q[:3],err[0],chi])
+  print('PEAK ch %8.3f E %8.3f A %9.0f +-%5.0f sig %.2f chi %.1f'%(q[1],np.polyval(coeff,q[1]),q[0],err[0],q[2],chi))
+ np.save('/app/work/peaks.npy',results)
+PY
+python /app/work/analyze.py > /app/work/initial.txt; cat /app/work/initial.txt
+
+OBS: ilter1d(spec,1); base=median_filter(spec, size=41)
+>  score=(smooth-gaussian_filter1d(base,1))/np.sqrt(np.maximum(gaussian_filter1d(spec,1),1))
+>  ps,_=find_peaks(score,height=7,prominence=5,distance=7)
+>  results=[]
+>  for c in ps:
+>   q,err,chi=fit(spec,c)
+>   if q[0]/err[0]<7:continue
+>   results.append([*q[:3],err[0],chi])
+>   print('PEAK ch %8.3f E %8.3f A %9.0f +-%5.0f sig %.2f chi %.1f'%(q[1],np.polyval(coeff,q[1]),q[0],err[0],q[2],chi))
+>  np.save('/app/work/peaks.npy',results)
+> PY
+root@2adaf78a09e7:/app# python /app/work/analyze.py > /app/work/initial.txt; cat /app/work/initial.txt
+
+
+
+#### step 7 20:19:16
+MSG: Analysis: The calibration and peak-fitting script is still running.
+Plan: Collect its fitted peak results.
+CMD: 
+OBS: 478.846 E 1740.155 A     15952 +-  137 sig 1.95 chi 1.7
+PEAK ch 3505.556 E 1753.512 A      4727 +-   91 sig 2.35 chi 1.1
+PEAK ch 3530.112 E 1765.791 A       961 +-   58 sig 1.85 chi 1.8
+PEAK ch 3759.178 E 1880.343 A      7635 +-   96 sig 2.02 chi 1.3
+PEAK ch 4038.648 E 2020.105 A     21308 +-  151 sig 2.04 chi 3.6
+PEAK ch 4207.953 E 2104.777 A       650 +-   44 sig 2.43 chi 0.8
+PEAK ch 4527.801 E 2264.741 A      6311 +-   89 sig 2.37 chi 1.7
+PEAK ch 5230.555 E 2616.228 A      2943 +-   62 sig 2.27 chi 0.6
+PEAK ch 5549.966 E 2775.993 A     21513 +-  149 sig 2.31 chi 3.2
+root@2adaf78a09e7:/app#
+
+
+#### step 8 20:19:39
+MSG: Analysis: The initial calibration reveals a production/source gain shift: familiar room-background lines in production are displaced by roughly 0.6–1.7 keV on the source calibration. The production list also includes probable sum/escape peaks and blended lines. These require in-run energy calibration and coincidence/time classification.
+Plan: Use identifiable room-background peaks to calibrate the production energy scale. Extract each peak's cycle-time profile and beam-off half-life, and tabulate prompt/delayed coincidences among fitted peaks.
+CMD: cat > /app/work/production.py <<'PY'
+from analyze import *
+from scipy.optimize import minimize_scalar
+peaks=np.load('/app/work/peaks.npy')
+# Ambient reference lines present in production.
+anchors=[(1021.773,510.999),(1166.060,583.191),(1218.412,609.312),(1822.752,911.204),(2922.585,1460.822),(3530.112,1764.494),(4207.953,2103.511),(5230.555,2614.511)]
+c=np.polyfit(*np.array(anchors).T,1);print('Production calibration',c)
+for ch,e in anchors:print('anchor',e,'residual',np.polyval(c,ch)-e)
+np.save('/app/work/prodcal.npy',c)
+profiles=[]
+for k,(a,mu,sig,ea,chi) in enumerate(peaks):
+ x=np.arange(int(mu)-12,int(mu)+13); basis=np.array([gauss(x,mu,sig),np.ones(len(x)),x-mu]).T
+ w=1/np.maximum(spec[x],1); proj=np.linalg.inv(basis.T@(w[:,None]*basis))@ (basis.T*w)
+ y=proj[0]@singles[x]; err=np.sqrt(proj[0]**2@singles[x]);profiles.append([y,err])
+ t=np.arange(16)*1.5+.75
+ def f(h, ret=False):
+  b=np.exp(-t*np.log(2)/h); amp=np.sum(y[8:]*b/err[8:]**2)/np.sum(b*b/err[8:]**2)
+  return (amp*b) if ret else np.sum(((y[8:]-amp*b)/err[8:])**2)
+ r=minimize_scalar(f,bounds=(.4,500),method='bounded'); e=np.polyval(c,mu)
+ print('%2d E %8.3f A %9.0f sig %.2f T %7.3f chi %6.1f profile'%(k,e,a,sig,r.x,r.fun/15),np.round(y/y.max(),2))
+np.save('/app/work/profiles.npy',profiles)
+P=np.loadtxt(D+'gg_prompt.txt',dtype=int); R=np.loadtxt(D+'gg_random.txt',dtype=int); T=np.loadtxt(D+'gg_delayed.txt',dtype=int)
+# map coincidence channels to gamma gates
+mapping=np.full(3600,-1,dtype=int)
+for k,(_,mu,sig,*_) in enumerate(peaks):
+ ch=np.arange(3600);mapping[abs(ch-(mu-.5)/2)<max(2,1.7*sig)]=k
+mat=[]
+for data in [P,R,T]:
+ m=np.zeros((len(peaks),len(peaks)))
+ i=mapping[data[:,0]];j=mapping[data[:,1]];good=(i>=0)&(j>=0)
+ np.add.at(m,(i[good],j[good]),data[good,-1]);m=m+m.T-np.diag(m.diagonal());mat.append(m)
+np.savez('/app/work/coinc.npz',P=mat[0],R=mat[1],T=mat[2])
+for k,p in enumerate(peaks):
+ print('\nGATE %2d %.2f'%(k,np.polyval(c,p[1])))
+ for j in range(len(peaks)):
+  pr,ra,de=[m[k,j] for m in mat]
+  if pr-ra>max(25,5*np.sqrt(ra+1)) or de-12.8*ra>max(35,7*np.sqrt(12.8*ra+1)):
+   print('%2d %8.2f P %7d R %4d D %7d'%(j,np.polyval(c,peaks[j,1]),pr,ra,de))
+PY
+python /app/work/production.py > /app/work/production.txt; head -n 65 /app/work/production.txt
+
+OBS: i>=0)&(j>=0)
+>  np.add.at(m,(i[good],j[good]),data[good,-1]);m=m+m.T-np.diag(m.diagonal());mat.append(m)
+> np.savez('/app/work/coinc.npz',P=mat[0],R=mat[1],T=mat[2])
+> for k,p in enumerate(peaks):
+>  print('\nGATE %2d %.2f'%(k,np.polyval(c,p[1])))
+>  for j in range(len(peaks)):
+>   pr,ra,de=[m[k,j] for m in mat]
+>   if pr-ra>max(25,5*np.sqrt(ra+1)) or de-12.8*ra>max(35,7*np.sqrt(12.8*ra+1)):
+>    print('%2d %8.2f P %7d R %4d D %7d'%(j,np.polyval(c,peaks[j,1]),pr,ra,de))
+> PY
+root@2adaf78a09e7:/app# python /app/work/production.py > /app/work/production.txt; head -n 65 /app/work/production.txt
+
+
+
+#### step 9 20:19:45
+MSG: Analysis: The in-run calibration, time-profile extraction, and coincidence inventory are being calculated.
+Plan: Read the results and identify groups with common parent-decay timing and genuine cascade relationships.
+CMD: 
+CMD: cat /app/work/production.txt
+
+OBS:   831 R    0 D       6
+ 8   524.27 P     608 R    0 D       2
+
+GATE 50 2018.77
+ 0   215.10 P      29 R    0 D       3
+ 1   231.10 P     533 R    0 D       0
+ 2   318.32 P    2313 R    3 D      13
+ 8   524.27 P    1573 R    0 D       8
+16   842.74 P      65 R    0 D       2
+
+GATE 51 2103.38
+ 2   318.32 P      54 R    0 D       1
+10   583.09 P      34 R    0 D       0
+
+GATE 52 2263.24
+ 2   318.32 P     679 R    0 D       7
+
+GATE 53 2614.46
+ 2   318.32 P      33 R    0 D       1
+10   583.09 P     198 R    0 D       0
+
+GATE 54 2774.10
+ 2   318.32 P    2230 R    3 D      24
+root@2adaf78a09e7:/app#
+
+
+#### step 10 20:20:06
+MSG: Analysis: Strong daughter-cascade peaks share a parent half-life near 4.37 s. Other peaks show daughter growth, a long-lived contaminant, or constant background. The raw coincidence gates contain substantial Compton continuum, so local background subtraction is necessary before interpreting weak relationships.
+Plan: Generate continuum-subtracted coincidence peak areas and compact timing summaries. This will separate real cascades from artifacts and identify delayed ordering through the isomer.
+CMD: cat > /app/work/clean_coinc.py <<'PY'
+from analyze import *
+from scipy.sparse import coo_matrix,csr_matrix
+peaks=np.load('/app/work/peaks.npy');cal=np.load('/app/work/prodcal.npy');E=np.polyval(cal,peaks[:,1]);profiles=np.load('/app/work/profiles.npy')
+N=len(peaks); W=np.zeros((N,3600))
+for k,(a,mu,sig,*_) in enumerate(peaks):
+ mu=(mu-.5)/2;sig=sig/2
+ x=np.arange(int(mu)-8,int(mu)+9)
+ # account for integrated 2-channel bins
+ B=np.array([gauss(x,mu,sig),np.ones(len(x)),x-mu]).T
+ W[k,x]=np.linalg.pinv(B)[0]
+np.save('/app/work/gateweights.npy',W)
+Ms=[]
+for f in ['gg_prompt','gg_random','gg_delayed']:
+ d=np.loadtxt(D+f+'.txt',dtype=int)
+ M=coo_matrix((d[:,-1],(d[:,0],d[:,1])),shape=(3600,3600)).tocsr();M=M+M.T
+ m=W@M@W.T;v=W**2@M@(W**2).T;Ms.append(m)
+ np.savez('/app/work/'+f+'_clean.npz',area=m,var=v)
+P,R,T=Ms
+for i in range(N):
+ print('%2d %8.2f area %8.0f:'%(i,E[i],peaks[i,0]),end=' ')
+ for j in range(N):
+  if P[i,j]-R[i,j]>max(60,peaks[i,0]*.001) or T[i,j]-12.8*R[i,j]>80:
+   print('%d(%.1f):%d/%d'%(j,E[j],P[i,j]-R[i,j],T[i,j]-12.8*R[i,j]),end=' ')
+ print()
+PY
+python /app/work/clean_coinc.py > /app/work/clean_coinc.txt; cat /app/work/clean_coinc.txt
+
+CMD: grep ' E ' /app/work/production.txt | cut -c1-79
+
+OBS: 1],(d[:,0],d[:,1])),shape=(3600,3600)).tocsr();M=M+M.T
+>  m=W@M@W.T;v=W**2@M@(W**2).T;Ms.append(m)
+>  np.savez('/app/work/'+f+'_clean.npz',area=m,var=v)
+> P,R,T=Ms
+> for i in range(N):
+>  print('%2d %8.2f area %8.0f:'%(i,E[i],peaks[i,0]),end=' ')
+>  for j in range(N):
+>   if P[i,j]-R[i,j]>max(60,peaks[i,0]*.001) or T[i,j]-12.8*R[i,j]>80:
+>    print('%d(%.1f):%d/%d'%(j,E[j],P[i,j]-R[i,j],T[i,j]-12.8*R[i,j]),end=' ')
+>  print()
+> PY
+root@2adaf78a09e7:/app# python /app/work/clean_coinc.py > /app/work/clean_coinc.txt; cat /app/work/clean_coinc.txt
+grep ' E ' /app/work/production.txt | cut -c1-79
+
+
+
+#### step 11 20:20:12
+MSG: Analysis: The clean coincidence matrices are being built; this removes local spectral continuum in both energy coordinates.
+Plan: Wait for the compact coincidence and half-life tables.
+CMD: 
+OBS: e [0.13 0.37 0.53
+48 E 1764.607 A       961 sig 1.85 T 165.765 chi    0.6 profile [0.99 0.65 0.8
+49 E 1879.091 A      7635 sig 2.02 T   4.627 chi    0.8 profile [0.11 0.39 0.51
+50 E 2018.765 A     21308 sig 2.04 T   4.314 chi    1.2 profile [0.13 0.32 0.54
+51 E 2103.382 A       650 sig 2.43 T 500.000 chi    1.2 profile [0.64 0.27 0.83
+52 E 2263.236 A      6311 sig 2.37 T   4.232 chi    0.6 profile [0.15 0.35 0.51
+53 E 2614.462 A      2943 sig 2.27 T 154.827 chi    0.5 profile [0.81 0.82 0.83
+54 E 2774.099 A     21513 sig 2.31 T   4.312 chi    0.8 profile [0.14 0.35 0.5
+root@2adaf78a09e7:/app#
+
+
+#### step 12 20:20:33
+MSG: Analysis: The 647-keV feature is a real unresolved cascade doublet (strong self-coincidence), while the 1322-keV feature is also broader than a single line. Delayed coincidences connect 231, 459, 670, and 898 keV to the main cascade. Several apparent weak lines match sums or 511-keV escape offsets.
+Plan: Refine the production calibration with a quadratic, fit delayed coincidence signs and half-lives, and enumerate energy-sum relationships to reconstruct the minimum-level network.
+CMD: cat > /app/work/relations.py <<'PY'
+from analyze import *
+p=np.load('/app/work/peaks.npy'); c=np.load('/app/work/prodcal.npy');E=np.polyval(c,p[:,1])
+exclude=[0,3,6,7,10,11,19,20,25,28,39,42,48,51,53]
+for k,e in enumerate(E):
+ if k in exclude:continue
+ sums=[]
+ for i in range(k):
+  if i in exclude:continue
+  for j in range(i,k):
+   if j in exclude:continue
+   if abs(E[i]+E[j]-e)<1: sums.append('%d+%d (%.2f)'%(i,j,E[i]+E[j]-e))
+ escapes=['%d-%d'%(j,n*511) for j in range(k+1,len(E)) for n in [1,2] if abs(E[j]-n*511-e)<1]
+ print('%2d %8.2f sums %s escapes %s'%(k,e,','.join(sums),','.join(escapes)))
+PY
+python /app/work/relations.py; tail -n 16 /app/work/clean_coinc.txt
+
+CMD: cat > /app/work/delays.py <<'PY'
+from analyze import *
+from scipy.optimize import curve_fit
+p=np.load('/app/work/peaks.npy');E=np.polyval(np.load('/app/work/prodcal.npy'),p[:,1]);W=np.load('/app/work/gateweights.npy');d=np.loadtxt(D+'gg_delayed.txt',dtype=int)
+for i,j in [(1,2),(5,2),(13,2),(18,2),(1,4),(5,4),(13,4),(18,4),(13,26),(18,26),(13,12),(18,12),(1,18),(5,13)]:
+ w=W[i,d[:,0]]*W[j,d[:,1]]+W[j,d[:,0]]*W[i,d[:,1]]
+ tt=d[:,2]* (1 if i<j else -1) # time j minus time i
+ out=[]
+ for sign in [-1,1]:
+  y=np.array([np.sum(w[(tt*sign==t)]*d[(tt*sign==t),3]) for t in np.arange(70,700,20)])
+  x=np.arange(70,700,20)
+  try:q,cov=curve_fit(lambda x,a,h,b:a*np.exp(-x*np.log(2)/h)+b,x,y,p0=[y.max(),150,0],sigma=np.sqrt(np.maximum(y,2)),bounds=([0,10,-10],[np.inf,2000,10]))
+  except: q=[0,0,0]
+  out.append((sign,round(y.sum()),np.round(q,2).tolist()))
+ print(i,j,'%.1f %.1f'%(E[i],E[j]),out)
+PY
+python /app/work/delays.py
+
+OBS: :
+>  w=W[i,d[:,0]]*W[j,d[:,1]]+W[j,d[:,0]]*W[i,d[:,1]]
+>  tt=d[:,2]* (1 if i<j else -1) # time j minus time i
+>  out=[]
+>  for sign in [-1,1]:
+>   y=np.array([np.sum(w[(tt*sign==t)]*d[(tt*sign==t),3]) for t in np.arange(70,700,20)])
+>   x=np.arange(70,700,20)
+>   try:q,cov=curve_fit(lambda x,a,h,b:a*np.exp(-x*np.log(2)/h)+b,x,y,p0=[y.max(),150,0],sigma=np.sqrt(np.maximum(y,2)),bounds=([0,10,-10],[np.inf,2000,10]))
+>   except: q=[0,0,0]
+>   out.append((sign,round(y.sum()),np.round(q,2).tolist()))
+>  print(i,j,'%.1f %.1f'%(E[i],E[j]),out)
+> PY
+root@2adaf78a09e7:/app# python /app/work/delays.py
+
+
+
+#### step 13 20:20:52
+MSG: Analysis: Energy relations identify several summing/escape candidates, but some sums may also coincide with true branches. The delayed timing will distinguish feeder transitions from the isomer's decay routes. The doublets need energy-gated fits rather than a single centroid.
+Plan: Read the delay fits, refine energy calibration, and fit the 647- and 1322-keV regions in selected coincidence gates.
+CMD: 
+CMD: cat > /app/work/gated.py <<'PY'
+from analyze import *
+from scipy.sparse import coo_matrix
+anchors=np.array([(1021.773,510.999),(1166.060,583.191),(1218.412,609.312),(1822.752,911.204),(2922.585,1460.822),(3530.112,1764.494),(4207.953,2103.511),(5230.555,2614.511)])
+c=np.polyfit(*anchors.T,2); print('Quadratic production calibration',c);print('Residuals',np.polyval(c,anchors[:,0])-anchors[:,1]);np.save('/app/work/prodcal2.npy',c)
+p=np.load('/app/work/peaks.npy');E=np.polyval(c,p[:,1]);W=np.load('/app/work/gateweights.npy')
+d=np.loadtxt(D+'gg_prompt.txt',dtype=int);M=coo_matrix((d[:,-1],(d[:,0],d[:,1])),shape=(3600,3600)).tocsr();M=M+M.T
+for region in [12,36]:
+ print('\nREGION',region)
+ for gate in [1,2,4,5,8,9,12,13,14,18,21,23,24,26,27,29,30,33,35,38,40,50,54]:
+  y=W[gate]@M; mu=(p[region,1]-.5)/2;x=np.arange(int(mu)-8,int(mu)+9)
+  z=y[x]; baseline=np.median(np.r_[z[:4],z[-4:]]);a=np.maximum(z-baseline,0); center=np.sum(x*a)/np.sum(a)
+  q,err,chi=fit(np.maximum(y,0),mu,w=8)
+  print('gate %2d %8.2f: E %.3f sig %.3f area %.0f chi %.1f'%(gate,E[gate],np.polyval(c,q[1]*2+.5),q[2]*2,q[0],chi))
+PY
+python /app/work/gated.py
+
+OBS: matrix((d[:,-1],(d[:,0],d[:,1])),shape=(3600,3600)).tocsr();M=M+M.T
+> for region in [12,36]:
+>  print('\nREGION',region)
+>  for gate in [1,2,4,5,8,9,12,13,14,18,21,23,24,26,27,29,30,33,35,38,40,50,54]:
+>   y=W[gate]@M; mu=(p[region,1]-.5)/2;x=np.arange(int(mu)-8,int(mu)+9)
+>   z=y[x]; baseline=np.median(np.r_[z[:4],z[-4:]]);a=np.maximum(z-baseline,0); center=np.sum(x*a)/np.sum(a)
+>   q,err,chi=fit(np.maximum(y,0),mu,w=8)
+>   print('gate %2d %8.2f: E %.3f sig %.3f area %.0f chi %.1f'%(gate,E[gate],np.polyval(c,q[1]*2+.5),q[2]*2,q[0],chi))
+> PY
+root@2adaf78a09e7:/app# python /app/work/gated.py
+
+
+
+#### step 14 20:21:03
+MSG: Analysis: Delayed ordering shows that 670- and 898-keV photons feed the isomer, and 435/1082 keV are below it; the lifetime is approximately 170 ns. The 231- and 459-keV photons occur further upstream. The main cascade starts with 318 and 524 keV, giving a level near 842.6 keV.
+Plan: Collect the doublet centroids, then construct candidate levels using cascade sums and alternative branches.
+CMD: 
+OBS:  17.359 area 0 chi 1.0
+gate 26  1082.23: E 1321.892 sig 1.887 area 302 chi 0.9
+gate 27  1092.03: E 1321.897 sig 4.514 area 6 chi 0.9
+gate 29  1143.38: E 1317.439 sig 20.000 area 0 chi 0.1
+gate 30  1150.92: E 1323.196 sig 1.756 area 1351 chi 2.7
+gate 33  1219.77: E 1323.171 sig 1.776 area 511 chi 0.3
+gate 35  1302.92: E 1321.716 sig 2.281 area 4 chi 0.0
+gate 38  1452.31: E 1321.879 sig 1.805 area 615 chi 0.8
+gate 40  1489.60: E 1317.446 sig 19.991 area 0 chi 0.0
+gate 50  2018.72: E 1317.446 sig 19.991 area 0 chi 0.0
+gate 54  2774.27: E 1317.446 sig 19.991 area 0 chi 0.0
+root@2adaf78a09e7:/app#
+
+
+#### step 15 20:22:30
+MSG: Analysis: The main cascade contains two distinct 647-keV transitions, near 646.9 and 647.8 keV, and the 1322-keV region contains lines near 1321.9 and 1323.2 keV. Several strong lines close energy loops, while some weak peaks are clearly cascade sums. I also need to disentangle annihilation/escape contributions that overlap real transitions.
+Plan: Inspect the full 511-keV-gated spectrum, calibrate relative detector efficiency from all source runs, and measure single- versus double-escape behavior. Then use these response estimates to correct production intensities and distinguish real branches from artifacts.
+CMD: cat > /app/work/efficiency.py <<'PY'
+from analyze import *
+z=np.load('/app/work/cal.npz',allow_pickle=True);rows=z['rows'];cal=z['coeff']
+# Fit log efficiency as a cubic in log(E/1000), with independent source normalizations.
+x=[];y=[]
+for e,ch,err,a,prob,s in rows:
+ if e in [1085.84,1089.74] or e>3500:continue
+ t=np.log(e/1000);x.append([t,t*t,t*t*t,float(s=='eu152'),float(s=='co56'),float(s=='co60')]);y.append(np.log(a/prob))
+x=np.array(x);y=np.array(y);q=np.linalg.lstsq(x,y,rcond=None)[0];print('EFF',q);print('resid',np.round(y-x@q,3));np.save('/app/work/eff.npy',q[:3])
+for e,ch,err,a,prob,s in rows:
+ if s!='co56' or e<1400:continue
+ yy=np.loadtxt(D+'cal_co56.txt')[:,1]
+ es=[]
+ for shift in [511,1022]:
+  ec=e-shift;cc=np.roots([cal[0],cal[1],cal[2]-ec]);cc=cc[cc>0][0]
+  pp,ee,chi=fit(yy,cc,w=12);es.append(round(pp[0]/a,3))
+ print('Escape',e,es)
+p=np.load('/app/work/peaks.npy');E=np.polyval(np.load('/app/work/prodcal2.npy'),p[:,1]);t=np.log(E/1000);eff=np.exp(q[0]*t+q[1]*t*t+q[2]*t*t*t)
+I=p[:,0]/eff;I=I/I[2]*100
+for k in range(len(p)):print('I %2d %8.2f %7.3f'%(k,E[k],I[k]))
+PY
+python /app/work/efficiency.py
+
+CMD: cat > /app/work/gate511.py <<'PY'
+from analyze import *
+from scipy.sparse import coo_matrix
+p=np.load('/app/work/peaks.npy');W=np.load('/app/work/gateweights.npy');c=np.load('/app/work/prodcal2.npy')
+d=np.loadtxt(D+'gg_prompt.txt',dtype=int);M=coo_matrix((d[:,-1],(d[:,0],d[:,1])),shape=(3600,3600)).tocsr();M=M+M.T
+y=W[7]@M
+ps,prop=find_peaks(gaussian_filter1d(y,1),prominence=8,distance=5)
+for ch in ps:print('511 gate',np.polyval(c,ch*2+.5),np.round(y[max(0,ch-3):ch+4].sum()))
+for e in [1603,2250,2761,1833,2344]:
+ ch=np.roots([c[0],c[1],c[2]-e]);ch=ch[ch>0][0];q,err,chi=fit(spec,ch);print('test',e,q[:3],err[0],chi)
+PY
+python /app/work/gate511.py
+
+OBS: p=np.load('/app/work/peaks.npy');W=np.load('/app/work/gateweights.npy');c=np.load('/app/work/prodcal2.npy')
+> d=np.loadtxt(D+'gg_prompt.txt',dtype=int);M=coo_matrix((d[:,-1],(d[:,0],d[:,1])),shape=(3600,3600)).tocsr();M=M+M.T
+> y=W[7]@M
+> ps,prop=find_peaks(gaussian_filter1d(y,1),prominence=8,distance=5)
+> for ch in ps:print('511 gate',np.polyval(c,ch*2+.5),np.round(y[max(0,ch-3):ch+4].sum()))
+> for e in [1603,2250,2761,1833,2344]:
+>  ch=np.roots([c[0],c[1],c[2]-e]);ch=ch[ch>0][0];q,err,chi=fit(spec,ch);print('test',e,q[:3],err[0],chi)
+> PY
+root@2adaf78a09e7:/app# python /app/work/gate511.py
+
+
+
+#### step 16 20:22:41
+MSG: Analysis: The source efficiency curve is now available. Most weak sum peaks fall below the requested 0.5 threshold, but escape peaks around 1752 and 2263 keV exceed it and must still be excluded. Some lines that happen to have sum energies show real branching evidence and need quantitative separation.
+Plan: Save and read the complete efficiency and annihilation-gated results without terminal truncation.
+CMD: 
+CMD: python /app/work/efficiency.py > /app/work/efficiency.txt; head -n 40 /app/work/efficiency.txt
+
+OBS: 67.0
+test 1603 [2.96828903e+03 3.21193241e+03 2.29596621e+00] 125.16832062518199 132.29194493455378
+test 2250 [1.16639365e+02 4.50132768e+03 2.32230367e+00] 37.711612898773524 1.0793246054439731
+test 2761 [1.42099045e+01 5.52406083e+03 1.03955029e+00] 14.954962749737458 1.2111564177191385
+test 1833 [7.57284287e+01 3.66763632e+03 1.16313274e+00] 28.244867953889166 1.8920068311081562
+test 2344 [2.80730521e+01 4.69434267e+03 1.32262296e+00] 27.922819389293593 2.1904972184772924
+root@2adaf78a09e7:/app# python /app/work/efficiency.py > /app/work/efficiency.txt; head -n 40 /app/work/efficiency.txt
+
+
+
+#### step 17 20:23:38
+MSG: Analysis: A key hidden-level constraint is emerging: the prompt 708-keV route and delayed 670-keV route differ by about 38 keV, below the station threshold. This supports an isomer about 38 keV above the level emitting 1082/435 keV. Several high-energy branches close at a common level near 3092.6 keV.
+Plan: Read detector-response estimates and inspect suspicious annihilation-coincident lines in detail. I will also assemble a provisional network to identify remaining unplaced transitions.
+CMD: 
+CMD: cat /app/work/efficiency.txt | head -n 40; python - <<'PY'
+import numpy as np
+p=np.load('/app/work/peaks.npy');c=np.load('/app/work/prodcal2.npy');E=np.polyval(c,p[:,1]); L=[0,318.44,842.76,1489.66,2137.46,1925,1963.07,2633.00,2861.40,3092.64,1640.34,1641.64,2792.56,2689.29,3148.93]
+for k,e in enumerate(E):
+ matches=[(round(a,2),round(b,2),round(a-b-e,2)) for a in L for b in L if a>b and abs(a-b-e)<.6]
+ print(k,round(e,3),matches)
+PY
+
+OBS: 34, 318.44, np.float64(-0.54))]
+37 1400.611 []
+38 1452.306 [(3092.64, 1640.34, np.float64(-0.01))]
+39 1460.885 []
+40 1489.604 [(1489.66, 0, np.float64(0.06))]
+41 1507.733 [(3148.93, 1641.64, np.float64(-0.44))]
+42 1539.241 []
+43 1606.624 [(1925, 318.44, np.float64(-0.06))]
+44 1640.901 [(1640.34, 0, np.float64(-0.56))]
+45 1658.816 [(3148.93, 1489.66, np.float64(0.45))]
+46 1738.907 []
+47 1752.257 []
+48 1764.53 []
+49 1879.026 []
+50 2018.722 [(2861.4, 842.76, np.float64(-0.08))]
+51 2103.353 []
+52 2263.243 []
+53 2614.574 []
+54 2774.271 [(3092.64, 318.44, np.float64(-0.07))]
+root@2adaf78a09e7:/app#
+
+
+#### step 18 20:23:44
+MSG: Analysis: The provisional main network closes many energy loops, including two near-degenerate levels around 1640 and 1642 keV. Remaining lines at 941, 1092, 1739, and 1879 keV need placement; detector pair-production artifacts may complicate them.
+Plan: Read the efficiency estimates in smaller chunks and list residual coincidences for the unplaced lines.
+CMD: head -n 24 /app/work/efficiency.txt; sed -n '25,43p' /app/work/efficiency.txt; grep -E '^ *(21|27|46|49) ' /app/work/clean_coinc.txt
+
+OBS:    0.153
+I 16   842.71   4.074
+I 17   867.55   1.358
+I 18   898.32   4.880
+I 19   911.26   0.227
+I 20   923.11   2.555
+I 21   941.32   4.227
+I 22   965.64   0.873
+I 23   992.73   0.964
+I 24  1011.41   7.276
+I 25  1067.54   0.823
+I 26  1082.23  13.885
+I 27  1092.03   1.208
+21   941.36 area    40516: 2(318.3):4417/-16 7(511.0):1689/-11 36(1322.5):1530/-23
+27  1092.10 area    10184: 2(318.3):722/11 7(511.0):369/3 8(524.3):541/2 12(647.2):605/1
+46  1738.99 area    15952: 2(318.3):1688/7 7(511.0):674/0 8(524.3):1210/2
+49  1879.09 area     7635: 2(318.3):697/4 8(524.3):609/3
+root@2adaf78a09e7:/app#
+
+
+#### step 19 20:24:39
+MSG: Analysis: The annihilation-energy peak contains a genuine 511-keV transition: 941-, 1092-, and 1739-keV branches all depopulate a common level near 2581.6 keV, fed from the 3092.6-keV level by 511 keV. The 1082-keV region also has evidence for a weak second transition to the 1640-keV level. These overlaps must be separated rather than discarded as detector artifacts.
+Plan: Fit gated spectra around 511, 708, 1082, and the doublets; use calibration-quality reference centroids to tighten the energy scale. Then quantify the true 511-keV component from its branch coincidences and subtract summing contributions from candidate direct branches.
+CMD: sed 's/for region in \[12,36\]:/for region in [7,14,26]:/' /app/work/gated.py | sed 's/np.save('\''\/app\/work\/prodcal2.npy'\'',c)//' > /app/work/gated_more.py; python /app/work/gated_more.py > /app/work/gated_more.txt; cat /app/work/gated_more.txt
+
+CMD: cat > /app/work/cal_refine.py <<'PY'
+from analyze import *
+refs=[(477,238.632),(590,295.224),(703,351.932),(1022,510.999),(1166,583.191),(1219,609.312),(1455,727.330),(1823,911.204),(1938,968.971),(2241,1120.287),(2478,1238.110),(2756,1377.669),(2923,1460.822),(3186,1592.511),(3530,1764.494),(4209,2103.511),(4410,2204.210),(5231,2614.511)]
+pts=[]
+for ch,e in refs:
+ q,er,chi=fit(bg,ch)
+ pts.append([q[1],e,er[1]])
+c=np.polyfit(np.array(pts)[:,0],np.array(pts)[:,1],2,w=1/np.array(pts)[:,2]);print('Background calibration',c)
+for ch,e,err in pts:print('BG',e,np.polyval(c,ch)-e,err)
+# Compare ambient production lines with background centroids; fit drift using cleaner stronger lines.
+pts2=[]
+for ch,e in refs:
+ q,er,chi=fit(spec,ch)
+ if q[0]/er[0]>4:
+  pts2.append([q[1],e,er[1],chi,q[0]])
+for ch,e,err,chi,a in pts2:print('PROD',e,ch,err,chi,a)
+PY
+python /app/work/cal_refine.py > /app/work/cal_refine.txt; cat /app/work/cal_refine.txt
+
+OBS: ronger lines.
+pts2=[]
+for ch,e in refs:
+ q,er,chi=fit(spec,ch)
+ if q[0]/er[0]>4:
+  pts2.append([q[1],e,er[1],chi,q[0]])
+for ch,e,err,chi,a in pts2:print('PROD',e,ch,err,chi,a)
+PY
+python /app/work/cal_refine.py > /app/work/cal_refine.txt; cat /app/work/cal_refine.txt
+/app/work/gated_more.py:11: RuntimeWarning: invalid value encountered in scalar divide
+  z=y[x]; baseline=np.median(np.r_[z[:4],z[-4:]]);a=np.maximum(z-baseline,0); center=np.sum(x*a)/np.sum(a)
+/app/work/analyze.py:18: RuntimeWarning: invalid value encountered in sqrt
+  return r.x,np.sqrt(np.diag(cov)),np.sum(r.fun**2)/(len(x)-5)
+
+
+
+#### step 20 20:25:00
+MSG: Analysis: The emerging scheme includes a hidden approximately 38-keV link, two near-degenerate lower levels, and a true 511-keV feeding transition under annihilation radiation. Some placements remain ambiguous because the 647-keV doublet can be traversed in different orders; I will use gated centroids and branch energy closure to resolve this.
+Plan: Collect the new gated centroids and precise ambient calibration fits, then solve the network with consistent energies.
+CMD: 
+CMD: cat /app/work/cal_refine.txt; cat /app/work/gated_more.txt
+
+OBS: 232 sig 1.000 area 2 chi 0.6
+gate 26  1082.23: E 1077.237 sig 20.000 area 0 chi 1.0
+gate 27  1092.03: E 1087.232 sig 1.000 area 0 chi 0.4
+gate 29  1143.38: E 1077.242 sig 19.995 area 0 chi 0.0
+gate 30  1150.92: E 1086.161 sig 2.179 area 11 chi 0.9
+gate 33  1219.77: E 1077.237 sig 1.000 area 0 chi 1.7
+gate 35  1302.92: E 1077.237 sig 6.011 area 10 chi 0.5
+gate 38  1452.31: E 1086.872 sig 8.992 area 77 chi 1.5
+gate 40  1489.60: E 1077.237 sig 1.000 area 0 chi 1.0
+gate 50  2018.72: E 1077.242 sig 19.995 area 0 chi 0.0
+gate 54  2774.27: E 1077.242 sig 19.995 area 0 chi 0.0
+root@2adaf78a09e7:/app#
+
+
+#### step 21 20:25:10
+MSG: Analysis: The 1082-keV line has gate-dependent centroid shifts, consistent with a dominant branch from approximately 1925 keV and a weaker overlapping branch from approximately 2722 keV. Terminal truncation hid some calibration results, so I will read only the relevant excerpts.
+Plan: Inspect the precise calibration and 511-keV centroid results in bounded output chunks.
+CMD: cat /app/work/cal_refine.txt
+
+CMD: sed -n '1,30p' /app/work/gated_more.txt
+
+OBS:  sig 5.675 area 205 chi 1.8
+gate 26  1082.23: E 506.038 sig 6.279 area 62 chi 0.6
+gate 27  1092.03: E 510.998 sig 1.348 area 364 chi 1.7
+gate 29  1143.38: E 511.295 sig 1.197 area 10 chi 1.9
+gate 30  1150.92: E 509.419 sig 1.526 area 7 chi 1.3
+gate 33  1219.77: E 512.053 sig 1.000 area 3 chi 0.9
+gate 35  1302.92: E 515.723 sig 1.000 area 8 chi 1.2
+gate 38  1452.31: E 516.031 sig 1.000 area 0 chi 0.9
+gate 40  1489.60: E 510.731 sig 2.232 area 42 chi 1.5
+gate 50  2018.72: E 515.116 sig 5.126 area 31 chi 0.6
+gate 54  2774.27: E 506.045 sig 19.991 area 0 chi 0.0
+
+REGION 14
+root@2adaf78a09e7:/app#
+
+
+#### step 22 20:26:07
+MSG: Analysis: The provisional minimum scheme has 17 levels. It explains the main 647-keV cascade doublet, the 1322-keV doublet, the hidden isomer link, and genuine overlapping 511- and 1082-keV lines. Coincidence-to-singles ratios also predict sum-peak areas: the approximately 965- and 1171-keV peaks are fully explained by summing and must not be included.
+Plan: Fit the unresolved lines with a detector-resolution model, obtain accurate component areas, and solve all level energies jointly using measured transition energies.
+CMD: head -n 20 /app/work/cal_refine.txt; grep '^PROD' /app/work/cal_refine.txt | head -n 9
+
+CMD: cat > /app/work/doublets.py <<'PY'
+from analyze import *
+from scipy.sparse import coo_matrix
+p=np.load('/app/work/peaks.npy');c=np.load('/app/work/prodcal2.npy');E=np.polyval(c,p[:,1]);W=np.load('/app/work/gateweights.npy')
+def channel(e):return np.roots([c[0],c[1],c[2]-e])[1]
+# Resolution from isolated production photopeaks (excluding sums and broad doublets).
+ids=[1,2,4,5,8,9,13,18,21,23,24,30,33,35,38,50,54]
+r=np.polyfit(E[ids],p[ids,2]**2,1);print('resolution sigma_ch squared:',r)
+# Fit sum of two integrated Gaussian lines, their energies and independent areas.
+results={}
+for k,energies in [(12,[646.9,647.8]),(36,[1321.9,1323.2]),(26,[1081.4,1082.3])]:
+ mu=p[k,1];x=np.arange(int(mu)-15,int(mu)+16);z=spec[x];m0=channel(energies[0]);m1=channel(energies[1]);b=np.median(np.r_[z[:5],z[-5:]])
+ s=np.sqrt(np.polyval(r,energies))
+ def model(q):return q[0]*gauss(x,q[2],s[0])+q[1]*gauss(x,q[3],s[1])+q[4]+q[5]*(x-mu)
+ q0=[p[k,0]*.6,p[k,0]*.4,m0,m1,b,0]
+ lo=[0,0,m0-.7,m1-.7,0,-np.inf];hi=[np.inf,np.inf,m0+.7,m1+.7,np.inf,np.inf]
+ rr=least_squares(lambda q:(model(q)-z)/np.sqrt(np.maximum(z,1)),q0,bounds=(lo,hi))
+ q=rr.x; print('doublet',k,'E',np.polyval(c,q[2:4]),'A',q[:2],'chi',np.sum(rr.fun**2)/(len(x)-6));results[k]=q.tolist()
+np.save('/app/work/doublet_results.npy',results)
+# Clean gate-specific fits at 1082 in the lower member of the 1322 doublet gate.
+d=np.loadtxt(D+'gg_prompt.txt',dtype=int);M=coo_matrix((d[:,-1],(d[:,0],d[:,1])),shape=(3600,3600)).tocsr();M=M+M.T
+for gate in [36,49,7,21,27,46,38]:
+ for k in ([26] if gate in [36,49] else [7,21,27,46]):
+  if gate==k:continue
+  y=W[gate]@M;q,er,chi=fit(np.maximum(y,0),(p[k,1]-.5)/2,w=8)
+  print('gated',gate,k,'E',np.polyval(c,2*q[1]+.5),'A',q[0],'sig',q[2]*2,'chi',chi)
+PY
+python /app/work/doublets.py > /app/work/doublets.txt; cat /app/work/doublets.txt
+
+OBS: ults.npy',results)
+> # Clean gate-specific fits at 1082 in the lower member of the 1322 doublet gate.
+> d=np.loadtxt(D+'gg_prompt.txt',dtype=int);M=coo_matrix((d[:,-1],(d[:,0],d[:,1])),shape=(3600,3600)).tocsr();M=M+M.T
+> for gate in [36,49,7,21,27,46,38]:
+>  for k in ([26] if gate in [36,49] else [7,21,27,46]):
+>   if gate==k:continue
+>   y=W[gate]@M;q,er,chi=fit(np.maximum(y,0),(p[k,1]-.5)/2,w=8)
+>   print('gated',gate,k,'E',np.polyval(c,2*q[1]+.5),'A',q[0],'sig',q[2]*2,'chi',chi)
+> PY
+root@2adaf78a09e7:/app# python /app/work/doublets.py > /app/work/doublets.txt; cat /app/work/doublets.txt
+
+
+
+#### step 23 20:26:28
+MSG: Analysis: The gated data support the additional level near 2721.7 keV through the 1879-keV branch and a weak component under 1082 keV. Background and production were taken consecutively and appear consistent in energy calibration; the much higher-statistics background can improve absolute energies beyond the sparse production anchors.
+Plan: Read the component fits and compare background-derived calibration with production ambient lines. Build a quantitative model of true gamma areas, summing, and branch intensities.
+CMD: 
+CMD: cat /app/work/doublets.txt
+
+OBS: 6935474987e-05 sig 19.995389436310614 chi 3.3245558148004447e-12
+gated 46 27 E 1087.0406285305792 A 2.137831591650877e-05 sig 19.997710280408633 chi 8.329641688237402e-13
+gated 38 7 E 516.0311020211616 A 7.577002538108194e-09 sig 1.0000008978188326 chi 0.9031555791056162
+gated 38 21 E 944.4718348987773 A 13.421703773470767 sig 2.788423040731418 chi 0.8281007710579487
+gated 38 27 E 1087.0361840670516 A 71.27856867138743 sig 10.389236349241493 chi 1.3730560011152562
+gated 38 46 E 1733.9132949366308 A 4.277653652841412e-05 sig 19.995392449580113 chi 3.3273843375162984e-12
+root@2adaf78a09e7:/app#
+
+
+#### step 24 20:26:46
+MSG: Analysis: The doublet fits establish approximately 646.8/647.7 and 1321.8/1323.1 keV components. The weaker 1081-keV line is independently visible in the 1322-keV coincidence gate, so it is not merely the low-energy tail of 1082 keV. Accurate response fitting is needed because simple Gaussians leave systematic residuals on strong peaks.
+Plan: Compare background and production calibration directly, inspect peak-shape residuals, and create a joint level-energy fit with all confirmed placements.
+CMD: cat > /app/work/response.py <<'PY'
+from analyze import *
+for ch in [1022,1166,1219,1823,2923,3530,5231]:
+ a,_,_=fit(bg,ch);b,_,_=fit(spec,ch);print('SHIFT',ch,a[1],b[1],b[1]-a[1])
+for ch in [636,1048,870,1692]:
+ y=spec if ch!=1692 else np.loadtxt(D+'cal_co56.txt')[:,1]
+ q,_,_=fit(y,ch);x=np.arange(int(q[1])-7,int(q[1])+8);m=q[0]*gauss(x,q[1],q[2])+q[3]+q[4]*(x-ch)
+ print('SHAPE',ch,q)
+ for a,b,c in zip(x,y[x],m):print(a,int(b),int(c),round((b-c)/np.sqrt(max(b,1)),1))
+PY
+python /app/work/response.py
+
+OBS: New Terminal Output:
+
+root@2adaf78a09e7:/app# cat > /app/work/response.py <<'PY'
+> from analyze import *
+> for ch in [1022,1166,1219,1823,2923,3530,5231]:
+>  a,_,_=fit(bg,ch);b,_,_=fit(spec,ch);print('SHIFT',ch,a[1],b[1],b[1]-a[1])
+> for ch in [636,1048,870,1692]:
+>  y=spec if ch!=1692 else np.loadtxt(D+'cal_co56.txt')[:,1]
+>  q,_,_=fit(y,ch);x=np.arange(int(q[1])-7,int(q[1])+8);m=q[0]*gauss(x,q[1],q[2])+q[3]+q[4]*(x-ch)
+>  print('SHAPE',ch,q)
+>  for a,b,c in zip(x,y[x],m):print(a,int(b),int(c),round((b-c)/np.sqrt(max(b,1)),1))
+> PY
+root@2adaf78a09e7:/app# python /app/work/response.py
+
+
+
+#### step 25 20:27:03
+MSG: Analysis: I am checking whether the residuals arise from an asymmetric detector response and whether background calibration can be transferred safely. These checks affect the close doublets and the accumulated level-energy sums.
+Plan: Read the response checks, then use the appropriate peak model and calibration for final energy reconstruction.
+CMD: 
+OBS: 0798 -2.8
+870 33041 33040 0.0
+871 32736 32474 1.4
+872 19962 19864 0.7
+873 9290 9500 -2.2
+874 5765 5855 -1.2
+875 5178 5213 -0.5
+876 5072 5155 -1.2
+877 5071 5152 -1.1
+SHAPE 1692 [ 6.79384200e+05  1.69213651e+03  1.52304286e+00  1.56059649e+03
+ -3.80410251e+01]
+1685 2442 1831 12.4
+1686 3046 1857 21.5
+1687 4425 2470 29.4
+1688 8662 6680 21.3
+1689 24546 24258 1.8
+1690 66647 69290 -10.2
+1691 132494 135236 -7.5
+1692 177130 175695 3.4
+1693 154187 151228 7.5
+1694 87373 86391 3.3
+1695 32562 33203 -3.6
+1696 8535 9236 -7.6
+1697 2209 2641 -9.2
+1698 1319 1468 -4.1
+1699 1166 1303 -4.0
+root@2adaf78a09e7:/app#
+
+
+#### step 26 20:27:13
+MSG: Analysis: Strong peaks have a low-energy tail, explaining the biased single-Gaussian centroids and imperfect doublet fits. I will model that response explicitly rather than let a weak overlapping transition absorb the tail.
+Plan: Save the response diagnostics and compare calibration shifts first; then fit an exponentially modified Gaussian tail shared across clean peaks.
+CMD: python /app/work/response.py > /app/work/response.txt; head -n 24 /app/work/response.txt
+
+OBS: New Terminal Output:
+
+root@2adaf78a09e7:/app# python /app/work/response.py > /app/work/response.txt; head -n 24 /app/work/response.txt
+
+
+
+#### step 27 20:27:36
+MSG: Analysis: The current energy sums are internally consistent, but a shared low-energy-tail model will improve both close-doublet decomposition and absolute calibration. The main task remaining is quantitative refinement rather than discovering the broad topology.
+Plan: Fit a shared Gaussian-plus-low-energy-tail response to several strong isolated production peaks and use it for all subsequent peak fits.
+CMD: head -n 24 /app/work/response.txt; cat > /app/work/tailfit.py <<'PY'
+from analyze import *
+from scipy.stats import exponnorm
+# Integrated Gaussian core plus an exponentially distributed energy loss.
+def shape(x,mu,sig,f,tau):
+ core=gauss(x,mu,sig)
+ tail=exponnorm.cdf(mu-x+.5,tau/sig,scale=sig)-exponnorm.cdf(mu-x-.5,tau/sig,scale=sig)
+ return (1-f)*core+f*tail
+p=np.load('/app/work/peaks.npy');ids=[2,8,4,9,18,24,50,54]
+Xs=[];Ys=[];q0=[.05,2.]
+for k in ids:
+ a,mu,sig,*_=p[k];x=np.arange(int(mu)-17,int(mu)+14);z=spec[x]
+ Xs.append(x);Ys.append(z);q0.extend([a,mu+.08,sig*.95,np.median(z),0])
+def fun(q):
+ out=[]
+ for n,(x,z) in enumerate(zip(Xs,Ys)):
+  a,mu,s,b,sl=q[2+5*n:7+5*n]
+  m=a*shape(x,mu,s,q[0],q[1])+b+sl*(x-x.mean());out.extend((m-z)/np.sqrt(np.maximum(z,1)))
+ return out
+lo=[0,.1];hi=[.4,10]
+for n,k in enumerate(ids):lo.extend([0,p[k,1]-1,.5,0,-np.inf]);hi.extend([np.inf,p[k,1]+1,5,np.inf,np.inf])
+r=least_squares(fun,q0,bounds=(lo,hi),max_nfev=300);print('TAIL f,tau',r.x[:2],'chi',np.sum(r.fun**2)/(len(r.fun)-len(r.x)))
+for n,k in enumerate(ids):print(k,r.x[2+5*n:7+5*n])
+np.save('/app/work/tailparams.npy',r.x[:2])
+def tailfit(y,centers,w=16,f=None,tau=None,fix=False):
+ if f is None:f,tau=np.load('/app/work/tailparams.npy')
+ centers=np.array(centers);x=np.arange(int(min(centers))-w,int(max(centers))+w+1);z=y[x];n=len(centers)
+ sigs=np.sqrt(.81+.0016*(centers*.5))
+ q0=np.r_[np.full(n,max(1,(z.sum()-np.median(z)*len(z))/n)),centers,sigs,np.median(z),0.]
+ lo=np.r_[np.zeros(n),centers-.8,np.full(n,.5),0,-np.inf];hi=np.r_[np.full(n,np.inf),centers+.8,np.full(n,5),np.inf,np.inf]
+ def model(q):return sum(q[i]*shape(x,q[n+i],q[2*n+i],f,tau) for i in range(n))+q[-2]+q[-1]*(x-x.mean())
+ rr=least_squares(lambda q:(model(q)-z)/np.sqrt(np.maximum(z,1)),q0,bounds=(lo,hi),max_nfev=300)
+ return rr.x,np.sum(rr.fun**2)/(len(x)-len(rr.x))
+if __name__=='__main__':
+ for k in [12,36,26]:
+  centers={12:[1293.9,1295.7],36:[2644.5,2647.1],26:[2163.3,2165.2]}[k]
+  q,chi=tailfit(spec,centers);print('DOUB',k,q,'chi',chi)
+PY
+python /app/work/tailfit.py > /app/work/tailfit.txt; cat /app/work/tailfit.txt
+
+OBS: 0.051147736169696145
+SHIFT 5231 5230.537448793393 5230.555280639696 0.01783184630312462
+SHAPE 636 [ 2.03330801e+06  6.36283175e+02  1.20878470e+00  8.06749104e+03
+ -7.95765629e+01]
+629 9055 8624 4.5
+630 10066 8546 15.1
+631 12208 8540 33.2
+632 16717 10087 51.3
+633 35791 28191 40.2
+634 127316 129060 -4.9
+635 378470 391307 -20.9
+636 645771 643789 2.5
+637 572146 560581 15.3
+638 260295 259466 1.6
+639 64162 67687 -13.9
+640 13591 15171 -13.6
+641 7597 8147 -6.3
+642 7316 7605 -3.4
+643 7175 7510 -4.0
+root@2adaf78a09e7:/app# python /app/work/tailfit.py > /app/work/tailfit.txt; cat /app/work/tailfit.txt
+
+
+
+#### step 28 20:27:55
+MSG: Analysis: The background and production energy scales agree to about 0.1 keV for clean lines. Summing corrections are significant for the apparent direct 842-keV branch: roughly one third of that peak is the unresolved 318+524 sum. Other direct-branch candidates require analogous corrections.
+Plan: Collect the tail-response fit and use the high-statistics ambient spectrum to set the final production calibration. Fit all confirmed transition regions with the response model.
+CMD: 
+CMD: cat /app/work/tailfit.txt
+
+OBS: e+00]
+54 [ 2.16730750e+04  5.55005980e+03  2.27452599e+00  2.28243788e+01
+ -7.69921312e-01]
+DOUB 12 [ 4.92041007e+05  1.28578122e+05  1.29406147e+03  1.29601955e+03
+  1.44886930e+00  1.28209603e+00  2.19093575e+03 -2.10090815e+01] chi 2.9863349581005214
+DOUB 36 [ 9.60596855e+04  3.73925649e+04  2.64490201e+03  2.64760230e+03
+  1.82937846e+00  1.58636290e+00  3.81273911e+02 -8.66769273e-01] chi 4.510431192167184
+DOUB 26 [ 7.08257786e+03  1.12370615e+05  2.16341781e+03  2.16506171e+03
+  1.92184035e+00  1.61486601e+00  1.15872418e+03 -4.91636140e+00] chi 5.322133220545811
+root@2adaf78a09e7:/app#
+
+
+#### step 29 20:28:51
+MSG: Analysis: The response model substantially improves strong-peak fits. Free doublet widths remain correlated with component intensities, so I will constrain their widths using isolated lines. The network currently has 17 levels and 34 detected transitions; all remaining peaks have background, contaminant, summing, or escape explanations.
+Plan: Create a reusable response module, calibrate with clean ambient lines, and refit all production peaks and doublets with the measured resolution curve.
+CMD: python - <<'PY'
+s=open('/app/work/tailfit.py').read(); start=s.index('def tailfit(');end=s.index("if __name__=='__main__':",start)
+open('/app/work/shape_model.py','w').write(s[:s.index("p=np.load('/app/work/peaks.npy')")]+s[start:end])
+PY
+cat > /app/work/refined.py <<'PY'
+from shape_model import *
+p=np.load('/app/work/peaks.npy')
+refs=[(477,238.632),(590,295.224),(703,351.932),(1166,583.191),(1219,609.312),(1455,727.330),(1823,911.204),(1938,968.971),(2241,1120.287),(2478,1238.110),(2756,1377.669),(2923,1460.822),(3186,1592.511),(3530,1764.494),(4209,2103.511),(5231,2614.511)]
+pts=[]
+for ch,e in refs:
+ q,chi=tailfit(bg,[ch]);pts.append([q[1],e,1/max(q[0],1)**.5*q[2]])
+pts=np.array(pts);c=np.polyfit(pts[:,0],pts[:,1],2,w=1/pts[:,2]);np.save('/app/work/finalcal.npy',c);print('CAL',c,'resids',np.round(np.polyval(c,pts[:,0])-pts[:,1],3))
+res=[]
+for k,row in enumerate(p):
+ q,chi=tailfit(spec,[row[1]],w=10 if k in [29,30,34,38,39] else 15);res.append(q)
+ print('PEAK',k,'E %.4f A %.0f sigma %.3f chi %.1f'%(np.polyval(c,q[1]),q[0],q[2],chi))
+np.save('/app/work/tailpeaks.npy',res)
+res=np.array(res)
+ids=[1,2,4,5,8,9,13,18,21,23,24,30,33,35,38,50,54]
+r=np.polyfit(np.polyval(c,res[ids,1]),res[ids,2]**2,1);np.save('/app/work/resolution.npy',r);print('RES',r)
+f,tau=np.load('/app/work/tailparams.npy')
+results={}
+for k,centers in [(12,[1293.9,1295.7]),(36,[2644.5,2647.1]),(26,[2163.4,2165.1])]:
+ mu=p[k,1];x=np.arange(int(mu)-15,int(mu)+16);z=spec[x];b=np.median(np.r_[z[:5],z[-5:]]);s=np.sqrt(np.polyval(r,np.polyval(c,centers)))
+ def model(q):return q[0]*shape(x,q[2],s[0],f,tau)+q[1]*shape(x,q[3],s[1],f,tau)+q[4]+q[5]*(x-mu)
+ q0=[p[k,0]*.6,p[k,0]*.4,*centers,b,0]
+ rr=least_squares(lambda q:(model(q)-z)/np.sqrt(np.maximum(z,1)),q0,bounds=([0,0,centers[0]-.7,centers[1]-.7,0,-np.inf],[np.inf,np.inf,centers[0]+.7,centers[1]+.7,np.inf,np.inf]))
+ q=rr.x;print('DOUBLE',k,'E',np.polyval(c,q[2:4]),'A',q[:2],'chi',np.sum(rr.fun**2)/(len(x)-6));results[k]=q
+np.save('/app/work/refined_doublets.npy',results)
+PY
+python /app/work/refined.py > /app/work/refined.txt; tail -n 9 /app/work/refined.txt
+
+OBS:  def model(q):return q[0]*shape(x,q[2],s[0],f,tau)+q[1]*shape(x,q[3],s[1],f,tau)+q[4]+q[5]*(x-mu)
+>  q0=[p[k,0]*.6,p[k,0]*.4,*centers,b,0]
+>  rr=least_squares(lambda q:(model(q)-z)/np.sqrt(np.maximum(z,1)),q0,bounds=([0,0,centers[0]-.7,centers[1]-.7,0,-np.inf],[np.inf,np.inf,centers[0]+.7,centers[1
+]+.7,np.inf,np.inf]))
+>  q=rr.x;print('DOUBLE',k,'E',np.polyval(c,q[2:4]),'A',q[:2],'chi',np.sum(rr.fun**2)/(len(x)-6));results[k]=q
+> np.save('/app/work/refined_doublets.npy',results)
+> PY
+root@2adaf78a09e7:/app# python /app/work/refined.py > /app/work/refined.txt; tail -n 9 /app/work/refined.txt
+
+
+
+#### step 30 20:29:07
+MSG: Analysis: The response-constrained fitting is running. After excluding artifacts, the daughter topology is consistent with 17 levels, including the approximately 1963-keV isomer and a 38-keV unobserved decay to approximately 1925 keV.
+Plan: Collect refined energies and areas, solve the level energies jointly, and calculate corrected intensities and precise decay half-lives.
+CMD: 
+CMD: head -n 3 /app/work/refined.txt; tail -n 9 /app/work/refined.txt
+
+OBS: 1.099 chi 0.9
+PEAK 50 E 2018.7074 A 21440 sigma 1.998 chi 1.7
+PEAK 51 E 2103.3270 A 658 sigma 2.405 chi 0.8
+PEAK 52 E 2263.2157 A 6339 sigma 2.325 chi 1.4
+PEAK 53 E 2614.5194 A 2956 sigma 2.227 chi 0.5
+PEAK 54 E 2774.2038 A 21670 sigma 2.274 chi 2.4
+RES [0.00155629 0.8485743 ]
+DOUBLE 12 E [646.89116034 647.79187872] A [384868.31135508 235427.12085846] chi 3.2955583263196333
+DOUBLE 36 E [1321.88106542 1323.1777926 ] A [75173.17952115 58137.05001177] chi 4.549275220053037
+DOUBLE 26 E [1081.40562386 1082.30089478] A [ 10235.17352835 109082.38424   ] chi 2.1395899684678152
+root@2adaf78a09e7:/app#
+
+
+#### step 31 20:30:18
+MSG: Analysis: The constrained fits resolve the three blended regions at 646.89/647.79, 1321.88/1323.18, and 1081.41/1082.30 keV. They now give stable component areas. The high-statistics ambient calibration yields energy-loop agreement at the few-hundredths-keV scale.
+Plan: Solve the 17 level energies from all confirmed transitions, estimate summing-corrected intensities including the true 511-keV component, and fit pooled parent and isomer timing distributions.
+CMD: cat > /app/work/network.py <<'PY'
+import numpy as np
+p=np.load('/app/work/tailpeaks.npy');c=np.load('/app/work/finalcal.npy');ds=np.load('/app/work/refined_doublets.npy',allow_pickle=True).item();E=np.polyval(c,p[:,1])
+# Names encode approximate energies only; solve actual energies below.
+levels=['0','318','843','1490','1640','1642','1925','1963','2137','2582','2633','2689','2722','2793','2861','3093','3149']
+# peak index, doublet component (-1 for isolated peak), upper and lower level
+edges=[(2,-1,'318','0'),(8,-1,'843','318'),(16,-1,'843','0'),(12,0,'1490','843'),(40,-1,'1490','0'),(12,1,'2137','1490'),(36,0,'1640','318'),(36,1,'1642','318'),(4,-1,'1925','1490'),(26,1,'1925','843'),(43,-1,'1925','318'),(13,-1,'2633','1963'),(14,-1,'2633','1925'),(29,-1,'2633','1490'),(23,-1,'2633','1640'),(18,-1,'2861','1963'),(5,-1,'3093','2633'),(1,-1,'3093','2861'),(33,-1,'2861','1642'),(50,-1,'2861','843'),(38,-1,'3093','1640'),(54,-1,'3093','318'),(7,-1,'3093','2582'),(21,-1,'2582','1640'),(27,-1,'2582','1490'),(46,-1,'2582','843'),(17,-1,'2793','1925'),(30,-1,'2793','1642'),(35,-1,'2793','1490'),(9,-1,'2689','2137'),(24,-1,'3149','2137'),(49,-1,'2722','843'),(26,0,'2722','1640')]
+A=[];y=[];weights=[]
+for k,component,u,l in edges:
+ e=E[k] if component<0 else np.polyval(c,ds[k][2+component]);row=np.zeros(len(levels));row[levels.index(u)]=1;row[levels.index(l)]=-1;A.append(row[1:]);y.append(e)
+ weights.append(1/(.03 if k not in [7,14,16,26,36,43] else .06))
+A=np.array(A);y=np.array(y);weights=np.array(weights);sol=np.r_[0,np.linalg.lstsq(A*weights[:,None],y*weights,rcond=None)[0]]
+print('LEVELS',dict(zip(levels,np.round(sol,4))))
+for edge,e,pred in zip(edges,y,A@sol[1:]):print(edge,'E %.4f fitted %.4f residual %.4f'%(e,pred,pred-e))
+np.savez('/app/work/network.npz',levels=levels,energies=sol,edges=np.array(edges,dtype=object),gamma=y)
+PY
+python /app/work/network.py
+
+CMD: cat > /app/work/lifetimes.py <<'PY'
+from analyze import *
+from scipy.optimize import minimize_scalar
+profiles=np.load('/app/work/profiles.npy');ids=[2,4,5,8,9,12,13,18,21,24,26,30,33,35,36,38,40,43,46,49,50,54]
+t=np.arange(16)*1.5+.75
+# Fit common parent half-life with independently normalized gamma lines.
+def objective(h):
+ b=np.exp(-t*np.log(2)/h);s=0
+ for i in ids:
+  y,err=profiles[i,:,8:];amp=np.sum(y*b/err**2)/np.sum(b*b/err**2);s+=np.sum(((y-amp*b)/err)**2)
+ return s
+r=minimize_scalar(objective,bounds=(4,4.7),method='bounded');print('PARENT',r.x,'chi',r.fun,'dof',15*len(ids)-1)
+# Delayed-energy sideband subtraction, with timing sign set by transition ordering.
+W=np.load('/app/work/gateweights.npy');d=np.loadtxt(D+'gg_delayed.txt',dtype=int);bins=np.arange(70,700,20)
+hists=[];vars=[]
+for i in [13,18]:
+ for j in [2,8,4,12,26,16,40,43]:
+  w=W[i,d[:,0]]*W[j,d[:,1]]+W[j,d[:,0]]*W[i,d[:,1]]
+  dt=d[:,2]*(1 if i<j else -1)
+  y=np.array([np.sum(w[dt==t]*d[dt==t,3])-np.sum(w[dt==-t]*d[dt==-t,3]) for t in bins])
+  v=np.array([np.sum(w[abs(dt)==t]**2*d[abs(dt)==t,3]) for t in bins]);hists.append(y);vars.append(v)
+y=np.sum(hists,0);v=np.sum(vars,0)
+def obj(h,ret=False):
+ b=np.exp(-bins*np.log(2)/h);amp=np.sum(y*b/v)/np.sum(b*b/v)
+ return (amp*b) if ret else np.sum((y-amp*b)**2/v)
+r2=minimize_scalar(obj,bounds=(100,250),method='bounded');print('ISOMER',r2.x,'chi',r2.fun,'counts',y.sum());print('hist',np.round(y,1))
+np.savez('/app/work/lifetimes.npz',parent=r.x,isomer=r2.x)
+PY
+python /app/work/lifetimes.py
+
+OBS: *d[dt==t,3])-np.sum(w[dt==-t]*d[dt==-t,3]) for t in bins])
+>   v=np.array([np.sum(w[abs(dt)==t]**2*d[abs(dt)==t,3]) for t in bins]);hists.append(y);vars.append(v)
+> y=np.sum(hists,0);v=np.sum(vars,0)
+> def obj(h,ret=False):
+>  b=np.exp(-bins*np.log(2)/h);amp=np.sum(y*b/v)/np.sum(b*b/v)
+>  return (amp*b) if ret else np.sum((y-amp*b)**2/v)
+> r2=minimize_scalar(obj,bounds=(100,250),method='bounded');print('ISOMER',r2.x,'chi',r2.fun,'counts',y.sum());print('hist',np.round(y,1))
+> np.savez('/app/work/lifetimes.npz',parent=r.x,isomer=r2.x)
+> PY
+root@2adaf78a09e7:/app# python /app/work/lifetimes.py
+
+
+
+#### step 32 20:30:59
+MSG: Analysis: All 33 confirmed transition energies close the 17-level network with very small residuals. The remaining work is intensity correction: subtract coincident summing where it overlaps true branches, separate the growth-contaminated 708-keV peak, and remove annihilation contamination from the real 511-keV transition.
+Plan: Read the lifetime fits and calculate corrected intensities using source efficiency, coincidence summing, and cycle-time decomposition. Check all excluded peaks quantitatively against their artifact explanations.
+CMD: 
+CMD: python /app/work/network.py > /app/work/network.txt; head -n 18 /app/work/network.txt
+
+CMD: cat > /app/work/intensities.py <<'PY'
+import numpy as np
+from scipy.optimize import nnls
+p=np.load('/app/work/tailpeaks.npy');c=np.load('/app/work/finalcal.npy');ds=np.load('/app/work/refined_doublets.npy',allow_pickle=True).item();E=np.polyval(c,p[:,1]);q=np.load('/app/work/eff.npy');net=np.load('/app/work/network.npz',allow_pickle=True)
+P=np.load('/app/work/gg_prompt_clean.npz')['area'];R=np.load('/app/work/gg_random_clean.npz')['area'];T=np.load('/app/work/gg_delayed_clean.npz')['area'];P=P-R;T=T-12.8*R
+prof=np.load('/app/work/profiles.npy')
+def eff(e):
+ t=np.log(np.array(e)/1000);return np.exp(q[0]*t+q[1]*t*t+q[2]*t*t*t)
+# Decompose 708 peak using clean parent and daughter-growth templates, with independent amplitudes.
+templates=np.array([prof[2,0]/prof[2,0].sum(),prof[3,0]/prof[3,0].sum(),np.ones(24)/24]).T
+y,err=prof[14];amps=nnls(templates/err[:,None],y/err)[0];print('708 components',amps,'fraction parent',amps[0]/amps.sum())
+areas=p[:,0].copy();areas[14]*=amps[0]/amps.sum()
+# Area in a same-crystal two-photon sum is 1/7 of its distinct-crystal coincidence count.
+sum_pairs={15:[(2,4)],16:[(2,8)],22:[(2,12)],24:[(5,9)],26:[(4,12)],29:[(4,14)],31:[(8,12)],32:[(9,12)],34:[(12,12)],35:[(4,17)],37:[(2,26)],40:[(12,16)],43:[(8,26)],44:[(2,36)],45:[(12,24)],47:[(13,26)],49:[(17,24)],50:[(17,30)],52:[(8,46)],54:[(36,38)]}
+for k,pairs in sum_pairs.items():
+ corr=sum((P[i,j]+T[i,j])* (0.5 if i==j else 1)/7 for i,j in pairs)
+ # Additional three-photon sums, notably 318+524+647 at 1490.
+ if k==40: corr+=P[8,12]/49*.95
+ areas[k]-=corr;print('SUM',k,'area %.0f correction %.0f remaining %.0f'%(p[k,0],corr,areas[k]))
+# Estimate absolute array efficiency at 318 using the pure 524 -> 318 cascade.
+e318=P[2,8]/(7/8*p[8,0]);scale=e318/eff(E[2]);print('absolute efficiency at318',e318,'at511',scale*eff(511))
+# The 511 transition feeds a level with three outgoing lines. Sum the efficiency-corrected pair yields.
+# All its decay routes are included; annihilation radiation has no such line-line topology.
+a511=sum(P[7,j]/(7/8*scale*eff(E[j])) for j in [21,27,46]);areas[7]=a511;print('511 genuine photopeak area',a511)
+base=areas[2]/eff(E[2])
+for k,comp,u,l in net['edges']:
+ k=int(k);comp=int(comp);a=areas[k] if comp<0 else ds[k][comp];e=E[k] if comp<0 else np.polyval(c,ds[k][2+comp])
+ if k==26 and comp==1:a-=P[4,12]/7
+ I=a/eff(e)/base*100
+ print('TRANS',k,comp,u,l,'E %.3f A %.0f I %.3f'%(e,a,I))
+PY
+python /app/work/intensities.py > /app/work/intensities.txt; cat /app/work/intensities.txt
+
+OBS: RANS 54 -1 3093 318 E 2774.204 A 21579 I 6.376
+TRANS 7 -1 3093 2582 E 511.006 A 66667 I 4.317
+TRANS 21 -1 2582 1640 E 941.308 A 41006 I 4.227
+TRANS 27 -1 2582 1490 E 1092.035 A 9935 I 1.164
+TRANS 46 -1 2582 843 E 1738.900 A 16054 I 2.910
+TRANS 17 -1 2793 1925 E 867.539 A 14111 I 1.359
+TRANS 30 -1 2793 1642 E 1150.904 A 37128 I 4.558
+TRANS 35 -1 2793 1490 E 1302.917 A 22758 I 3.127
+TRANS 9 -1 2689 2137 E 551.801 A 106637 I 7.280
+TRANS 24 -1 3149 2137 E 1011.406 A 66230 I 7.258
+TRANS 49 -1 2722 843 E 1879.014 A 7684 I 1.505
+TRANS 26 0 2722 1640 E 1081.406 A 10235 I 1.189
+root@2adaf78a09e7:/app#
+
+
+#### step 33 20:31:27
+MSG: Analysis: The corrected intensities are stable and all 33 confirmed transitions exceed the requested threshold. The 708-keV parent component is about 3 relative units, the true 511-keV branch about 4.3, and the apparent 842-keV peak reduces to about 2.7 after summing subtraction. The close-doublet components and all level-energy loops are consistent.
+Plan: Review lifetime estimates and artifact residuals, verify that no weak detected transition above threshold was missed, and improve the isomer lifetime fit using a simple pooled exponential cross-check.
+CMD: head -n 2 /app/work/network.txt; head -n 24 /app/work/intensities.txt; python - <<'PY'
+import numpy as np
+z=np.load('/app/work/lifetimes.npz');print('LIFETIMES',dict(z))
+PY
+
+CMD: cat > /app/work/weakcheck.py <<'PY'
+from shape_model import *
+p=np.load('/app/work/tailpeaks.npy');c=np.load('/app/work/finalcal.npy');r=np.load('/app/work/resolution.npy');f,tau=np.load('/app/work/tailparams.npy');E=np.polyval(c,np.arange(7200))
+# Search for narrow excesses after local continuum filtering, including below original seven-sigma threshold.
+y=spec; smooth=gaussian_filter1d(y,1);base=median_filter(y,size=41);score=(smooth-gaussian_filter1d(base,1))/np.sqrt(np.maximum(smooth,1));ps,_=find_peaks(score,height=4,prominence=3,distance=5)
+q=np.load('/app/work/eff.npy')
+def eff(e):t=np.log(e/1000);return np.exp(q[0]*t+q[1]*t*t+q[2]*t*t*t)
+for ch in ps:
+ if min(abs(p[:,1]-ch))<7:continue
+ fitq,chi=tailfit(y,[ch],w=10);e=np.polyval(c,fitq[1]);I=fitq[0]/eff(e)/(p[2,0]/eff(np.polyval(c,p[2,1])))*100
+ if I>.18:print('UNLISTED',ch,'E',e,'I',I,'width',fitq[2],'chi',chi)
+PY
+python /app/work/weakcheck.py
+
+OBS: > y=spec; smooth=gaussian_filter1d(y,1);base=median_filter(y,size=41);score=(smooth-gaussian_filter1d(base,1))/np.sqrt(np.maximum(smooth,1));ps,_=find_peaks(sco
+re,height=4,prominence=3,distance=5)
+> q=np.load('/app/work/eff.npy')
+> def eff(e):t=np.log(e/1000);return np.exp(q[0]*t+q[1]*t*t+q[2]*t*t*t)
+> for ch in ps:
+>  if min(abs(p[:,1]-ch))<7:continue
+>  fitq,chi=tailfit(y,[ch],w=10);e=np.polyval(c,fitq[1]);I=fitq[0]/eff(e)/(p[2,0]/eff(np.polyval(c,p[2,1])))*100
+>  if I>.18:print('UNLISTED',ch,'E',e,'I',I,'width',fitq[2],'chi',chi)
+> PY
+root@2adaf78a09e7:/app# python /app/work/weakcheck.py
+
+
+
+#### step 34 20:31:54
+MSG: Analysis: The fitted parent half-life is 4.3643 s and the isomer half-life is 171.1 ns. Artifact subtraction explains the 965-, 1171-, 1199-, 1295-, 1401-, 1641-, and 1659-keV peaks without extra transitions. The remaining high-energy escape peaks are consistent with the calibration response.
+Plan: Finish the weak-peak check, cross-check the doublet and lifetime estimates, then write and validate the requested JSON with exactly the required fields.
+CMD: 
+CMD: python /app/work/lifetimes.py > /app/work/lifetimes.txt; cat /app/work/lifetimes.txt
+
+OBS: New Terminal Output:
+Y
+root@2adaf78a09e7:/app# python /app/work/weakcheck.py
+root@2adaf78a09e7:/app# python /app/work/lifetimes.py > /app/work/lifetimes.txt; cat /app/work/lifetimes.txt
+
+
+
+#### step 35 20:32:25
+MSG: Analysis: No additional narrow peaks with potentially relevant intensity were found. The 17-level, 33-transition scheme explains the observed coincidences and energies, while excluding identified room background, descendant activity, contaminants, sum peaks, and escape peaks.
+Plan: Confirm the pooled lifetime goodness of fit, write the final JSON using jointly fitted level energies and corrected intensities, and validate its structure and energy consistency.
+CMD: 
+CMD: cat /app/work/lifetimes.txt; cat > /app/work/write_output.py <<'PY'
+import json,re,numpy as np
+net=np.load('/app/work/network.npz',allow_pickle=True);life=np.load('/app/work/lifetimes.npz')
+levels={str(k):round(float(v),3) for k,v in zip(net['levels'],net['energies'])}
+ints={}
+for line in open('/app/work/intensities.txt'):
+ if not line.startswith('TRANS '):continue
+ s=line.split();ints[(int(s[1]),int(s[2]))]=float(s[-1])
+trans=[]
+for k,component,upper,lower in net['edges']:
+ k=int(k);component=int(component);a=levels[str(upper)];b=levels[str(lower)]
+ trans.append({'from_keV':a,'to_keV':b,'energy_keV':round(a-b,3),'relative_intensity':round(ints[k,component],3)})
+out={'parent_half_life_s':round(float(life['parent']),4),'levels_keV':list(levels.values()),'transitions':trans,'isomer':{'level_keV':levels['1963'],'half_life_ns':round(float(life['isomer']),2)}}
+assert set(out)=={'parent_half_life_s','levels_keV','transitions','isomer'}
+assert len(out['levels_keV'])==17 and len(trans)==33
+assert len(set(out['levels_keV']))==17
+assert all(set(t)=={'from_keV','to_keV','energy_keV','relative_intensity'} for t in trans)
+assert all(abs(t['from_keV']-t['to_keV']-t['energy_keV'])<.002 for t in trans)
+assert all(t['relative_intensity']>=.5 for t in trans)
+assert set(out['isomer'])=={'level_keV','half_life_ns'}
+with open('/app/output/decay_scheme.json','w') as f:json.dump(out,f,indent=2);f.write('\n')
+print('Wrote validated output: 17 levels, 33 transitions.')
+print('Parent half-life:',out['parent_half_life_s'],'s; isomer:',out['isomer'])
+PY
+python /app/work/write_output.py; ls -l /app/output/decay_scheme.json
+
+OBS: 4.04020927377438 counts 17686.40772498484
+hist [1457.1 1356.  1226.8 1139.4 1068.9 1019.3  921.2  860.6  813.7  745.6
+  692.6  560.   559.8  547.7  466.5  482.1  424.7  363.8  352.5  292.7
+  289.8  292.2  239.6  268.8  193.6  196.6  159.9  149.7  148.5  135.1
+  122.9  138.8]
+root@2adaf78a09e7:/app# python /app/work/write_output.py; ls -l /app/output/decay_scheme.json
+Wrote validated output: 17 levels, 33 transitions.
+Parent half-life: 4.3643 s; isomer: {'level_keV': 1963.095, 'half_life_ns': 171.07}
+-rw-r--r-- 1 root root 4651 Nov 12 20:32 /app/output/decay_scheme.json
+root@2adaf78a09e7:/app#
+
+
+#### step 36 20:32:48
+MSG: Analysis: Created and validated /app/output/decay_scheme.json with 17 daughter levels and 33 detected transitions. The fitted parent half-life is 4.3643 s; the isomer is at 1963.095 keV with a half-life of 171.07 ns. Background, contaminant, descendant, summing, and escape contributions were excluded or corrected.
+Plan: The requested output is complete; no further commands are needed.
+CMD: 
+OBS: Current terminal state:
+New Terminal Output:
+n
+root@2adaf78a09e7:/app#
+
+
+Are you sure you want to mark the task as complete? This will trigger your solution to be graded and you won't be able to make any further corrections. If so, include "task_complete": true in your JSON response again.
+
+#### step 37 20:32:55
+MSG: Analysis: The output file is complete and validated. I confirm submission of /app/output/decay_scheme.json.
+Plan: No further changes.
+CMD: 
+OBS: New Terminal Output:
+n
+root@2adaf78a09e7:/app#
+
+

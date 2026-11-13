@@ -1,0 +1,922 @@
+[?2004hroot@6dab33ba4b1c:/app# asciinema rec --stdin /logs/agent/recording.cast
+[?2004l[0;32masciinema: recording asciicast to /logs/agent/recording.cast[0m
+[0;32masciinema: press <ctrl-d> or type "exit" when you're done[0m
+[?2004hroot@6dab33ba4b1c:/app# clear
+[?2004l[H[J[3J[?2004hroot@6dab33ba4b1c:/app# ls -la /app; python3 - <<'PY'
+[?2004l[?2004h> import numpy, scipy
+[?2004l[?2004h> print('numpy', numpy.__version__, 'scipy', scipy.__version__)
+[?2004l[?2004h> PY
+[?2004ltotal 12
+drwxr-xr-x 1 root root 4096 Oct 28 23:18 .
+drwxr-xr-x 1 root root 4096 Oct 28 23:19 ..
+drwxr-xr-x 2 root root 4096 Oct 28 23:18 output
+numpy 2.3.3 scipy 1.18.1
+[?2004hroot@6dab33ba4b1c:/app# which g++; nproc
+[?2004l64
+[?2004hroot@6dab33ba4b1c:/app# python3 - <<'PY'
+[?2004l[?2004h> import numpy, scipy
+[?2004l[?2004h> print('numpy', numpy.__version__, 'scipy', scipy.__version__)
+[?2004l[?2004h> import importlib.util
+[?2004l[?2004h> for s in ['sympy','numba']:
+[?2004l[?2004h>  print(s, bool(importlib.util.find_spec(s)))
+[?2004l[?2004h> PY
+[?2004lnumpy 2.3.3 scipy 1.18.1
+sympy True
+numba False
+[?2004hroot@6dab33ba4b1c:/app# which g++; nproc; mkdir -p /app/work
+[?2004l64
+[?2004hroot@6dab33ba4b1c:/app# command -v gcc cc clang gfortran apt-get; ls /usr/bin/*gcc* /usr/bin/*clang* 2>/dev/null; python3 - <<'PY'
+[?2004l[?2004h> import importlib.util
+[?2004l[?2004h> for s in ['torch','jax','Cython']:
+[?2004l[?2004h>  print(s,bool(importlib.util.find_spec(s)))
+[?2004l[?2004h> PY
+[?2004l/usr/bin/apt-get
+torch False
+jax False
+Cython False
+[?2004hroot@6dab33ba4b1c:/app# apt-get update -qq && apt-get install -y -qq g++ > /app/work/install.log 2>&1
+[?2004l[?2004hroot@6dab33ba4b1c:/app# tail -10 /app/work/install.log; command -v g++; cat /sys/fs/cgroup/cpu.max; ls /usr/include/boost/math/quadrature/gauss_kronrod.hpp 2>/dev/null
+[?2004lSetting up libheif1:amd64 (1.15.1-1+deb12u1) ...
+Setting up binutils (2.40-2) ...
+Setting up gcc-12 (12.2.0-14+deb12u1) ...
+Setting up libgd3:amd64 (2.3.3-9+deb12u1) ...
+Setting up libc-devtools (2.36-9+deb12u14) ...
+Setting up g++-12 (12.2.0-14+deb12u1) ...
+Setting up gcc (4:12.2.0-3) ...
+Setting up g++ (4:12.2.0-3) ...
+update-alternatives: using /usr/bin/g++ to provide /usr/bin/c++ (c++) in auto mode
+Processing triggers for libc-bin (2.36-9+deb12u14) ...
+/usr/bin/g++
+200000 100000
+[?2004hroot@6dab33ba4b1c:/app# cat > /app/work/scatter.cpp <<'CPP'
+[?2004l[?2004h> #include <cmath>
+[?2004l[?2004h> #include <cstdio>
+[?2004l[?2004h> #include <algorithm>
+[?2004l[?2004h> #include <vector>
+[?2004l[?2004h> using namespace std;
+[?2004l[?2004h> const double pi=acos(-1.0);
+[?2004l[?2004h> // Gauss-Kronrod 15 point adaptive integration.
+[?2004l[?2004h> const double xx[]={.9914553711208126,.9491079123427585,.8648644233597691,.7415311855993945,.5860872354676911,.4058451513773972,.2077849550078985,0};
+[?2004l[?2004h> const double wk[]={.02293532201052922,.06309209262997855,.1047900103222502,.1406532597155259,.1690047266392679,.1903505780647854,.2044329400752989,.2094821410847278};
+[?2004l[?2004h> const double wg[]={.1294849661688697,.2797053914892767,.3818300505051189,.4179591836734694};
+[?2004l[?2004h> template<class F> double quad(F &f,double a,double b,double tol,int dep=0){
+[?2004l[?2004h>  double c=(a+b)/2,h=(b-a)/2,fc=f(c),k=wk[7]*fc,g=wg[3]*fc;
+[?2004l[?2004h>  for(int j=0;j<7;j++){double z=f(c-h*xx[j])+f(c+h*xx[j]); k+=wk[j]*z; if(j%2==1)g+=wg[j/2]*z;}
+[?2004l[?2004h>  k*=h;g*=h;
+[?2004l[?2004h>  if(dep>=24 || fabs(k-g)<tol || b-a<1e-14)return k;
+[?2004l[?2004h>  return quad(f,a,c,tol/2,dep+1)+quad(f,c,b,tol/2,dep+1);
+[?2004l[?2004h> }
+[?2004l[?2004h> double potential(double r){double z=pow(.5/(r-.5),6);return 4*z*(z-1);}
+[?2004l[?2004h> double ec(double s){return pow(s,-6)*(8+12/s)-pow(s,-12)*(20+24/s);}
+[?2004l[?2004h> struct Scatter{
+[?2004l[?2004h>  double E,rc,bc2,atol;int L; long calls=0;
+[?2004l[?2004h>  Scatter(double energy,int l,double tol):E(energy),atol(tol),L(l){
+[?2004l[?2004h>   double lo=1.1,hi=3; // Find maximum of critical-energy curve.
+[?2004l[?2004h>   for(int i=0;i<100;i++){double p=(2*lo+hi)/3,q=(lo+2*hi)/3;if(ec(p)<ec(q))lo=p;else hi=q;}
+[?2004l[?2004h>   double sm=(lo+hi)/2;
+[?2004l[?2004h>   if(E<ec(sm)){
+[?2004l[?2004h>    lo=sm;hi=max(3.,pow(30/E,1./6));while(ec(hi)>E)hi*=2;
+[?2004l[?2004h>    for(int i=0;i<80;i++){double mid=(lo+hi)/2;if(ec(mid)>E)lo=mid;else hi=mid;}
+[?2004l[?2004h>    rc=.5+.5*(lo+hi)/2;bc2=rc*rc*(1-potential(rc)/E);
+[?2004l[?2004h>   }else{rc=0;bc2=0;}
+[?2004l[?2004h>  }
+[?2004l[?2004h>  double deflection(double b2){
+[?2004l[?2004h>   calls++;
+[?2004l[?2004h>   double lo=.5,hi=max(2.,sqrt(b2)+1);
+[?2004l[?2004h>   if(rc>0){if(b2>=bc2)lo=rc;else hi=rc;}
+[?2004l[?2004h>   while(hi*hi*(1-potential(hi)/E)<b2)hi*=2;
+[?2004l[?2004h>   for(int k=0;k<65;k++){double r=(lo+hi)/2;if(r*r*(1-potential(r)/E)>b2)hi=r;else lo=r;}
+[?2004l[?2004h>   double r=(lo+hi)/2,z0=pow(.5/(r-.5),6),B=b2/(r*r);
+[?2004l[?2004h>   auto f=[&](double u){double t=1-u*u,q=t*(r-.5)/(r-.5*t);double z=z0*pow(q,6);double sum=1,qp=1;for(int j=1;j<6;j++){qp*=q;sum+=qp;}double H=B*(1+t)+4*z0*r/(r-.5*t)*sum*(z0+z-1)/E;return 1/sqrt(max(H,1e-290));};
+[?2004l[?2004h>   double theta=2*sqrt(b2)/r*quad(f,0.,1.,2e-10);
+[?2004l[?2004h>   return -cos(2*theta);
+[?2004l[?2004h>  }
+[?2004l[?2004h>  void integrand(double y,double jac,double* out){
+[?2004l[?2004h>   double c=deflection(y),p0=1,p1=c;
+[?2004l[?2004h>   out[0]=0; if(L>=1)out[1]=jac*(1-c);
+[?2004l[?2004h>   for(int l=2;l<=L;l++){double p=((2*l-1)*c*p1-(l-1)*p0)/l;out[l]=jac*(1-p);p0=p1;p1=p;}
+[?2004l[?2004h>  }
+[?2004l[?2004h>  void vquad(double a,double b,int mode,double scale,double tol,vector<double>& res,int dep=0){
+[?2004l[?2004h>   double c=(a+b)/2,h=(b-a)/2;vector<double> k(L+1),g(L+1),v(L+1);
+[?2004l[?2004h>   auto f=[&](double x){double y,jac;if(mode==0){y=x;jac=1;}else {y=bc2+scale*x/(1-x);jac=scale/((1-x)*(1-x));} integrand(y,jac,v.data());};
+[?2004l[?2004h>   f(c);for(int l=1;l<=L;l++){k[l]=wk[7]*v[l];g[l]=wg[3]*v[l];}
+[?2004l[?2004h>   for(int j=0;j<7;j++)for(int sign:{-1,1}){f(c+sign*h*xx[j]);for(int l=1;l<=L;l++){k[l]+=wk[j]*v[l];if(j%2==1)g[l]+=wg[j/2]*v[l];}}
+[?2004l[?2004h>   double err=0;for(int l=1;l<=L;l++){k[l]*=h;g[l]*=h;err=max(err,fabs(k[l]-g[l]));}
+[?2004l[?2004h>   if(dep>=24 || err<tol || b-a<1e-14){for(int l=1;l<=L;l++)res[l]+=k[l];return;}
+[?2004l[?2004h>   vquad(a,c,mode,scale,tol/2,res,dep+1);vquad(c,b,mode,scale,tol/2,res,dep+1);
+[?2004l[?2004h>  }
+[?2004l[?2004h>  void run(double* out){vector<double> res(L+1);double scale=max(1.,bc2);if(bc2>0)vquad(0,bc2,0,scale,atol*scale,res);vquad(0,1,1,scale,atol*scale,res);for(int l=0;l<=L;l++)out[l]=pi*res[l];}
+[?2004l[?2004h> };
+[?2004l[?2004h> extern "C" void cross_sections(double E,int L,double tol,double* out){Scatter s(E,L,tol);s.run(out);}
+[?2004l[?2004h> extern "C" double cosine(double E,double b){Scatter s(E,2,1e-7);return s.deflection(b*b);}
+[?2004l[?2004h> extern "C" void critical(double E,double* out){Scatter s(E,2,1e-7);out[0]=s.rc;out[1]=sqrt(s.bc2);}
+[?2004l[?2004h> CPP
+[?2004l[?2004hroot@6dab33ba4b1c:/app# g++ -O3 -std=c++17 -fPIC -shared /app/work/scatter.cpp -o /app/work/scatter.so
+[?2004l[?2004hroot@6dab33ba4b1c:/app# cat > /app/work/solve.py <<'PY'
+[?2004l[?2004h> import os, sys, time, ctypes
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from scipy.special import roots_genlaguerre, roots_legendre, eval_genlaguerre, lpmv, gammaln, gamma
+[?2004l[?2004h> from scipy.linalg import solve
+[?2004l[?2004h> LIB=ctypes.CDLL('/app/work/scatter.so')
+[?2004l[?2004h> LIB.cross_sections.argtypes=[ctypes.c_double,ctypes.c_int,ctypes.c_double,np.ctypeslib.ndpointer(dtype=np.float64,flags='C_CONTIGUOUS')]
+[?2004l[?2004h> LIB.cosine.argtypes=[ctypes.c_double,ctypes.c_double]; LIB.cosine.restype=ctypes.c_double
+[?2004l[?2004h> 
+[?2004l[?2004h> def cross(E,L,tol=1e-7):
+[?2004l[?2004h>  q=np.zeros(L+1);LIB.cross_sections(E,L,tol,q);return q
+[?2004l[?2004h> 
+[?2004l[?2004h> def setup(N):
+[?2004l[?2004h>  # N is highest Sonine degree; temperature-independent geometry.
+[?2004l[?2004h>  R2,wr=roots_genlaguerre(2*N+5,.5);wr/=gamma(1.5)
+[?2004l[?2004h>  mu,wm=roots_legendre(2*N+8);wm/=2
+[?2004l[?2004h>  L=2*N+2
+[?2004l[?2004h>  P=np.zeros((3,L+1,len(mu)))
+[?2004l[?2004h>  for m in range(3):
+[?2004l[?2004h>   for l in range(m,L+1):
+[?2004l[?2004h>    norm=np.exp(gammaln(l+m+1)-gammaln(l-m+1))/(2*l+1)
+[?2004l[?2004h>    P[m,l]=wm*lpmv(m,l,mu)/np.sqrt(norm)
+[?2004l[?2004h>  return R2,wr,mu,P
+[?2004l[?2004h> 
+[?2004l[?2004h> def geometry(x,N,st):
+[?2004l[?2004h>  R2,wr,mu,P=st;w=np.sqrt(x);R=np.sqrt(R2)[:,None];mu=mu[None,:]
+[?2004l[?2004h>  X=np.broadcast_to(w*np.sqrt(1-mu*mu)/np.sqrt(2), (len(R2),mu.shape[1]))
+[?2004l[?2004h>  Zp=(R+w*mu)/np.sqrt(2);Zm=(R-w*mu)/np.sqrt(2)
+[?2004l[?2004h>  cp=(R2[:,None]+x+2*R*w*mu)/2;cm=(R2[:,None]+x-2*R*w*mu)/2
+[?2004l[?2004h>  # dimensions: basis, R, mu
+[?2004l[?2004h>  lv=np.array([eval_genlaguerre(i,2.5,cp) for i in range(N+1)])
+[?2004l[?2004h>  lvm=np.array([eval_genlaguerre(i,2.5,cm) for i in range(N+1)])
+[?2004l[?2004h>  ld=np.array([eval_genlaguerre(i,1.5,cp) for i in range(N+1)])
+[?2004l[?2004h>  ldm=np.array([eval_genlaguerre(i,1.5,cm) for i in range(N+1)])
+[?2004l[?2004h>  vz=(Zp*Zp-cp/3)*lv+(Zm*Zm-cm/3)*lvm
+[?2004l[?2004h>  vc=X*Zp*lv-X*Zm*lvm
+[?2004l[?2004h>  vb=X*X/2*(lv+lvm)
+[?2004l[?2004h>  hz=Zp*ld+Zm*ldm;hx=X*(ld-ldm)
+[?2004l[?2004h>  dz=Zp*ld;dx=X*ld
+[?2004l[?2004h>  def mat(fields):
+[?2004l[?2004h>   out=np.zeros((P.shape[1],N+1,N+1))
+[?2004l[?2004h>   for f,m,factor in fields:
+[?2004l[?2004h>    a=np.einsum('irm,lm->irl',f,P[m],optimize=True)
+[?2004l[?2004h>    out+=factor*np.einsum('irl,jrl,r->lij',a,a,wr,optimize=True)
+[?2004l[?2004h>   out[0]=0
+[?2004l[?2004h>   return out
+[?2004l[?2004h>  return mat([(vz,0,1.5),(vc,1,2),(vb,2,2)])/5,mat([(hz,0,1),(hx,1,1)])/3,mat([(dz,0,2),(dx,1,2)])/3
+[?2004l[?2004h> 
+[?2004l[?2004h> def coefficients(B,T):
+[?2004l[?2004h>  v,h,d=B
+[?2004l[?2004h>  out=[]
+[?2004l[?2004h>  for n in range(1,len(v)+1):
+[?2004l[?2004h>   visc=.5*np.sqrt(T)*np.linalg.inv(v[:n,:n])[0,0]
+[?2004l[?2004h>   diff=.5*np.sqrt(T)*np.linalg.inv(d[:n,:n])[0,0]
+[?2004l[?2004h>   heat=np.nan if n<2 else 25/8*np.sqrt(T)*np.linalg.inv(h[1:n,1:n])[0,0]
+[?2004l[?2004h>   out.append([visc,heat,diff])
+[?2004l[?2004h>  return np.array(out)
+[?2004l[?2004h> 
+[?2004l[?2004h> def hard(N=6,ng=32):
+[?2004l[?2004h>  st=setup(N);x,wx=roots_genlaguerre(ng,1.);wx/=gamma(1.5)
+[?2004l[?2004h>  B=np.zeros((3,N+1,N+1));q=np.full(2*N+3,np.pi);q[0]=0
+[?2004l[?2004h>  for xi,wi in zip(x,wx):
+[?2004l[?2004h>   K=np.array(geometry(xi,N,st));B+=wi*np.einsum('l,klij->kij',q,K)
+[?2004l[?2004h>  print('hard sphere',coefficients(B,1))
+[?2004l[?2004h>  print('first targets',5/(16*np.sqrt(np.pi)),75/(64*np.sqrt(np.pi)),3/(8*np.sqrt(np.pi)))
+[?2004l[?2004h>  return B
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  if sys.argv[1]=='hard':hard(int(sys.argv[2]) if len(sys.argv)>2 else 6)
+[?2004l[?2004h>  elif sys.argv[1]=='cross':
+[?2004l[?2004h>   for E in [.01,.1,.3,1,2,3,6,25,100,1e6]:
+[?2004l[?2004h>    t=time.time();print(E,cross(E,12),time.time()-t,flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6dab33ba4b1c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/solve.py hard 8
+[?2004lhard sphere [[0.17630924        nan 0.21157109]
+ [0.1789277  0.66115967 0.21521887]
+ [0.17910884 0.67618602 0.21552531]
+ [0.17913124 0.67756868 0.21556971]
+ [0.17913508 0.67777756 0.21557834]
+ [0.17913589 0.6778191  0.21558037]
+ [0.17913609 0.67782899 0.21558092]
+ [0.17913615 0.67783168 0.21558108]
+ [0.17913617 0.67783249 0.21558114]]
+first targets 0.17630924485867386 0.6611596682200269 0.21157109383040862
+[?2004hroot@6dab33ba4b1c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/solve.py cross > /app/work/cross.log 2>&1 &
+[?2004l[1] 1438
+[?2004hroot@6dab33ba4b1c:/app# cat /app/work/cross.log; ps -o pid,etime,time,cmd -p 1438; python3 - <<'PY'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> s=np.linspace(1.1,3,10000);e=s**-6*(8+12/s)-s**-12*(20+24/s);i=e.argmax();print('maximum critical energy',e[i], 's',s[i])
+[?2004l[?2004h> PY
+[?2004l0.01 [ 0.         14.12087662 16.93859313 19.53904291 20.73158446 22.31000604
+ 23.1442059  24.32172666 24.9912875  25.94828481 26.51944384 27.33455761
+ 27.83862969] 15.334492921829224
+bash: ps: command not found
+maximum critical energy 1.949593911446578 s 1.272917291729173
+[?2004hroot@6dab33ba4b1c:/app# cat /app/work/cross.log; cat > /app/work/validate.py <<'PY'
+[?2004l[?2004h> import sys
+[?2004l[?2004h> sys.path.insert(0,'/app/work')
+[?2004l[?2004h> from solve import *
+[?2004l[?2004h> from scipy.optimize import brentq
+[?2004l[?2004h> from scipy.integrate import quad
+[?2004l[?2004h> for E in [.3,2,25]:
+[?2004l[?2004h>  for b in [.1,.8,1.1,1.8,3.]:
+[?2004l[?2004h>   rgrid=np.geomspace(.500001,100,20000)
+[?2004l[?2004h>   f=lambda r:1-b*b/r**2-4*((.5/(r-.5))**12-(.5/(r-.5))**6)/E
+[?2004l[?2004h>   y=np.array([f(r) for r in rgrid]);idx=np.where(y[:-1]*y[1:]<0)[0][-1]
+[?2004l[?2004h>   r=brentq(f,rgrid[idx],rgrid[idx+1],xtol=1e-14)
+[?2004l[?2004h>   I=quad(lambda u:2*u*b/r/np.sqrt(f(r/(1-u*u))),0,1,epsabs=1e-9,epsrel=1e-9)[0]
+[?2004l[?2004h>   ref=-np.cos(2*I);c=LIB.cosine(E,b)
+[?2004l[?2004h>   print(E,b,c,ref,c-ref,flush=True)
+[?2004l[?2004h> PY
+[?2004l0.01 [ 0.         14.12087662 16.93859313 19.53904291 20.73158446 22.31000604
+ 23.1442059  24.32172666 24.9912875  25.94828481 26.51944384 27.33455761
+ 27.83862969] 15.334492921829224
+0.1 [ 0.          7.96340947  9.54732615 10.86026775 11.52486145 12.31032027
+ 12.76685141 13.34918979 13.71097301 14.18263407 14.48840202 14.88925992
+ 15.15721719] 3.8858678340911865
+0.3 [ 0.          6.22799729  7.42066549  8.3789252   8.88256174  9.45288428
+  9.79651909 10.21803935 10.48892205 10.82967579 11.05771118 11.34693341
+ 11.54615647] 2.5009782314300537
+1 [0.         4.88680218 5.73317127 6.4178823  6.7861022  7.19359398
+ 7.44394917 7.74424524 7.94080322 8.18304159 8.3479668  8.55323986
+ 8.69694595] 1.7303130626678467
+2 [0.         4.25001057 4.97526791 5.52996836 5.85191751 6.18188507
+ 6.4013192  6.64361241 6.81360045 7.00829354 7.15121503 7.31701679
+ 7.44086663] 0.008777141571044922
+3 [0.         3.70797664 4.5629188  5.11632552 5.4084191  5.60641855
+ 5.83918046 6.08851661 6.27727369 6.39958615 6.51990692 6.67411704
+ 6.82793554] 0.0033669471740722656
+6 [0.         3.16147783 3.61164144 3.99596278 4.36875756 4.72118199
+ 5.033716   5.29040795 5.48442178 5.61936484 5.7077457  5.76753718
+ 5.8178847 ] 0.001974344253540039
+25 [0.         2.72188568 2.95964003 3.09031596 3.18389848 3.261544
+ 3.33215745 3.40011092 3.46773653 3.53632276 3.60657125 3.67882852
+ 3.75321332] 0.0015599727630615234
+100 [0.         2.46028083 2.67391115 2.78997689 2.86690953 2.92323166
+ 2.96719918 3.00313786 3.03355873 3.0600308  3.08359114 3.10495635
+ 3.1246397 ] 0.0015087127685546875
+1000000.0 [0.         1.45257449 1.54166226 1.59486686 1.63242252 1.66108331
+ 1.68408053 1.70320684 1.7195463  1.73379617 1.7464272  1.75777013
+ 1.76806525] 0.0012466907501220703
+[1]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/work/solve.py cross > /app/work/cross.log 2>&1
+[?2004hroot@6dab33ba4b1c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/validate.py
+[?2004l0.3 0.1 -0.9840689931451009 -0.9840689931450999 -9.992007221626409e-16
+0.3 0.8 -0.05141750786745027 -0.051417507867413906 -3.6366742950377784e-14
+0.3 1.1 0.6219029488166203 0.6219029488166686 -4.829470157119431e-14
+0.3 1.8 0.9802340964035191 0.9802340964033399 1.7918999617450027e-13
+0.3 3.0 0.9999961568883342 0.9999961568883389 -4.6629367034256575e-15
+2 0.1 -0.9795018987137217 -0.9795018987137213 -4.440892098500626e-16
+2 0.8 0.21342796186084215 0.21342796186075733 8.482103908136196e-14
+2 1.1 0.9519035752817201 0.9519035752816589 6.117328865684613e-14
+2 1.8 0.9997295327163768 0.9997295327163319 4.4853010194856324e-14
+2 3.0 0.9999999140951231 0.999999914095123 1.1102230246251565e-16
+25 0.1 -0.9743954774751744 -0.9743954774751753 8.881784197001252e-16
+25 0.8 0.4886265828074893 0.48862658280741567 7.360778653264788e-14
+25 1.1 0.9938366749925316 0.9938366749925294 2.220446049250313e-15
+25 1.8 0.9999983777888733 0.9999983777888732 1.1102230246251565e-16
+25 3.0 0.9999999994507921 0.9999999994507921 0.0
+[?2004hroot@6dab33ba4b1c:/app# cp /app/work/scatter.cpp /app/work/scatter_original.cpp
+[?2004l[?2004hroot@6dab33ba4b1c:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/work/scatter.cpp'
+[?2004l[?2004h> s=open(p).read().replace('2e-10);','2e-9);').replace('y=bc2+scale*x/(1-x);','y=bc2+(bc2>0 ? 5e-9*scale : 0)+scale*x/(1-x);')
+[?2004l[?2004h> s=s.replace('if(bc2>0)vquad(0,bc2,0,scale,atol*scale,res);','if(bc2>0){double d=5e-9*scale;vquad(0,bc2-d,0,scale,atol*scale,res);for(int l=1;l<=L;l++)res[l]+=2*d;}')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6dab33ba4b1c:/app# g++ -O3 -std=c++17 -fPIC -shared /app/work/scatter.cpp -o /app/work/scatter.so
+[?2004l[?2004hroot@6dab33ba4b1c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/solve.py cross > /app/work/cross2.log 2>&1 &
+[?2004l[1] 1569
+[?2004hroot@6dab33ba4b1c:/app# cat /app/work/cross2.log
+[?2004l0.01 [ 0.         14.12087658 16.93859318 19.53904283 20.73158448 22.31000602
+ 23.14420594 24.32172665 24.99128752 25.94828478 26.51944388 27.33455757
+ 27.8386297 ] 6.6418163776397705
+0.1 [ 0.          7.96340947  9.54732617 10.86026776 11.52486145 12.31032026
+ 12.7668514  13.34918979 13.71097299 14.18263407 14.48840202 14.8892599
+ 15.15721718] 1.2792079448699951
+0.3 [ 0.          6.22799731  7.42066551  8.37892522  8.88256175  9.45288429
+  9.79651909 10.21803934 10.48892205 10.8296758  11.05771117 11.34693342
+ 11.54615647] 0.823810338973999
+1 [0.         4.88680218 5.73317128 6.4178823  6.7861022  7.19359398
+ 7.44394916 7.74424524 7.94080322 8.18304159 8.3479668  8.55323985
+ 8.69694594] 0.5266621112823486
+2 [0.         4.25001057 4.97526791 5.52996836 5.85191751 6.18188507
+ 6.4013192  6.64361241 6.81360045 7.00829354 7.15121503 7.31701679
+ 7.44086663] 0.007772207260131836
+3 [0.         3.70797664 4.5629188  5.11632552 5.4084191  5.60641855
+ 5.83918046 6.08851661 6.27727369 6.39958615 6.51990692 6.67411704
+ 6.82793554] 0.002953767776489258
+6 [0.         3.16147783 3.61164144 3.99596278 4.36875756 4.72118199
+ 5.033716   5.29040795 5.48442178 5.61936484 5.7077457  5.76753718
+ 5.8178847 ] 0.0017232894897460938
+25 [0.         2.72188568 2.95964003 3.09031596 3.18389848 3.261544
+ 3.33215745 3.40011092 3.46773653 3.53632276 3.60657125 3.67882852
+ 3.75321332] 0.0014472007751464844
+100 [0.         2.46028083 2.67391115 2.78997689 2.86690953 2.92323166
+ 2.96719918 3.00313786 3.03355873 3.0600308  3.08359114 3.10495635
+ 3.1246397 ] 0.001409769058227539
+1000000.0 [0.         1.45257449 1.54166226 1.59486686 1.63242252 1.66108331
+ 1.68408053 1.70320684 1.7195463  1.73379617 1.7464272  1.75777013
+ 1.76806525] 0.00116729736328125
+[1]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/work/solve.py cross > /app/work/cross2.log 2>&1
+[?2004hroot@6dab33ba4b1c:/app# cat > /app/work/run.py <<'PY'
+[?2004l[?2004h> from solve import *
+[?2004l[?2004h> import json
+[?2004l[?2004h> from concurrent.futures import ProcessPoolExecutor
+[?2004l[?2004h> from scipy.optimize import minimize_scalar
+[?2004l[?2004h> Emax=-minimize_scalar(lambda s:-(s**-6*(8+12/s)-s**-12*(20+24/s)),bounds=(1.1,2),method='bounded',options={'xatol':1e-14}).fun
+[?2004l[?2004h> 
+[?2004l[?2004h> def task(arg):
+[?2004l[?2004h>  E,L,tol=arg
+[?2004l[?2004h>  return cross(E,L,tol)
+[?2004l[?2004h> 
+[?2004l[?2004h> def run(T,N=8,p=12,tol=1e-7):
+[?2004l[?2004h>  st=setup(N)
+[?2004l[?2004h>  # Split at the orbiting endpoint and densely near it; otherwise logarithmic panels.
+[?2004l[?2004h>  edges=np.array([0,.005,.02,.05,.1,.2,.4,.7,1.,1.3,1.55,1.75,1.85,1.9,1.93,Emax,1.97,2.,2.05,2.15,2.3,2.5,3.,4.,6.,9.,14.,22.,35.,55.,85.,130.,200.,320.,500.,800.,1300.,2200.,3600.,6000.,10000.])
+[?2004l[?2004h>  edges=np.unique(np.r_[edges[edges<60*T],60*T])
+[?2004l[?2004h>  u,wu=roots_legendre(p)
+[?2004l[?2004h>  xs=[];weights=[]
+[?2004l[?2004h>  for a,b in zip(edges[:-1],edges[1:]):
+[?2004l[?2004h>   E=(a+b)/2+(b-a)/2*u
+[?2004l[?2004h>   xs.extend(E/T);weights.extend((b-a)/(2*T)*wu)
+[?2004l[?2004h>  xs=np.array(xs);weights=np.array(weights)*xs*np.exp(-xs)/gamma(1.5)
+[?2004l[?2004h>  name=f'/app/work/q_T{T}_N{N}_p{p}_tol{tol}.npz'
+[?2004l[?2004h>  start=time.time()
+[?2004l[?2004h>  if os.path.exists(name):q=np.load(name)['q']
+[?2004l[?2004h>  else:
+[?2004l[?2004h>   with ProcessPoolExecutor(max_workers=2) as pool:
+[?2004l[?2004h>    qs=[]
+[?2004l[?2004h>    for i,qi in enumerate(pool.map(task,[(float(x*T),2*N+2,tol) for x in xs],chunksize=1)):
+[?2004l[?2004h>     qs.append(qi)
+[?2004l[?2004h>     if i%100==0:print('cross',T,i,len(xs),time.time()-start,flush=True)
+[?2004l[?2004h>   q=np.array(qs);np.savez(name,x=xs,weights=weights,q=q)
+[?2004l[?2004h>  B=np.zeros((3,N+1,N+1))
+[?2004l[?2004h>  for xi,wi,qi in zip(xs,weights,q):
+[?2004l[?2004h>   K=np.array(geometry(xi,N,st));B+=wi*np.einsum('l,klij->kij',qi,K)
+[?2004l[?2004h>  np.savez(f'/app/work/B_T{T}_N{N}_p{p}_tol{tol}.npz',B=B)
+[?2004l[?2004h>  out=coefficients(B,T)
+[?2004l[?2004h>  print('RESULT',T,N,p,tol,'time',time.time()-start,'\n',out,flush=True)
+[?2004l[?2004h>  return out[-1]
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>  N=int(sys.argv[1]);p=int(sys.argv[2]);tol=float(sys.argv[3]) if len(sys.argv)>3 else 1e-7
+[?2004l[?2004h>  Ts=list(map(float,sys.argv[4:])) if len(sys.argv)>4 else [.3,.75,2.,6.,25.,100.]
+[?2004l[?2004h>  vals={str(T):run(T,N,p,tol).tolist() for T in Ts}
+[?2004l[?2004h>  print(json.dumps(vals),flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6dab33ba4b1c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/run.py 8 12 1e-7 > /app/work/run8_12.log 2>&1 &
+[?2004l[1] 1590
+[?2004hroot@6dab33ba4b1c:/app# tail -20 /app/work/run8_12.log; ls -lh /app/work/*.npz 2>/dev/null; cat /proc/1590/status | head -8; date
+[?2004lName:	python3
+Umask:	0022
+State:	S (sleeping)
+Tgid:	1590
+Ngid:	0
+Pid:	1590
+PPid:	56
+TracerPid:	0
+Wed Oct 28 23:30:39 UTC 2026
+[?2004hroot@6dab33ba4b1c:/app# cat /proc/1590/task/1590/children; for p in $(cat /proc/1590/task/1590/children); do echo $p; cat /proc/$p/stat; done; tail /app/work/run8_12.log
+[?2004l1591 1592 1591
+1591 (python3) R 1590 1590 55 34817 1638 4194368 571 0 0 0 3338 2 0 0 20 0 1 0 157434210 233369600 11338 18446744073709551615 106326440693760 106326440694097 140722712348256 0 0 0 0 16781312 2 0 0 0 17 28 0 0 0 0 0 106326440705456 106326440706072 106327098912768 140722712354234 140722712354269 140722712354269 140722712354785 0
+1592
+1592 (python3) R 1590 1590 55 34817 1639 4194368 562 0 0 0 3329 2 0 0 20 0 1 0 157434210 233369600 11336 18446744073709551615 106326440693760 106326440694097 140722712348256 0 0 0 0 16781312 2 0 0 0 17 58 0 0 0 0 0 106326440705456 106326440706072 106327098912768 140722712354234 140722712354269 140722712354269 140722712354785 0
+[?2004hroot@6dab33ba4b1c:/app# cp /app/work/scatter.cpp /app/work/scatter_smallcut.cpp
+[?2004l[?2004hroot@6dab33ba4b1c:/app# sed 's/5e-9/2e-7/g' /app/work/scatter.cpp > /app/work/scatter_fast.cpp
+[?2004l[?2004hroot@6dab33ba4b1c:/app# g++ -O3 -std=c++17 -fPIC -shared /app/work/scatter_fast.cpp -o /app/work/scatter_fast.so
+[?2004l[?2004hroot@6dab33ba4b1c:/app# cat > /app/work/bench.py <<'PY'
+[?2004l[?2004h> from solve import *
+[?2004l[?2004h> LIB=ctypes.CDLL('/app/work/scatter_fast.so'); LIB.cross_sections.argtypes=[ctypes.c_double,ctypes.c_int,ctypes.c_double,np.ctypeslib.ndpointer(dtype=np.float64,flags='C_CONTIGUOUS')]
+[?2004l[?2004h> for E in [5e-5,.001,.01,.1,.3,1.,1.9]:
+[?2004l[?2004h>  q=np.zeros(19);t=time.time();LIB.cross_sections(E,18,1e-7,q);print(E,time.time()-t,q[[1,2,18]],flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6dab33ba4b1c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/bench.py > /app/work/bench.log 2>&1 &
+[?2004l[2] 1649
+[?2004hroot@6dab33ba4b1c:/app# cat /app/work/bench.log; tail -20 /app/work/run8_12.log
+[?2004l[?2004hroot@6dab33ba4b1c:/app# cp /app/work/scatter_fast.cpp /app/work/scatter_speed.cpp
+[?2004l[?2004hroot@6dab33ba4b1c:/app# sed -i 's/dep>=24 || fabs(k-g)/dep>=16 || fabs(k-g)/;s/quad(f,0.,1.,2e-9)/quad(f,0.,1.,2e-8)/' /app/work/scatter_speed.cpp
+[?2004l[?2004hroot@6dab33ba4b1c:/app# g++ -O3 -std=c++17 -fPIC -shared /app/work/scatter_speed.cpp -o /app/work/scatter_speed.so
+[?2004l[?2004hroot@6dab33ba4b1c:/app# sed 's/scatter_fast.so/scatter_speed.so/' /app/work/bench.py > /app/work/bench_speed.py
+[?2004l[?2004hroot@6dab33ba4b1c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/bench_speed.py > /app/work/bench_speed.log 2>&1 &
+[?2004l[3] 1689
+[?2004hroot@6dab33ba4b1c:/app# kill 1590 1591 1592 1649 2>/dev/null; jobs -l
+[?2004l[1]   1590 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/run.py 8 12 1e-7 > /app/work/run8_12.log 2>&1 &
+[2]-  1649 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/bench.py > /app/work/bench.log 2>&1 &
+[3]+  1689 Done                    OPENBLAS_NUM_THREADS=1 python3 /app/work/bench_speed.py > /app/work/bench_speed.log 2>&1
+[?2004hroot@6dab33ba4b1c:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/work/scatter.cpp';s=open('/app/work/scatter_smallcut.cpp').read();s=s.replace('vquad(0,1,1,scale,atol*scale,res);','double ymax=400*max(1.,pow(E,-1./3));double xmax=(ymax-bc2)/(scale+ymax-bc2);vquad(0,xmax,1,scale,atol*scale,res);');open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[1]-  Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/work/run.py 8 12 1e-7 > /app/work/run8_12.log 2>&1
+[2]+  Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/work/bench.py > /app/work/bench.log 2>&1
+[?2004hroot@6dab33ba4b1c:/app# g++ -O3 -std=c++17 -fPIC -shared /app/work/scatter.cpp -o /app/work/scatter.so
+[?2004l[?2004hroot@6dab33ba4b1c:/app# sed 's/scatter_fast.so/scatter.so/' /app/work/bench.py > /app/work/bench_finite.py
+[?2004l[?2004hroot@6dab33ba4b1c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/bench_finite.py > /app/work/bench_finite.log 2>&1 &
+[?2004l[1] 1703
+[?2004hroot@6dab33ba4b1c:/app# cat /app/work/bench_finite.log /app/work/bench_speed.log; date
+[?2004l5e-05 8.541547060012817 [ 63.92491423  75.31907542 147.12034254]
+0.001 0.8435375690460205 [26.51150369 31.59864653 59.82532085]
+0.01 0.10378623008728027 [14.12088263 16.93859801 31.03210898]
+0.1 0.026299715042114258 [ 7.9634126   9.54732772 16.76891263]
+0.3 0.07135677337646484 [ 6.22799934  7.42066599 12.72032686]
+1.0 0.0228271484375 [4.88680401 5.73317214 9.53356587]
+1.9 0.06879353523254395 [4.29357817 5.02434801 8.22696409]
+Wed Oct 28 23:31:46 UTC 2026
+[?2004hroot@6dab33ba4b1c:/app# kill 1703 2>/dev/null
+[?2004l[?2004hroot@6dab33ba4b1c:/app# cp /app/work/scatter.cpp /app/work/scatter_finite_strict.cpp
+[?2004l[?2004hroot@6dab33ba4b1c:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/work/scatter.cpp';s=open(p).read().replace('5e-9','2e-7').replace('dep>=24 || fabs(k-g)','dep>=16 || fabs(k-g)').replace('quad(f,0.,1.,2e-9)','quad(f,0.,1.,2e-8)');open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[1]+  Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/work/bench_finite.py > /app/work/bench_finite.log 2>&1
+[?2004hroot@6dab33ba4b1c:/app# g++ -O3 -std=c++17 -fPIC -shared /app/work/scatter.cpp -o /app/work/scatter.so
+[?2004l[?2004hroot@6dab33ba4b1c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/run.py 8 12 1e-7 > /app/work/run8_12.log 2>&1 &
+[?2004l[1] 1748
+[?2004hroot@6dab33ba4b1c:/app# tail -25 /app/work/run8_12.log; date
+[?2004lcross 0.3 0 324 5.2022364139556885
+cross 0.3 100 324 5.718632698059082
+cross 0.3 200 324 6.866152763366699
+cross 0.3 300 324 7.113168716430664
+RESULT 0.3 8 12 1e-07 time 7.549230337142944 
+ [[0.05307829        nan 0.06985572]
+ [0.05334971 0.19904359 0.07027032]
+ [0.05336249 0.20061145 0.0702955 ]
+ [0.05336351 0.20071118 0.07029789]
+ [0.05336366 0.20072116 0.07029822]
+ [0.05336368 0.2007228  0.07029828]
+ [0.05336369 0.20072314 0.0702983 ]
+ [0.05336369 0.20072321 0.0702983 ]
+ [0.05336369 0.20072322 0.0702983 ]]
+Wed Oct 28 23:32:23 UTC 2026
+[?2004hroot@6dab33ba4b1c:/app# tail -70 /app/work/run8_12.log; ls -lh /app/work/B*.npz
+[?2004lRESULT 0.75 8 12 1e-07 time 7.302817106246948 
+ [[0.10325312        nan 0.13538206]
+ [0.10361355 0.38719919 0.13599098]
+ [0.10363776 0.38929025 0.13603029]
+ [0.10364116 0.38948297 0.13603627]
+ [0.10364163 0.38951663 0.13603733]
+ [0.1036417  0.38952205 0.13603752]
+ [0.10364171 0.38952286 0.13603755]
+ [0.10364171 0.38952299 0.13603756]
+ [0.10364171 0.38952301 0.13603756]]
+cross 2.0 0 372 4.593778371810913
+cross 2.0 100 372 5.310994386672974
+cross 2.0 200 372 6.342876195907593
+cross 2.0 300 372 6.562653303146362
+RESULT 2.0 8 12 1e-07 time 7.169464349746704 
+ [[0.21760312        nan 0.27787957]
+ [0.21860678 0.81601169 0.27959852]
+ [0.21862752 0.82178782 0.27965662]
+ [0.21862857 0.82194905 0.27966081]
+ [0.21862872 0.82195947 0.2796614 ]
+ [0.21862876 0.82196134 0.27966152]
+ [0.21862878 0.82196194 0.27966156]
+ [0.21862878 0.82196216 0.27966157]
+ [0.21862878 0.82196224 0.27966158]]
+cross 6.0 0 408 4.91834282875061
+cross 6.0 100 408 5.481070041656494
+cross 6.0 200 408 6.538276195526123
+cross 6.0 300 408 6.762965202331543
+cross 6.0 400 408 6.847541809082031
+RESULT 6.0 8 12 1e-07 time 7.53197717666626 
+ [[0.44713745        nan 0.56599913]
+ [0.45130471 1.67676545 0.57197015]
+ [0.45150098 1.70071373 0.57231819]
+ [0.45151678 1.70221743 0.57235276]
+ [0.45151846 1.70236524 0.57235728]
+ [0.45151867 1.7023834  0.57235798]
+ [0.4515187  1.70238596 0.57235811]
+ [0.45151871 1.70238635 0.57235813]
+ [0.45151871 1.70238641 0.57235814]]
+cross 25.0 0 444 5.0217461585998535
+cross 25.0 100 444 5.539828538894653
+cross 25.0 200 444 6.5945329666137695
+cross 25.0 300 444 6.8075785636901855
+cross 25.0 400 444 6.899306774139404
+RESULT 25.0 8 12 1e-07 time 7.524617671966553 
+ [[1.02503043        nan 1.30421476]
+ [1.03630913 3.8438641  1.32040195]
+ [1.03699138 3.90872168 1.32156942]
+ [1.03706683 3.91396858 1.32171894]
+ [1.03707848 3.91468085 1.32174492]
+ [1.03708072 3.91480888 1.32175041]
+ [1.03708122 3.91483653 1.32175174]
+ [1.03708135 3.91484334 1.3217521 ]
+ [1.03708138 3.91484519 1.32175221]]
+cross 100.0 0 468 5.086013555526733
+cross 100.0 100 468 5.444483280181885
+cross 100.0 200 468 6.540424823760986
+cross 100.0 300 468 6.770632982254028
+cross 100.0 400 468 6.862515449523926
+RESULT 100.0 8 12 1e-07 time 7.533616065979004 
+ [[2.25401132        nan 2.87310124]
+ [2.27918562 8.45254244 2.90973202]
+ [2.28073671 8.59731104 2.91243661]
+ [2.28091248 8.609245   2.91279248]
+ [2.28094043 8.61090662 2.91285621]
+ [2.28094598 8.61121447 2.91287012]
+ [2.28094727 8.61128323 2.91287362]
+ [2.28094761 8.61130081 2.91287461]
+ [2.28094771 8.6113058  2.91287491]]
+{"0.3": [0.05336368914628628, 0.20072322289775626, 0.07029829964511582], "0.75": [0.10364170829152888, 0.38952301416815827, 0.13603756388707774], "2.0": [0.21862878295224025, 0.821962238147872, 0.2796615750425134], "6.0": [0.4515187088981087, 1.702386414620486, 0.5723581354503358], "25.0": [1.0370813844312734, 3.914845193445069, 1.3217522062283638], "100.0": [2.2809477070453528, 8.611305797362293, 2.912874906216516]}
+[1]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/work/run.py 8 12 1e-7 > /app/work/run8_12.log 2>&1
+-rw-r--r-- 1 root root 2.2K Oct 28 23:32 /app/work/B_T0.3_N8_p12_tol1e-07.npz
+-rw-r--r-- 1 root root 2.2K Oct 28 23:32 /app/work/B_T0.75_N8_p12_tol1e-07.npz
+-rw-r--r-- 1 root root 2.2K Oct 28 23:32 /app/work/B_T100.0_N8_p12_tol1e-07.npz
+-rw-r--r-- 1 root root 2.2K Oct 28 23:32 /app/work/B_T2.0_N8_p12_tol1e-07.npz
+-rw-r--r-- 1 root root 2.2K Oct 28 23:32 /app/work/B_T25.0_N8_p12_tol1e-07.npz
+-rw-r--r-- 1 root root 2.2K Oct 28 23:32 /app/work/B_T6.0_N8_p12_tol1e-07.npz
+[?2004hroot@6dab33ba4b1c:/app# cp /app/work/scatter.cpp /app/work/scatter_coarse.cpp
+[?2004l[?2004hroot@6dab33ba4b1c:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/work/scatter.cpp';s=open(p).read().replace('2e-7','2e-8').replace('dep>=16 || fabs(k-g)','dep>=18 || fabs(k-g)').replace('quad(f,0.,1.,2e-8)','quad(f,0.,1.,2e-9)');open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6dab33ba4b1c:/app# g++ -O3 -std=c++17 -fPIC -shared /app/work/scatter.cpp -o /app/work/scatter.so
+[?2004l[?2004hroot@6dab33ba4b1c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/run.py 12 24 2e-8 > /app/work/run12_24.log 2>&1 &
+[?2004l[1] 1844
+[?2004hroot@6dab33ba4b1c:/app# tail -20 /app/work/run12_24.log; date; ls /app/output
+[?2004lWed Oct 28 23:33:57 UTC 2026
+[?2004hroot@6dab33ba4b1c:/app# tail -25 /app/work/run12_24.log; for p in $(cat /proc/1844/task/1844/children); do awk '{print $1,$3,$14,$15}' /proc/$p/stat; done; date M[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Ke
+[?2004l1851 R 6560 3
+1852 R 6560 4
+Wed Oct 28 23:34:43 UTC 2026
+[?2004hroot@6dab33ba4b1c:/app# kill 1844 $(cat /proc/1844/task/1844/children) 2>/dev/null
+[?2004l[?2004hroot@6dab33ba4b1c:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/work/scatter.cpp';s=open(p).read().replace('quad(f,0.,1.,2e-9)','quad(f,0.,1.,E<.005?2e-8:2e-9,E<.005?2:0)');s=s.replace('2e-8*scale','(E<.005?2e-7:2e-8)*scale');open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[1]+  Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/work/run.py 12 24 2e-8 > /app/work/run12_24.log 2>&1
+[?2004hroot@6dab33ba4b1c:/app# g++ -O3 -std=c++17 -fPIC -shared /app/work/scatter.cpp -o /app/work/scatter.so
+[?2004l[?2004hroot@6dab33ba4b1c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/run.py 12 24 2e-8 > /app/work/run12_24.log 2>&1 &
+[?2004l[1] 1932
+[?2004hroot@6dab33ba4b1c:/app# grep -n 'theta\|ymax\|double d' /app/work/scatter.cpp; tail /app/work/run12_24.log
+[?2004l32: double deflection(double b2){
+40:  double theta=2*sqrt(b2)/r*quad(f,0.,1.,E<.005?2e-8:2e-9,E<.005?2:0);
+41:  return -cos(2*theta);
+57: void run(double* out){vector<double> res(L+1);double scale=max(1.,bc2);if(bc2>0){double d=(E<.005?2e-7:2e-8)*scale;vquad(0,bc2-d,0,scale,atol*scale,res);for(int l=1;l<=L;l++)res[l]+=2*d;}double ymax=400*max(1.,pow(E,-1./3));double xmax=(ymax-bc2)/(scale+ymax-bc2);vquad(0,xmax,1,scale,atol*scale,res);for(int l=0;l<=L;l++)out[l]=pi*res[l];}
+[?2004hroot@6dab33ba4b1c:/app# kill 1932 $(cat /proc/1932/task/1932/children) 2>/dev/null
+[?2004l[?2004hroot@6dab33ba4b1c:/app# cp /app/work/run.py /app/work/run_zero.py
+[?2004l[?2004hroot@6dab33ba4b1c:/app# sed -i 's/edges=np.array(\[0,/edges=np.array([.0001,/' /app/work/run.py
+[?2004l[?2004hroot@6dab33ba4b1c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/run.py 12 24 2e-8 > /app/work/run12_24.log 2>&1 &
+[?2004l[2] 1984
+[?2004hroot@6dab33ba4b1c:/app# tail -30 /app/work/run12_24.log; date
+[?2004lRESULT 0.3 12 24 2e-08 time 2.3738925457000732 
+ [[0.0530783         nan 0.06985574]
+ [0.05334971 0.19904361 0.07027034]
+ [0.05336249 0.20061148 0.07029552]
+ [0.05336352 0.2007112  0.07029791]
+ [0.05336366 0.20072118 0.07029824]
+ [0.05336369 0.20072282 0.0702983 ]
+ [0.05336369 0.20072316 0.07029832]
+ [0.0533637  0.20072323 0.07029832]
+ [0.0533637  0.20072325 0.07029832]
+ [0.0533637  0.20072325 0.07029832]
+ [0.0533637  0.20072325 0.07029832]
+ [0.0533637  0.20072325 0.07029832]
+ [0.0533637  0.20072325 0.07029832]]
+cross 0.75 0 696 5.82338285446167
+[1]-  Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/work/run.py 12 24 2e-8 > /app/work/run12_24.log 2>&1
+Wed Oct 28 23:36:55 UTC 2026
+[?2004hroot@6dab33ba4b1c:/app# tail -90 /app/work/run12_24.log; ls -lh /app/work/B*_N12*; grep -n 'y=bc2' /app/work/scatter.cpp
+[?2004lRESULT 0.3 12 24 2e-08 time 2.3738925457000732 
+ [[0.0530783         nan 0.06985574]
+ [0.05334971 0.19904361 0.07027034]
+ [0.05336249 0.20061148 0.07029552]
+ [0.05336352 0.2007112  0.07029791]
+ [0.05336366 0.20072118 0.07029824]
+ [0.05336369 0.20072282 0.0702983 ]
+ [0.05336369 0.20072316 0.07029832]
+ [0.0533637  0.20072323 0.07029832]
+ [0.0533637  0.20072325 0.07029832]
+ [0.0533637  0.20072325 0.07029832]
+ [0.0533637  0.20072325 0.07029832]
+ [0.0533637  0.20072325 0.07029832]
+ [0.0533637  0.20072325 0.07029832]]
+cross 0.75 0 696 5.82338285446167
+cross 0.75 100 696 33.03707551956177
+cross 0.75 200 696 36.97085738182068
+cross 0.75 300 696 39.679811000823975
+cross 0.75 400 696 41.724135637283325
+cross 0.75 500 696 42.26579570770264
+cross 0.75 600 696 42.49706029891968
+RESULT 0.75 12 24 2e-08 time 44.80721163749695 
+ [[0.10325312        nan 0.13538208]
+ [0.10361355 0.38719921 0.13599101]
+ [0.10363777 0.38929027 0.13603032]
+ [0.10364116 0.38948299 0.1360363 ]
+ [0.10364164 0.38951666 0.13603735]
+ [0.1036417  0.38952207 0.13603754]
+ [0.10364171 0.38952288 0.13603758]
+ [0.10364171 0.38952301 0.13603758]
+ [0.10364171 0.38952304 0.13603759]
+ [0.10364171 0.38952304 0.13603759]
+ [0.10364171 0.38952304 0.13603759]
+ [0.10364171 0.38952304 0.13603759]
+ [0.10364171 0.38952304 0.13603759]]
+cross 2.0 0 744 6.1341729164123535
+-rw-r--r-- 1 root root 4.3K Oct 28 23:36 /app/work/B_T0.3_N12_p24_tol2e-08.npz
+-rw-r--r-- 1 root root 4.3K Oct 28 23:37 /app/work/B_T0.75_N12_p24_tol2e-08.npz
+50:  auto f=[&](double x){double y,jac;if(mode==0){y=x;jac=1;}else {y=bc2+(bc2>0 ? (E<.005?2e-7:2e-8)*scale : 0)+scale*x/(1-x);jac=scale/((1-x)*(1-x));} integrand(y,jac,v.data());};
+[?2004hroot@6dab33ba4b1c:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+[?2004l[?2004h> import sys,os
+[?2004l[?2004h> sys.path.insert(0,'/app/work');from solve import *
+[?2004l[?2004h> for T in [.3,.75,2.,6.,25.,100.]:
+[?2004l[?2004h>  a=f'/app/work/B_T{T}_N12_p24_tol2e-08.npz'
+[?2004l[?2004h>  if not os.path.exists(a):continue
+[?2004l[?2004h>  old=coefficients(np.load(f'/app/work/B_T{T}_N8_p12_tol1e-07.npz')['B'],T)[-1]
+[?2004l[?2004h>  seq=coefficients(np.load(a)['B'],T)
+[?2004l[?2004h>  print(T,'refined',seq[-1],'relative change',seq[-1]/old-1,'last basis increment',seq[-1]/seq[-2]-1)
+[?2004l[?2004h> PY
+[?2004l0.3 refined [0.0533637  0.20072325 0.07029832] relative change [1.16627101e-07 1.41379184e-07 2.95028202e-07] last basis increment [3.96638278e-11 6.19158502e-10 1.08036691e-10]
+0.75 refined [0.10364171 0.38952304 0.13603759] relative change [5.33666433e-08 7.68785589e-08 1.71662294e-07] last basis increment [4.17119672e-11 6.15576257e-10 1.23636656e-10]
+2.0 refined [0.21862878 0.82196228 0.27966159] relative change [7.08243242e-09 4.85478138e-08 3.67733433e-08] last basis increment [6.02549122e-11 1.00007047e-09 1.69660508e-10]
+[?2004hroot@6dab33ba4b1c:/app# tail -20 /app/work/run12_24.log
+[?2004lcross 2.0 200 744 37.720394134521484
+cross 2.0 300 744 40.491235971450806
+cross 2.0 400 744 42.48489999771118
+cross 2.0 500 744 43.01328754425049
+cross 2.0 600 744 43.25700759887695
+cross 2.0 700 744 43.40920281410217
+RESULT 2.0 12 24 2e-08 time 45.727667570114136 
+ [[0.21760312        nan 0.27787957]
+ [0.21860678 0.8160117  0.27959852]
+ [0.21862752 0.82178782 0.27965663]
+ [0.21862857 0.82194905 0.27966082]
+ [0.21862872 0.82195948 0.2796614 ]
+ [0.21862876 0.82196134 0.27966153]
+ [0.21862878 0.82196195 0.27966157]
+ [0.21862878 0.82196217 0.27966158]
+ [0.21862878 0.82196224 0.27966158]
+ [0.21862878 0.82196227 0.27966158]
+ [0.21862878 0.82196227 0.27966159]
+ [0.21862878 0.82196228 0.27966159]
+ [0.21862878 0.82196228 0.27966159]]
+[?2004hroot@6dab33ba4b1c:/app# tail -35 /app/work/run12_24.log; date
+[?2004l [0.21862752 0.82178782 0.27965663]
+ [0.21862857 0.82194905 0.27966082]
+ [0.21862872 0.82195948 0.2796614 ]
+ [0.21862876 0.82196134 0.27966153]
+ [0.21862878 0.82196195 0.27966157]
+ [0.21862878 0.82196217 0.27966158]
+ [0.21862878 0.82196224 0.27966158]
+ [0.21862878 0.82196227 0.27966158]
+ [0.21862878 0.82196227 0.27966159]
+ [0.21862878 0.82196228 0.27966159]
+ [0.21862878 0.82196228 0.27966159]]
+cross 6.0 0 816 5.820021152496338
+cross 6.0 100 816 33.64244508743286
+cross 6.0 200 816 37.70028519630432
+cross 6.0 300 816 40.273197174072266
+cross 6.0 400 816 42.12391471862793
+cross 6.0 500 816 42.64726495742798
+cross 6.0 600 816 42.88162803649902
+cross 6.0 700 816 43.02533411979675
+cross 6.0 800 816 43.18248772621155
+RESULT 6.0 12 24 2e-08 time 45.931499004364014 
+ [[0.44713745        nan 0.56599913]
+ [0.45130471 1.67676545 0.57197015]
+ [0.45150098 1.70071373 0.57231819]
+ [0.45151678 1.70221743 0.57235276]
+ [0.45151846 1.70236524 0.57235728]
+ [0.45151867 1.7023834  0.57235798]
+ [0.4515187  1.70238596 0.57235811]
+ [0.45151871 1.70238635 0.57235813]
+ [0.45151871 1.70238641 0.57235814]
+ [0.45151871 1.70238643 0.57235814]
+ [0.45151871 1.70238643 0.57235814]
+ [0.45151871 1.70238643 0.57235814]
+ [0.45151871 1.70238643 0.57235814]]
+cross 25.0 0 888 6.144803762435913
+Wed Oct 28 23:39:06 UTC 2026
+[?2004hroot@6dab33ba4b1c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/run.py 12 48 2e-8 > /app/work/run12_48.log 2>&1 &
+[?2004l[3] 2121
+[?2004hroot@6dab33ba4b1c:/app# tail -25 /app/work/run12_24.log
+[?2004l [0.45151871 1.70238643 0.57235814]]
+cross 25.0 0 888 6.144803762435913
+cross 25.0 100 888 32.80716609954834
+cross 25.0 200 888 37.17908501625061
+cross 25.0 300 888 40.044079065322876
+cross 25.0 400 888 42.1321165561676
+cross 25.0 500 888 42.68604373931885
+cross 25.0 600 888 42.93964505195618
+cross 25.0 700 888 43.088048696517944
+cross 25.0 800 888 43.23690986633301
+RESULT 25.0 12 24 2e-08 time 46.48925495147705 
+ [[1.02503043        nan 1.30421476]
+ [1.03630913 3.8438641  1.32040195]
+ [1.03699138 3.90872168 1.32156942]
+ [1.03706683 3.91396858 1.32171894]
+ [1.03707848 3.91468085 1.32174492]
+ [1.03708072 3.91480888 1.32175041]
+ [1.03708122 3.91483653 1.32175174]
+ [1.03708135 3.91484334 1.3217521 ]
+ [1.03708138 3.91484519 1.32175221]
+ [1.0370814  3.91484574 1.32175224]
+ [1.0370814  3.91484592 1.32175225]
+ [1.0370814  3.91484598 1.32175225]
+ [1.0370814  3.914846   1.32175226]]
+cross 100.0 0 936 5.675817251205444
+[?2004hroot@6dab33ba4b1c:/app# tail -25 /app/work/run12_24.log; tail -25 /app/work/run12_48.log; date
+[?2004lcross 100.0 0 936 5.675817251205444
+cross 100.0 100 936 34.455674171447754
+cross 100.0 200 936 42.73006725311279
+cross 100.0 300 936 48.23973608016968
+cross 100.0 400 936 52.44005036354065
+cross 100.0 500 936 53.461808919906616
+cross 100.0 600 936 53.94866704940796
+cross 100.0 700 936 54.238213777542114
+cross 100.0 800 936 54.532875776290894
+cross 100.0 900 936 54.82379221916199
+RESULT 100.0 12 24 2e-08 time 60.040135622024536 
+ [[2.25401132        nan 2.87310124]
+ [2.27918562 8.45254244 2.90973202]
+ [2.28073671 8.59731104 2.91243661]
+ [2.28091248 8.609245   2.91279248]
+ [2.28094043 8.61090662 2.91285621]
+ [2.28094598 8.61121447 2.91287012]
+ [2.28094727 8.61128323 2.91287362]
+ [2.28094761 8.61130081 2.91287461]
+ [2.28094771 8.6113058  2.91287491]
+ [2.28094774 8.61130734 2.912875  ]
+ [2.28094775 8.61130785 2.91287504]
+ [2.28094775 8.61130802 2.91287505]
+ [2.28094775 8.61130809 2.91287506]]
+{"0.3": [0.053363695369938624, 0.2007232512758418, 0.07029832038509679], "0.75": [0.10364171382253896, 0.3895230441141262, 0.136037587239598], "2.0": [0.2186287845006638, 0.8219622780523416, 0.27966158532660446], "6.0": [0.45151870911595177, 1.702386428917978, 0.5723581381745925], "25.0": [1.0370814000620778, 3.91484599550052, 1.3217522560408854], "100.0": [2.2809477533116755, 8.611308089337639, 2.91287505604535]}
+[2]-  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/work/run.py 12 24 2e-8 > /app/work/run12_24.log 2>&1
+cross 0.3 0 1296 9.191230297088623
+cross 0.3 100 1296 62.99625587463379
+Wed Oct 28 23:41:28 UTC 2026
+[?2004hroot@6dab33ba4b1c:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+[?2004l[?2004h> import sys,os
+[?2004l[?2004h> sys.path.insert(0,'/app/work');from solve import *
+[?2004l[?2004h> np.set_printoptions(precision=13)
+[?2004l[?2004h> for T in [.3,.75,2.,6.,25.,100.]:
+[?2004l[?2004h>  a=f'/app/work/B_T{T}_N12_p24_tol2e-08.npz';b=f'/app/work/B_T{T}_N12_p48_tol2e-08.npz'
+[?2004l[?2004h>  if not os.path.exists(a):continue
+[?2004l[?2004h>  s=coefficients(np.load(a)['B'],T)
+[?2004l[?2004h>  print(T,s[-1],'basis increment',s[-1]/s[-2]-1)
+[?2004l[?2004h>  if os.path.exists(b):print('48-point change',coefficients(np.load(b)['B'],T)[-1]/s[-1]-1)
+[?2004l[?2004h> PY
+[?2004l0.3 [0.0533636953699 0.2007232512758 0.0702983203851] basis increment [3.9663827777758e-11 6.1915850224636e-10 1.0803669070469e-10]
+0.75 [0.1036417138225 0.3895230441141 0.1360375872396] basis increment [4.1711967213587e-11 6.1557625663511e-10 1.2363665646831e-10]
+2.0 [0.2186287845007 0.8219622780523 0.2796615853266] basis increment [6.0254912170876e-11 1.0000704708801e-09 1.6966050786493e-10]
+6.0 [0.451518709116  1.702386428918  0.5723581381746] basis increment [2.7431390492438e-12 5.7547522303025e-11 3.4533265136361e-11]
+25.0 [1.0370814000621 3.9148459955005 1.3217522560409] basis increment [3.9448422306521e-10 5.2246067472339e-09 1.0795198068791e-09]
+100.0 [2.2809477533117 8.6113080893376 2.9128750560453] basis increment [5.9757621073686e-10 7.6294388584586e-09 1.6466032981555e-09]
+[?2004hroot@6dab33ba4b1c:/app# cat > /app/work/finalize.py <<'PY'
+[?2004l[?2004h> from solve import *
+[?2004l[?2004h> import json
+[?2004l[?2004h> Ts=[('0.3',.3),('0.75',.75),('2',2.),('6',6.),('25',25.),('100',100.)]
+[?2004l[?2004h> result={};ready=True
+[?2004l[?2004h> for key,T in Ts:
+[?2004l[?2004h>  a=f'/app/work/B_T{T}_N12_p24_tol2e-08.npz';b=f'/app/work/B_T{T}_N12_p48_tol2e-08.npz'
+[?2004l[?2004h>  if not os.path.exists(b):print(key,'pending');ready=False;continue
+[?2004l[?2004h>  old=coefficients(np.load(a)['B'],T)[-1]
+[?2004l[?2004h>  seq=coefficients(np.load(b)['B'],T);new=seq[-1]
+[?2004l[?2004h>  diff=np.abs(new/old-1);inc=np.abs(new/seq[-2]-1)
+[?2004l[?2004h>  print(key,'values',new,'quadrature difference',diff,'basis increment',inc)
+[?2004l[?2004h>  assert np.max(diff)<1e-6 and np.max(inc)<1e-7
+[?2004l[?2004h>  result[key]=dict(zip(['viscosity','thermal_conductivity','self_diffusion'],map(float,new)))
+[?2004l[?2004h> if ready:
+[?2004l[?2004h>  path='/app/output/transport.json'
+[?2004l[?2004h>  if os.path.lexists(path):os.unlink(path)
+[?2004l[?2004h>  with open(path,'w') as f:json.dump(result,f,indent=2,allow_nan=False);f.write('\n')
+[?2004l[?2004h>  assert os.path.isfile(path) and not os.path.islink(path)
+[?2004l[?2004h>  assert os.path.getsize(path)<20971520
+[?2004l[?2004h>  assert list(result)==[k for k,t in Ts]
+[?2004l[?2004h>  for v in result.values():
+[?2004l[?2004h>   assert set(v)=={'viscosity','thermal_conductivity','self_diffusion'}
+[?2004l[?2004h>   assert all(isinstance(x,float) and np.isfinite(x) and x>0 for x in v.values())
+[?2004l[?2004h>  print('FINAL OUTPUT WRITTEN AND VALIDATED')
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@6dab33ba4b1c:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/finalize.py; tail -20 /app/work/run12_48.log
+[?2004l0.3 values [0.0533637  0.20072325 0.07029832] quadrature difference [6.40176800e-11 6.50777210e-11 1.07127476e-08] basis increment [3.96636057e-11 6.19157836e-10 1.08037801e-10]
+0.75 pending
+2 pending
+6 pending
+25 pending
+100 pending
+cross 0.3 800 1296 94.46016836166382
+cross 0.3 900 1296 95.09936261177063
+cross 0.3 1000 1296 95.52127361297607
+cross 0.3 1100 1296 95.80554246902466
+cross 0.3 1200 1296 96.00930571556091
+RESULT 0.3 12 48 2e-08 time 100.79380774497986 
+ [[0.0530783         nan 0.06985574]
+ [0.05334971 0.19904361 0.07027034]
+ [0.05336249 0.20061148 0.07029552]
+ [0.05336352 0.2007112  0.07029791]
+ [0.05336366 0.20072118 0.07029824]
+ [0.05336369 0.20072282 0.0702983 ]
+ [0.05336369 0.20072316 0.07029832]
+ [0.0533637  0.20072323 0.07029832]
+ [0.0533637  0.20072325 0.07029832]
+ [0.0533637  0.20072325 0.07029832]
+ [0.0533637  0.20072325 0.07029832]
+ [0.0533637  0.20072325 0.07029832]
+ [0.0533637  0.20072325 0.07029832]]
+cross 0.75 0 1392 4.110828161239624
+[?2004hroot@6dab33ba4b1c:/app# (while [ ! -f /app/work/B_T100.0_N12_p48_tol2e-08.npz ]; do sleep 5; done; OPENBLAS_NUM_THREADS=1 python3 /app/work/finalize.py > /app/work/final_checks.log 2>&1) &
+[?2004l[4] 2214
+[?2004hroot@6dab33ba4b1c:/app# tail -8 /app/work/run12_48.log
+[?2004l [0.10364171 0.38952288 0.13603758]
+ [0.10364171 0.38952301 0.13603758]
+ [0.10364171 0.38952304 0.13603759]
+ [0.10364171 0.38952304 0.13603759]
+ [0.10364171 0.38952304 0.13603759]
+ [0.10364171 0.38952304 0.13603759]
+ [0.10364171 0.38952304 0.13603759]]
+cross 2.0 0 1488 3.899059772491455
+[?2004hroot@6dab33ba4b1c:/app# tail -20 /app/work/run12_48.log; cat /app/work/final_checks.log 2>/dev/null; date
+[?2004lcross 2.0 1000 1488 76.61561465263367
+cross 2.0 1100 1488 76.89556360244751
+cross 2.0 1200 1488 77.0928053855896
+cross 2.0 1300 1488 77.25268077850342
+cross 2.0 1400 1488 77.398681640625
+RESULT 2.0 12 48 2e-08 time 82.1463634967804 
+ [[0.21760312        nan 0.27787957]
+ [0.21860678 0.8160117  0.27959852]
+ [0.21862752 0.82178782 0.27965663]
+ [0.21862857 0.82194905 0.27966082]
+ [0.21862872 0.82195948 0.2796614 ]
+ [0.21862876 0.82196134 0.27966153]
+ [0.21862878 0.82196195 0.27966157]
+ [0.21862878 0.82196217 0.27966158]
+ [0.21862878 0.82196224 0.27966158]
+ [0.21862878 0.82196227 0.27966158]
+ [0.21862878 0.82196227 0.27966159]
+ [0.21862878 0.82196228 0.27966159]
+ [0.21862878 0.82196228 0.27966159]]
+cross 6.0 0 1632 4.464539527893066
+Wed Oct 28 23:45:02 UTC 2026
+[?2004hroot@6dab33ba4b1c:/app# tail -6 /app/work/run12_48.log; cat /app/work/final_checks.log 2>/dev/null
+[?2004l [0.45151871 1.70238643 0.57235814]
+ [0.45151871 1.70238643 0.57235814]
+ [0.45151871 1.70238643 0.57235814]
+ [0.45151871 1.70238643 0.57235814]]
+cross 25.0 0 1776 4.5107786655426025
+cross 25.0 100 1776 50.132097482681274
+[?2004hroot@6dab33ba4b1c:/app# tail -20 /app/work/run12_48.log; cat /app/work/final_checks.log 2>/dev/null; ls -l /app/output
+[?2004lcross 25.0 1300 1776 82.9127676486969
+cross 25.0 1400 1776 83.06290245056152
+cross 25.0 1500 1776 83.20264220237732
+cross 25.0 1600 1776 83.34790563583374
+cross 25.0 1700 1776 83.48257184028625
+RESULT 25.0 12 48 2e-08 time 89.11501502990723 
+ [[1.02503043        nan 1.30421476]
+ [1.03630913 3.8438641  1.32040195]
+ [1.03699138 3.90872168 1.32156942]
+ [1.03706683 3.91396858 1.32171894]
+ [1.03707848 3.91468085 1.32174492]
+ [1.03708072 3.91480888 1.32175041]
+ [1.03708122 3.91483653 1.32175174]
+ [1.03708135 3.91484334 1.3217521 ]
+ [1.03708138 3.91484519 1.32175221]
+ [1.0370814  3.91484574 1.32175224]
+ [1.0370814  3.91484592 1.32175225]
+ [1.0370814  3.91484598 1.32175225]
+ [1.0370814  3.914846   1.32175226]]
+cross 100.0 0 1872 3.966262102127075
+total 0
+[?2004hroot@6dab33ba4b1c:/app# cat /app/work/final_checks.log 2>/dev/null; tail -8 /app/work/run12_48.log; if [ -f /app/output/transport.json ]; then cat /app/output/transport.json; stat -c '%F %s bytes' /app/output/transport.json; fi
+[?2004l0.3 values [0.0533637  0.20072325 0.07029832] quadrature difference [6.40176800e-11 6.50777210e-11 1.07127476e-08] basis increment [3.96636057e-11 6.19157836e-10 1.08037801e-10]
+0.75 values [0.10364171 0.38952304 0.13603759] quadrature difference [6.13671336e-11 6.23501251e-11 3.21203064e-11] basis increment [4.17119672e-11 6.15576479e-10 1.23637101e-10]
+2 values [0.21862878 0.82196228 0.27966159] quadrature difference [8.32622860e-12 8.80318041e-12 1.10464971e-11] basis increment [6.02549122e-11 1.00007069e-09 1.69660286e-10]
+6 values [0.45151871 1.70238643 0.57235814] quadrature difference [2.36033415e-13 2.68451927e-13 7.59614593e-13] basis increment [2.74336109e-12 5.75475223e-11 3.45337092e-11]
+25 values [1.0370814  3.914846   1.32175226] quadrature difference [9.89208715e-14 9.73665593e-14 1.93178806e-14] basis increment [3.94484001e-10 5.22460630e-09 1.07952025e-09]
+100 values [2.28094775 8.61130809 2.91287506] quadrature difference [2.06501483e-14 2.15383267e-14 4.10782519e-15] basis increment [5.97576211e-10 7.62943841e-09 1.64660330e-09]
+FINAL OUTPUT WRITTEN AND VALIDATED
+[3]-  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/work/run.py 12 48 2e-8 > /app/work/run12_48.log 2>&1
+[4]+  Done                    ( while [ ! -f /app/work/B_T100.0_N12_p48_tol2e-08.npz ]; do
+    sleep 5;
+done; OPENBLAS_NUM_THREADS=1 python3 /app/work/finalize.py > /app/work/final_checks.log 2>&1 )
+ [2.28094727 8.61128323 2.91287362]
+ [2.28094761 8.61130081 2.91287461]
+ [2.28094771 8.6113058  2.91287491]
+ [2.28094774 8.61130734 2.912875  ]
+ [2.28094775 8.61130785 2.91287504]
+ [2.28094775 8.61130802 2.91287505]
+ [2.28094775 8.61130809 2.91287506]]
+{"0.3": [0.05336369537335485, 0.20072325128890442, 0.07029832113818495], "0.75": [0.10364171382889915, 0.38952304413841304, 0.13603758724396756], "2.0": [0.21862878450248419, 0.8219622780595774, 0.2796615853296937], "6.0": [0.45151870911605835, 1.702386428918435, 0.5723581381750272], "25.0": [1.0370814000619752, 3.914845995500139, 1.3217522560408599], "100.0": [2.2809477533117226, 8.611308089337824, 2.912875056045338]}
+{
+  "0.3": {
+    "viscosity": 0.05336369537335485,
+    "thermal_conductivity": 0.20072325128890442,
+    "self_diffusion": 0.07029832113818495
+  },
+  "0.75": {
+    "viscosity": 0.10364171382889915,
+    "thermal_conductivity": 0.38952304413841304,
+    "self_diffusion": 0.13603758724396756
+  },
+  "2": {
+    "viscosity": 0.21862878450248419,
+    "thermal_conductivity": 0.8219622780595774,
+    "self_diffusion": 0.2796615853296937
+  },
+  "6": {
+    "viscosity": 0.45151870911605835,
+    "thermal_conductivity": 1.702386428918435,
+    "self_diffusion": 0.5723581381750272
+  },
+  "25": {
+    "viscosity": 1.0370814000619752,
+    "thermal_conductivity": 3.914845995500139,
+    "self_diffusion": 1.3217522560408599
+  },
+  "100": {
+    "viscosity": 2.2809477533117226,
+    "thermal_conductivity": 8.611308089337824,
+    "self_diffusion": 2.912875056045338
+  }
+}
+regular file 855 bytes
+[?2004hroot@6dab33ba4b1c:/app# 

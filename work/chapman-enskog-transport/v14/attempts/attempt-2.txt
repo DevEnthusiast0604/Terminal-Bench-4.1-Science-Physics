@@ -1,0 +1,2596 @@
+#### step 2 18:19:06
+MSG: Analysis: The workspace is empty so far. This task requires a self-contained numerical solver: quantum phase shifts, internally averaged elastic collision kernels, and a converged solution of the first-order Chapman–Enskog equations, including equilibrium rotational conversion in the heat flux.
+Plan: Inspect the available environment and create the output directory. Then derive and implement the scattering and collision-bracket solvers, and validate their numerical convergence before producing the final program.
+CMD: mkdir -p /app/output && ls -la /app && python3 - <<'PY'
+import sys,numpy,scipy
+print(sys.version)
+print(numpy.__version__, scipy.__version__)
+PY
+
+OBS: New Terminal Output:
+root@950379d48da3:/app# mkdir -p /app/output && ls -la /app && python3 - <<'PY'
+> import sys,numpy,scipy
+> print(sys.version)
+> print(numpy.__version__, scipy.__version__)
+> PY
+total 12
+drwxr-xr-x 1 root root 4096 Nov  3 00:51 .
+drwxr-xr-x 1 root root 4096 Nov  5 18:18 ..
+drwxr-xr-x 2 root root 4096 Nov  3 00:51 output
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#### step 3 18:21:15
+MSG: Analysis: Both rotational species have the same molecular mass, which substantially simplifies the collision brackets. Their different internal degeneracies affect only the exchange-averaged same-species cross sections. The equilibrium-conversion heat source can be written as the usual translational heat source plus an internal-energy-weighted diffusion source. A Laguerre-polynomial Galerkin solver can therefore handle viscosity and conductivity together.
+Plan: Check that the numerical libraries are available, then start a development implementation of the analytic Gaussian collision brackets. These brackets reduce the velocity integrations to energy and scattering-angle integrations, making a high-order, converged Chapman–Enskog calculation feasible.
+CMD: 
+
+CMD: python3 -c 'import numpy,scipy; print(numpy.__version__,scipy.__version__)'; which gcc; ls -la /app/output
+
+OBS: New Terminal Output:
+
+drwxr-xr-x 2 root root 4096 Nov  3 00:51 output
+3.12.14 (main, Sep  1 2026, 00:10:15) [GCC 12.2.0]
+2.3.3 1.18.1
+root@950379d48da3:/app#
+root@950379d48da3:/app# python3 -c 'import numpy,scipy; print(numpy.__version__,scipy.__version__)'; which gcc; ls -la /app/output
+2.3.3 1.18.1
+total 8
+drwxr-xr-x 2 root root 4096 Nov  3 00:51 .
+drwxr-xr-x 1 root root 4096 Nov  3 00:51 ..
+root@950379d48da3:/app#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#### step 4 18:25:09
+MSG: Analysis: The equal-mass collision brackets admit an analytic Gaussian generating function. This avoids expensive six-dimensional velocity quadrature: each bracket becomes a polynomial in collision energy and scattering-angle cosine. I will generate these universal polynomial coefficients once and embed them in the final script. The remaining runtime work is quantum scattering and one-dimensional energy integration.
+Plan: Create a development module that generates vector and traceless-tensor collision-bracket polynomials using truncated bivariate generating functions. Validate the lowest coefficients against direct Gaussian quadrature and then use them for the transport solver.
+CMD: cat > /app/genbr.py <<'PY'
+import numpy as np
+from scipy.special import poch, factorial
+import time
+
+# sparse polynomials in s,t,z
+
+def mul(a,b,N):
+    out={}
+    for (i,j,q),v in a.items():
+        for (ii,jj,qq),w in b.items():
+            if i+ii<=N and j+jj<=N:
+                key=(i+ii,j+jj,q+qq)
+                out[key]=out.get(key,0)+v*w
+    return {k:v for k,v in out.items() if v}
+
+def add(a,b,scale=1):
+    out=dict(a)
+    for key,v in b.items(): out[key]=out.get(key,0)+scale*v
+    return {k:v for k,v in out.items() if v}
+
+numer={(1,0,0):1,(0,1,0):1,(1,1,0):-1,(1,1,1):-1}
+H={(0,0,1):2,(1,0,1):-1,(0,1,1):-1,(1,1,1):1,(1,0,0):-1,(0,1,0):-1,(1,1,0):1}
+AA={(0,0,0):4,(0,1,0):-4,(0,2,0):2,(0,1,1):-4,(0,2,1):2}
+BB={(j,i,q):v for (i,j,q),v in AA.items()}
+
+def generate(N,rank):
+    dt=np.longdouble
+    out=np.zeros((N+1,N+1,2*N+rank+1,N+rank+1),dtype=dt)
+    if rank==1:
+        terms=[({(0,0,0):1},0,2.5,1.5,False),(H,1,3.5,1.,True)]
+    else:
+        HH=add(mul(H,H,N),mul(AA,BB,N),-1/12)
+        terms=[({(0,0,0):1},0,3.5,2.5,False),(H,1,4.5,10/3,False),(HH,2,5.5,1.,False)]
+    power={(0,0,0):1}
+    for k in range(2*N+1):
+        for poly,shift,beta,pref,cumulative in terms:
+            p=k+shift
+            buf=np.zeros((N+1,N+1,N+rank+1),dtype=dt)
+            expr=mul(power,poly,N)
+            # coefficient of 2^(3/2) (2-s-t)^(-beta-k)
+            denom=np.zeros((N+1,N+1),dtype=dt)
+            v=dt(2)**dt(1.5-beta-k)*dt(pref)*((-1)**k)/dt(factorial(k,exact=True))
+            for i in range(N+1):
+                for j in range(N+1):
+                    h=i+j
+                    pc=dt(1)
+                    for a in range(h):pc*=dt(beta+k+a)
+                    denom[i,j]=v*pc/(dt(2)**h*dt(factorial(i,exact=True))*dt(factorial(j,exact=True)))
+            for (i,j,q),w in expr.items():
+                if q<=N+rank:buf[i:,j:,q]+=dt(w)*denom[:N+1-i,:N+1-j]
+            if cumulative:buf=np.cumsum(np.cumsum(buf,axis=0),axis=1)
+            out[:,:,p,:]+=buf
+        power=mul(power,numer,N)
+    # monomial cosine -> Legendre expansion
+    from numpy.polynomial.legendre import leggauss, legvander
+    z,w=leggauss(N+rank+2)
+    tr=np.array([[sum(w*z**q*legvander(z,N+rank)[:,j])*(2*j+1)/2 for j in range(N+rank+1)] for q in range(N+rank+1)],dtype=dt)
+    # use exact recurrence to eliminate tiny coefficients
+    tr[:]=0
+    for q in range(N+rank+1):
+        for j in range(q%2,q+1,2):
+            # integral z^q Pj = 2 q! / ((q-j)!! (q+j+1)!!)
+            def dfact(a):
+                v=1
+                for b in range(a,0,-2):v*=b
+                return v
+            tr[q,j]=dt(2*j+1)*dt(factorial(q,exact=True))/dt(dfact(q-j)*dfact(q+j+1))
+    F=np.einsum('nmpq,qj->nmpj',out,tr)
+    U=-2*F; V=-2*F*((-1)**np.arange(N+rank+1))
+    U[:,:,:,0]+=2*np.sum(out,axis=-1)
+    V[:,:,:,0]+=2*np.sum(out*((-1)**np.arange(N+rank+1)),axis=-1)
+    return np.array(U,dtype=float),np.array(V,dtype=float),out
+
+if __name__=='__main__':
+    import sys
+    N=int(sys.argv[1]) if len(sys.argv)>1 else 8
+    for rank in [1,2]:
+        start=time.time(); U,V,F=generate(N,rank)
+        np.savez_compressed('/app/br%d_%d.npz'%(rank,N),U=U,V=V,F=np.array(F,dtype=float))
+        print(rank,N,'seconds',time.time()-start,'maxcoef',np.max(abs(U)))
+        print('U00',U[0,0]);print('V00',V[0,0])
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/genbr.py 8 > /app/genlog 2>&1 &
+
+OBS: )),axis=-1)
+>     return np.array(U,dtype=float),np.array(V,dtype=float),out
+>
+> if __name__=='__main__':
+>     import sys
+>     N=int(sys.argv[1]) if len(sys.argv)>1 else 8
+>     for rank in [1,2]:
+>         start=time.time(); U,V,F=generate(N,rank)
+>         np.savez_compressed('/app/br%d_%d.npz'%(rank,N),U=U,V=V,F=np.array(F,dtype=float))
+>         print(rank,N,'seconds',time.time()-start,'maxcoef',np.max(abs(U)))
+>         print('U00',U[0,0]);print('V00',V[0,0])
+> PY
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/genbr.py 8 > /app/genlog 2>&1 &
+[1] 263
+root@950379d48da3:/app#
+
+
+#### step 5 18:26:24
+MSG: Analysis: The universal bracket derivation is in place. I identified a generating-function factor that needs correcting before using the vector brackets. Next I will verify the transport normalization against the analytically known hard-sphere first approximation, then implement quantum scattering with converged radial and energy quadrature.
+Plan: Correct the vector generating function, regenerate the tables, and add a small hard-sphere test. This will check the collision-bracket factors, momentum conservation, and viscosity/conductivity prefactors independently of the quantum solver.
+CMD: sed -i 's/(H,1,3.5,1.,True)/(H,1,3.5,1.,False)/' /app/genbr.py
+cat /app/genlog | head; ps -ef | head
+OPENBLAS_NUM_THREADS=1 python3 /app/genbr.py 8 > /app/genlog 2>&1 &
+cat > /app/testbr.py <<'PY'
+import numpy as np
+from scipy.special import gamma
+for rank in [1,2]:
+ d=np.load('/app/br%d_8.npz'%rank);U=d['U'];V=d['V'];
+ p=np.arange(U.shape[2]); moments=np.zeros(U.shape[2:]);moments[:,0]=2*np.sqrt(2*np.pi)*gamma(p+2)
+ mat=np.einsum('nmpj,pj->nm',U+V,moments)/2
+ print(rank,'matrix small',mat[:3,:3])
+ for n in [1,2,3,4,5,6,7,8]:
+  b=np.zeros(n+1);b[1 if rank==1 else 0]= -15/4 if rank==1 else 5/2
+  if rank==1:val=np.sqrt(2)/3*b[1:]@np.linalg.solve(mat[1:n+1,1:n+1],b[1:])
+  else:val=2/(5*np.sqrt(2))*b@np.linalg.solve(mat[:n+1,:n+1],b)
+  print(n,val)
+PY
+
+OBS: mpy as np
+> from scipy.special import gamma
+> for rank in [1,2]:
+>  d=np.load('/app/br%d_8.npz'%rank);U=d['U'];V=d['V'];
+>  p=np.arange(U.shape[2]); moments=np.zeros(U.shape[2:]);moments[:,0]=2*np.sqrt(2*np.pi)*gamma(p+2)
+>  mat=np.einsum('nmpj,pj->nm',U+V,moments)/2
+>  print(rank,'matrix small',mat[:3,:3])
+>  for n in [1,2,3,4,5,6,7,8]:
+>   b=np.zeros(n+1);b[1 if rank==1 else 0]= -15/4 if rank==1 else 5/2
+>   if rank==1:val=np.sqrt(2)/3*b[1:]@np.linalg.solve(mat[1:n+1,1:n+1],b[1:])
+>   else:val=2/(5*np.sqrt(2))*b@np.linalg.solve(mat[:n+1,:n+1],b)
+>   print(n,val)
+> PY
+root@950379d48da3:/app#
+
+
+#### step 6 18:26:51
+MSG: Analysis: The corrected bracket generator is fast enough to regenerate during development. The hard-sphere test now provides a direct check of the polynomial algebra. Quantum phase shifts must be computed accurately over a continuous energy interval, including possible narrow shape resonances, so a fixed sparse energy grid would not be sufficient.
+Plan: Run the normalization test and implement a vectorized radial solver. Initially use adaptive high-order ODE integration with an asymptotic tail treatment, then compare its phase shifts under stricter tolerances and larger radial cutoffs.
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/testbr.py
+cat > /app/scatter.py <<'PY'
+import numpy as np
+from scipy.special import spherical_jn,spherical_yn
+from scipy.integrate import solve_ivp
+import time
+
+def phases(energies,A,L,M,tol=2e-10,R=60.,lmax=26):
+    energies=np.atleast_1d(energies)
+    alpha=4*np.pi**2*M/L**2
+    k=np.sqrt(alpha*energies)
+    ls=np.arange(lmax+1);ll=ls*(ls+1)
+    # start well inside the forbidden repulsive region
+    r0=A+(1-A)*(4*alpha/3500.)**(1/10)
+    def pot(r):
+        y=(1-A)/(r-A);return 4*(y**12-y**6)
+    f0=ll[None,:]/r0**2+alpha*(pot(r0)-energies[:,None])
+    # inward boundary condition memory is exponentially lost
+    y=np.zeros((2,len(k),len(ls)));y[0]=1.;y[1]=np.sqrt(np.maximum(f0,1))
+    start=time.time()
+    # renormalize at intervals before solutions overflow
+    for end in [1.1,1.8,3.,6.,12.,R]:
+        if end<=r0:continue
+        def ode(r,y):
+            yy=y.reshape(2,len(k),len(ls));out=np.empty_like(yy)
+            out[0]=yy[1];out[1]=(ll[None,:]/r**2+alpha*(pot(r)-energies[:,None]))*yy[0]
+            return out.ravel()
+        sol=solve_ivp(ode,(r0,end),y.ravel(),method='DOP853',rtol=tol,atol=tol*.01)
+        y=sol.y[:,-1].reshape(y.shape);y/=np.maximum(np.abs(y[0]),np.abs(y[1]))[None,:,:]
+        r0=end
+    kr=k[:,None]*R
+    j=kr*spherical_jn(ls[None,:],kr);n=kr*spherical_yn(ls[None,:],kr)
+    jp=k[:,None]*(spherical_jn(ls[None,:],kr)+kr*spherical_jn(ls[None,:],kr,True))
+    np_=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+    d=np.arctan2(y[1]*j-y[0]*jp,y[1]*n-y[0]*np_)
+    return d
+
+if __name__=='__main__':
+ e=np.array([.0001,.01,.05,.1,.2,.5,1.,2.,5.,10.,20.])
+ for tol,R in [(1e-8,40.),(2e-10,80.),(1e-11,120.)]:
+  st=time.time();d=phases(e,0.,1.5,1.,tol,R,26);print(tol,R,'seconds',time.time()-st);print(np.exp(2j*d[:,:5]))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/scatter.py > /app/scatlog 2>&1 &
+
+OBS: New Terminal Output:
+
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/testbr.py
+
+
+
+#### step 7 18:27:05
+MSG: Analysis: The hard-sphere normalization test is still producing output. The radial solver has been written with simultaneous partial-wave integration and periodic renormalization. Its cutoff and tolerance comparisons will reveal the remaining scattering error before it is connected to transport integration.
+Plan: Collect the test results and inspect any discrepancies. Then construct the angular moments of the distinguishable and exchange-symmetrized scattering amplitudes and assemble the binary-mixture Galerkin matrices.
+CMD: 
+cat /app/scatlog; cat /app/genlog | head
+
+OBS: 901e-01j -0.87736248-4.79828180e-01j
+   0.97430381+2.25237827e-01j -0.98319826+1.82540904e-01j
+   0.743272  -6.68989338e-01j]]
+1 8 seconds 0.07830572128295898 maxcoef 384.2136298214523
+U00 [[ 0. -0. -0. -0. -0. -0. -0. -0. -0. -0.]
+ [ 1. -1. -0. -0. -0. -0. -0. -0. -0. -0.]
+ [ 0. -0. -0. -0. -0. -0. -0. -0. -0. -0.]
+ [ 0. -0. -0. -0. -0. -0. -0. -0. -0. -0.]
+ [ 0. -0. -0. -0. -0. -0. -0. -0. -0. -0.]
+ [ 0. -0. -0. -0. -0. -0. -0. -0. -0. -0.]
+ [ 0. -0. -0. -0. -0. -0. -0. -0. -0. -0.]
+ [ 0. -0. -0. -0. -0. -0. -0. -0. -0. -0.]
+ [ 0. -0. -0. -0. -0. -0. -0. -0. -0. -0.]
+root@950379d48da3:/app#
+
+
+#### step 8 18:28:46
+MSG: Analysis: The lowest-order hard-sphere values match the standard analytic viscosity and thermal-conductivity prefactors, and increasing polynomial order gives the expected converged corrections. The scattering tests also show stable phase shifts, but the innermost boundary should be moved farther into the repulsive region to suppress a small high-energy error. The mixture heat source includes the equilibrium internal-energy contribution explicitly.
+Plan: Implement the full binary-mixture matrix assembly and quantum angular moments. Use a dense composite energy quadrature first for development, compare polynomial orders, and then refine the energy integration around resonances while keeping the runtime within the checker limit.
+CMD: sed -i "s/3500\./12000./g" /app/scatter.py
+cat > /app/solver.py <<'PY'
+import numpy as np
+from scipy.special import roots_legendre
+from numpy.polynomial.legendre import legvander
+from scatter import phases
+import time
+
+def angular(d,e,L,M,J):
+    lm=d.shape[1]-1
+    z,w=roots_legendre(lm+J//2+3)
+    P=legvander(z,lm)
+    pj=legvander(z,J)
+    k=np.sqrt(4*np.pi**2*M/L**2*e)
+    a=(2*np.arange(lm+1)+1)[None,:]*np.expm1(2j*d)/(2j*k[:,None])
+    fe=a[:,::2]@P[:,::2].T;fo=a[:,1::2]@P[:,1::2].T
+    cross=np.array([abs(fe)**2,abs(fo)**2,abs(fe+fo)**2])
+    return cross@(2*np.pi*w[:,None]*pj)
+
+def quadrature(T,order=12,step=.1,max_t=56):
+    edges=np.r_[0,np.arange(.002,.05,.002),np.arange(.05,.5,.025),np.arange(.5,3,.1),np.arange(3,12,step),np.arange(12,max_t+step*.5,step*2),max_t]
+    edges=np.unique(np.minimum(edges,max_t))
+    z,w=roots_legendre(order)
+    e=((edges[1:,None]+edges[:-1,None])+(edges[1:,None]-edges[:-1,None])*z)/2
+    ww=(edges[1:,None]-edges[:-1,None])*w/2
+    return e.ravel(),ww.ravel()
+
+def matrices(t,w,q,gas,B,T,N=8):
+    M=1 if gas=='H2' else 2
+    g0=1 if M==1 else 6;g1=9
+    exc=2*B/M/T
+    r=g1/g0*np.exp(-exc);x=np.array([1/(1+r),r/(1+r)])
+    result=[]
+    for rank in [1,2]:
+        dat=np.load('/app/br%d_%d.npz'%(rank,N));U=dat['U'].astype(np.longdouble);V=dat['V'].astype(np.longdouble)
+        Q=np.array([(1+1/g0)*q[0]+(1-1/g0)*q[1],(1+1/g1)*q[0]+(1-1/g1)*q[1],q[2]],dtype=np.longdouble)
+        # integrate energy moments in extended precision
+        p=np.arange(U.shape[2]);tw=t.astype(np.longdouble)
+        E=(tw[:,None]**p[None,:]).T*(w*2*np.sqrt(2/np.pi)*t*np.exp(-t))[None,:]
+        moments=E@Q[:,:,:U.shape[3]]
+        Us=np.einsum('nmpj,spj->snm',U,moments,dtype=np.longdouble)
+        Vs=np.einsum('nmpj,spj->snm',V,moments,dtype=np.longdouble)
+        size=N+1;C=np.zeros((2*size,2*size))
+        C[:size,:size]=.5*(x[0]*(Us[0]+Vs[0])+x[1]*Us[2])
+        C[size:,size:]=.5*(x[1]*(Us[1]+Vs[1])+x[0]*Us[2])
+        C[:size,size:]=.5*np.sqrt(x.prod())*Vs[2]
+        C[size:,:size]=C[:size,size:].T
+        b=np.zeros(2*size)
+        if rank==1:
+            b[0]=1.5*np.sqrt(x[0])*(-x[1]*exc);b[size]=1.5*np.sqrt(x[1])*x[0]*exc
+            b[1]=-15/4*np.sqrt(x[0]);b[size+1]=-15/4*np.sqrt(x[1])
+        else:b[0]=2.5*np.sqrt(x[0]);b[size]=2.5*np.sqrt(x[1])
+        vals=[]
+        for nn in range(1,N+1):
+            inds=np.r_[np.arange(1 if rank==1 else 0,nn+1),np.arange(size,size+nn+1)]
+            cc=C[np.ix_(inds,inds)];bb=b[inds]
+            value=bb@np.linalg.solve(cc,bb)
+            pref=(np.sqrt(2)/3*np.sqrt(T/M) if rank==1 else 2/(5*np.sqrt(2))*np.sqrt(T*M))
+            vals.append(pref*value)
+        result.append(vals)
+    return result
+
+if __name__=='__main__':
+ import sys
+ gas,A,L,B,T=sys.argv[1:6];A,L,B,T=map(float,[A,L,B,T]);M=1 if gas=='H2' else 2
+ step=float(sys.argv[6]) if len(sys.argv)>6 else .2
+ t,w=quadrature(T,order=8,step=step)
+ lm=int(np.sqrt(4*np.pi**2*M/L**2*T*max(t))*(A+1.15*(1-A))+15)
+ print('nodes',len(t),'lmax',lm,flush=True);st=time.time()
+ ds=[]
+ for start in range(0,len(t),128):
+  ds.append(phases(t[start:start+128]*T,A,L,M,tol=1e-9,R=40,lmax=lm))
+  if start%512==0:print(start,'seconds',time.time()-st,flush=True)
+ d=np.concatenate(ds);q=angular(d,t*T,L,M,10)
+ np.savez('/app/run.npz',t=t,w=w,q=q)
+ print(matrices(t,w,q,gas,B,T))
+ print('seconds',time.time()-st)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/solver.py H2 0 1.5 1 .4 .2 > /app/solve.log 2>&1 &
+
+OBS: 4*np.pi**2*M/L**2*T*max(t))*(A+1.15*(1-A))+15)
+>  print('nodes',len(t),'lmax',lm,flush=True);st=time.time()
+>  ds=[]
+>  for start in range(0,len(t),128):
+>   ds.append(phases(t[start:start+128]*T,A,L,M,tol=1e-9,R=40,lmax=lm))
+>   if start%512==0:print(start,'seconds',time.time()-st,flush=True)
+>  d=np.concatenate(ds);q=angular(d,t*T,L,M,10)
+>  np.savez('/app/run.npz',t=t,w=w,q=q)
+>  print(matrices(t,w,q,gas,B,T))
+>  print('seconds',time.time()-st)
+> PY
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/solver.py H2 0 1.5 1 .4 .2 > /app/solve.log 2>&1 &
+[1] 352
+root@950379d48da3:/app#
+
+
+#### step 9 18:29:01
+MSG: Analysis: The solver now includes the correct H2 and D2 internal degeneracies and equilibrium rotational populations. It computes all three needed angular kernels from even and odd partial-wave amplitudes, and forms the viscosity and heat/diffusion collision matrices. The first representative calculation is running; the main remaining issues are convergence and runtime across the full parameter range.
+Plan: Inspect the first run, test the largest quantum-wave-number case, and raise the polynomial order for convergence checks. If radial integration dominates, replace the long free-propagation interval with a controlled analytic tail correction.
+CMD: cat /app/solve.log; ls -lh /app/*.npz
+OPENBLAS_NUM_THREADS=1 python3 /app/genbr.py 12 > /app/gen12log 2>&1 &
+
+OBS: loat64(0.046976254022229685), np.float64(0.04697625930076387), np.float64(0.046976260017058166), np.float64(0.04
+6976260053192186), np.float64(0.0469762600534541)]]
+seconds 10.758106708526611
+[1]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/solver.py H2 0 1.5 1 .4 .2 > /app/solve.log 2>&1
+-rw-r--r-- 1 root root  41K Nov  5 18:26 /app/br1_8.npz
+-rw-r--r-- 1 root root  60K Nov  5 18:26 /app/br2_8.npz
+-rw-r--r-- 1 root root 489K Nov  5 18:28 /app/run.npz
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/genbr.py 12 > /app/gen12log 2>&1 &
+[1] 373
+root@950379d48da3:/app#
+
+
+#### step 10 18:29:39
+MSG: Analysis: The first calculation finishes quickly and its low-order values look reasonable. A detailed re-derivation of the generating function exposed missing geometric-series factors in higher-order brackets; low-order normalization alone would not detect these. I will correct them and validate the coefficients against direct Gaussian integration before relying on convergence results.
+Plan: Restore the vector geometric-series factor and add the corresponding tensor factors. Then compare generated coefficients with an independent Gauss–Hermite integration of individual Laguerre basis functions, and rerun the representative transport calculation.
+CMD: python3 - <<'PY'
+p='/app/genbr.py'
+s=open(p).read().replace('(H,1,3.5,1.,False)','(H,1,3.5,1.,1)').replace('(H,1,4.5,10/3,False)','(H,1,4.5,10/3,1)').replace('(HH,2,5.5,1.,False)','(HH,2,5.5,1.,2)').replace('if cumulative:buf=np.cumsum(np.cumsum(buf,axis=0),axis=1)','for _ in range(cumulative):buf=np.cumsum(np.cumsum(buf,axis=0),axis=1)')
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/genbr.py 8 > /app/genlog 2>&1
+OPENBLAS_NUM_THREADS=1 python3 /app/genbr.py 12 > /app/gen12log 2>&1 &
+cat > /app/checkbr.py <<'PY'
+import numpy as np
+from scipy.special import roots_hermite,eval_genlaguerre
+from genbr import generate
+z,w=roots_hermite(15);z=z/np.sqrt(2);w=w/np.sqrt(np.pi)
+W=np.array(np.meshgrid(z,z,z,indexing='ij')).reshape(3,-1).T
+ww=np.einsum('i,j,k->ijk',w,w,w).ravel()
+t=1.7;q=.31;d=np.sqrt(t/2)*np.array([0,0,1]);dp=np.sqrt(t/2)*np.array([np.sqrt(1-q*q),0,q])
+c=W+d;cp=W+dp
+for rank in [1,2]:
+ U,V,F=generate(4,rank)
+ if rank==1:b=c;bp=cp
+ else:
+  b=(c[:,:,None]*c[:,None,:]-np.eye(3)[None,:,:]*np.sum(c*c,axis=1)[:,None,None]/3).reshape(-1,9)
+  bp=(cp[:,:,None]*cp[:,None,:]-np.eye(3)[None,:,:]*np.sum(cp*cp,axis=1)[:,None,None]/3).reshape(-1,9)
+ for n in range(5):
+  for m in range(5):
+   val=sum(ww*np.sum(b*bp,axis=1)*eval_genlaguerre(n,rank+.5,np.sum(c*c,axis=1))*eval_genlaguerre(m,rank+.5,np.sum(cp*cp,axis=1)))
+   v=np.einsum('pq,p,q->',F[n,m],t**np.arange(F.shape[2]),q**np.arange(F.shape[3]))
+   print(rank,n,m,val,float(v),float(v)-val)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/checkbr.py > /app/checklog
+OPENBLAS_NUM_THREADS=1 python3 /app/testbr.py
+
+OBS: ne]/3).reshape(-1,9)
+>   bp=(cp[:,:,None]*cp[:,None,:]-np.eye(3)[None,:,:]*np.sum(cp*cp,axis=1)[:,None,None]/3).reshape(-1,9)
+>  for n in range(5):
+>   for m in range(5):
+>    val=sum(ww*np.sum(b*bp,axis=1)*eval_genlaguerre(n,rank+.5,np.sum(c*c,axis=1))*eval_genlaguerre(m,rank+.5,np.sum(cp*cp,axis=1)))
+>    v=np.einsum('pq,p,q->',F[n,m],t**np.arange(F.shape[2]),q**np.arange(F.shape[3]))
+>    print(rank,n,m,val,float(v),float(v)-val)
+> PY
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/checkbr.py > /app/checklog
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/testbr.py
+
+
+
+#### step 11 18:30:01
+MSG: Analysis: The independent Gaussian test will now check every coefficient through fourth polynomial order, rather than only the leading hard-sphere bracket. The corrected factors arise from the shifted Gaussian mean and are necessary for genuine higher-order Chapman–Enskog convergence.
+Plan: Read the independent test and hard-sphere results, then reuse the already computed scattering data to check transport convergence through order 12. Also benchmark the most demanding D2, small-Λ case.
+CMD: cat /app/checklog; tail -5 /app/gen12log
+OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+import sys;sys.path.insert(0,'/app')
+from solver import matrices
+import numpy as np
+z=np.load('/app/run.npz')
+for N in [8,12]:
+ q=z['q']
+ if N==12: q=np.pad(q,((0,0),(0,0),(0,4)))
+ print(N,matrices(z['t'],z['w'],q,'H2',1,.4,N))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/solver.py D2 0 .8 1 .6 .2 > /app/extreme.log 2>&1 &
+
+OBS: 4(0.3650673195653308), np.float64(0.36506790982598397)], [np.float64(0.0974656265280792), np.float64(0.09797681824818517), np.float64(0.0981246
+1082357453), np.float64(0.09825729225863343), np.float64(0.09836142154056864), np.float64(0.09845590282242093), np.float64(0.09855563001601518), np.float64(0.09
+867645940208981), np.float64(0.09884556288145298), np.float64(0.09913281655765925), np.float64(0.09863354520511593), np.float64(0.10237254051863073)]]
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/solver.py D2 0 .8 1 .6 .2 > /app/extreme.log 2>&1 &
+[1] 417
+root@950379d48da3:/app#
+
+
+#### step 12 18:30:42
+MSG: Analysis: The independent Gaussian check correctly rejected the higher-order brackets. The issue is in the shifted-mean numerator, not the collision normalization: it contains additional powers of the generating variables. I have isolated the exact numerator algebra and will replace the simplified expression with it.
+Plan: Correct the generating-function numerators and repeat the independent coefficient check. Only after all tested coefficients agree with direct quadrature will I use the generated tables for transport convergence.
+CMD: python3 - <<'PY'
+p='/app/genbr.py';s=open(p).read();i=s.index('H={(0,0,1)');j=s.index('\ndef generate',i)
+s=s[:i]+'''a={(0,0,0):1,(1,0,0):-1}
+b={(0,0,0):1,(0,1,0):-1}
+svar={(1,0,0):1};tvar={(0,1,0):1}
+twos={(0,0,0):2,(1,0,0):-1};twot={(0,0,0):2,(0,1,0):-1}
+Z={(0,0,1):1}
+ab=mul(a,b,30)
+H=mul(ab,{(0,0,1):2,(1,0,1):-1,(0,1,1):-1,(1,1,1):1},30)
+H=add(H,mul(mul(svar,mul(b,b,30),30),twos,30),-.5)
+H=add(H,mul(mul(tvar,mul(a,a,30),30),twot,30),-.5)
+AA=add(mul(mul(b,b,30),mul(twos,twos,30),30),mul(mul(tvar,tvar,30),mul(a,a,30),30))
+AA=add(AA,mul(mul(mul(ab,tvar,30),twos,30),Z,30),-2)
+BB={(j,i,q):v for (i,j,q),v in AA.items()}
+''' + s[j:];open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/checkbr.py > /app/checklog
+awk '($NF>1e-9 || $NF< -1e-9)' /app/checklog
+OPENBLAS_NUM_THREADS=1 python3 /app/genbr.py 8 > /app/genlog 2>&1
+OPENBLAS_NUM_THREADS=1 python3 /app/genbr.py 12 > /app/gen12log 2>&1
+OPENBLAS_NUM_THREADS=1 python3 /app/testbr.py
+cat /app/extreme.log
+
+OBS:  5.366080699976088 6.097663194592308
+2 3 4 -1.4561690334781017 4.568632254629453 6.024801288107554
+2 4 0 -0.3575306581794259 -1.4866100956794264 -1.1290794375000004
+2 4 1 -1.4255795492672052 -3.32649547301721 -1.9009159237500046
+2 4 2 -1.8669933729136392 -1.1837675197567192 0.68322585315692
+2 4 3 -1.4561690334780992 4.568632254629466 6.024801288107565
+2 4 4 -1.307464357864435 8.795806023961207 10.103270381825642
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/genbr.py 8 > /app/genlog 2>&1
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/genbr.py 12 > /app/gen12log 2>&1
+
+
+
+#### step 13 18:31:02
+MSG: Analysis: The Gaussian re-derivation shows that the prefactor cancels the apparent geometric-series factors. The original polynomial numerators were correct; the later proposed corrections were not. I will restore that algebra and verify it directly, which should settle the higher-order bracket validation unambiguously.
+Plan: Restore the simplified numerators with no cumulative factors, rerun the independent Gaussian check, and check the hard-sphere corrections. Then resume scattering-grid convergence tests using only the verified tables.
+CMD: python3 - <<'PY'
+p='/app/genbr.py';s=open(p).read();i=s.index('a={(0,0,0)');j=s.index('\ndef generate',i)
+s=s[:i]+'''H={(0,0,1):2,(1,0,1):-1,(0,1,1):-1,(1,1,1):1,(1,0,0):-1,(0,1,0):-1,(1,1,0):1}
+AA={(0,0,0):4,(0,1,0):-4,(0,2,0):2,(0,1,1):-4,(0,2,1):2}
+BB={(j,i,q):v for (i,j,q),v in AA.items()}
+''' + s[j:]
+s=s.replace('(H,1,3.5,1.,1)','(H,1,3.5,1.,False)').replace('(H,1,4.5,10/3,1)','(H,1,4.5,10/3,False)').replace('(HH,2,5.5,1.,2)','(HH,2,5.5,1.,False)')
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/checkbr.py > /app/checklog
+awk '($NF>1e-9 || $NF< -1e-9)' /app/checklog
+OPENBLAS_NUM_THREADS=1 python3 /app/genbr.py 8 > /app/genlog 2>&1
+OPENBLAS_NUM_THREADS=1 python3 /app/genbr.py 12 > /app/gen12log 2>&1
+OPENBLAS_NUM_THREADS=1 python3 /app/testbr.py
+cat /app/extreme.log
+
+OBS: (0,1,1):-1,(1,1,1):1,(1,0,0):-1,(0,1,0):-1,(1,1,0):1}
+> AA={(0,0,0):4,(0,1,0):-4,(0,2,0):2,(0,1,1):-4,(0,2,1):2}
+> BB={(j,i,q):v for (i,j,q),v in AA.items()}
+> ''' + s[j:]
+> s=s.replace('(H,1,3.5,1.,1)','(H,1,3.5,1.,False)').replace('(H,1,4.5,10/3,1)','(H,1,4.5,10/3,False)').replace('(HH,2,5.5,1.,2)','(HH,2,5.5,1.,False)')
+> open(p,'w').write(s)
+> PY
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/checkbr.py > /app/checklog
+root@950379d48da3:/app# awk '($NF>1e-9 || $NF< -1e-9)' /app/checklog
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/genbr.py 8 > /app/genlog 2>&1
+
+
+
+#### step 14 18:31:27
+MSG: Analysis: The restored brackets pass every independent Gaussian coefficient test through fourth order to numerical precision. The hard-sphere and representative quantum calculations can now be used reliably. The worst-case scattering run is slower but still comfortably below 600 seconds; local partial-wave cutoffs will reduce its cost further.
+Plan: Collect the completed convergence results and compare multiple energy grids. I will add local partial-wave cutoffs and use a higher quadrature order, then examine sensitivity to radial tolerance, cutoff, and innermost boundary.
+CMD: 
+cat /app/extreme.log
+OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+import sys;sys.path.insert(0,'/app')
+from solver import matrices
+import numpy as np
+z=np.load('/app/run.npz')
+for N in [8,12]:
+ q=z['q'];q=np.pad(q,((0,0),(0,0),(0,max(0,N+2-q.shape[2])))))
+ print(N,matrices(z['t'],z['w'],q,'D2',1,.6,N))
+PY
+
+OBS: 56765747
+512 seconds 11.235857725143433
+1024 seconds 39.83935332298279
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+> import sys;sys.path.insert(0,'/app')
+> from solver import matrices
+> import numpy as np
+> z=np.load('/app/run.npz')
+> for N in [8,12]:
+>  q=z['q'];q=np.pad(q,((0,0),(0,0),(0,max(0,N+2-q.shape[2])))))
+>  print(N,matrices(z['t'],z['w'],q,'D2',1,.6,N))
+> PY
+  File "<stdin>", line 6
+    q=z['q'];q=np.pad(q,((0,0),(0,0),(0,max(0,N+2-q.shape[2])))))
+                                                                ^
+SyntaxError: unmatched ')'
+root@950379d48da3:/app#
+
+
+#### step 15 18:31:57
+MSG: Analysis: The verified tables reproduce the known hard-sphere higher-order corrections. The worst-case run still uses one oversized partial-wave cutoff for every energy; I will switch to energy-local cutoffs, which should speed the low-energy portion substantially. A small diagnostic command also needs a syntax fix.
+Plan: Add a reusable scattering-grid driver with local cutoffs, save each diagnostic run separately, and rerun two representative parameter sets. Compare order-8 and order-12 transport values and the effects of tighter scattering tolerances.
+CMD: cat > /app/rungrid.py <<'PY'
+import sys,time
+sys.path.insert(0,'/app')
+import numpy as np
+from solver import quadrature,angular,matrices
+from scatter import phases
+if __name__=='__main__':
+ gas,A,L,B,T=sys.argv[1:6];A,L,B,T=map(float,[A,L,B,T]);M=1 if gas=='H2' else 2
+ order=int(sys.argv[6]);step=float(sys.argv[7]);R=float(sys.argv[8]);tol=float(sys.argv[9]);name=sys.argv[10]
+ t,w=quadrature(T,order=order,step=step,max_t=64)
+ q=[];st=time.time()
+ for start in range(0,len(t),96):
+  tt=t[start:start+96]
+  lm=int(np.sqrt(4*np.pi**2*M/L**2*T*max(tt))*(A+1.3*(1-A))+18)
+  d=phases(tt*T,A,L,M,tol=tol,R=R,lmax=lm)
+  q.append(angular(d,tt*T,L,M,14))
+  if start%480==0: print(start,len(t),'seconds',time.time()-st,flush=True)
+ q=np.concatenate(q,axis=1)
+ np.savez('/app/'+name+'.npz',t=t,w=w,q=q)
+ for N in [8,12]:print(N,matrices(t,w,q,gas,B,T,N))
+ print('seconds',time.time()-st)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/rungrid.py H2 0 1.5 1 .4 12 .2 60 2e-10 htest > /app/htest.log 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/rungrid.py D2 0 .8 1 .6 12 .2 60 2e-10 dtest > /app/dtest.log 2>&1 &
+cat /app/extreme.log
+
+OBS: .45927047729492
+[[np.float64(0.20332921094330947), np.float64(0.2033768473782463), np.float64(0.20337781496440194), np.float64(0.20338478083217085), np.float64(0.20338714754003
+95), np.float64(0.20338761255263113), np.float64(0.2033876978009269), np.float64(0.20338771701707245)], [np.float64(0.09268217114453817), np.float64(0.092682380
+09222941), np.float64(0.09268366823317595), np.float64(0.09268401502909665), np.float64(0.09268407235955697), np.float64(0.09268408210353332), np.float64(0.0926
+8408433939546), np.float64(0.09268408501302898)]]
+seconds 102.63988709449768
+root@950379d48da3:/app#
+
+
+#### step 16 18:32:19
+MSG: Analysis: The extreme-case baseline completed in about 103 seconds and converges well in polynomial order. Two stricter runs are now underway with separate saved data, local partial-wave cutoffs, and angular moments sufficient for order 12. The next critical validation is energy integration, especially shape resonances that may be much narrower than the ordinary thermal-energy scale.
+Plan: Inspect the stricter runs and test additional endpoint cases. Then implement an adaptive energy quadrature that compares nested integration rules and refines intervals where scattering changes rapidly, rather than relying solely on a fixed grid.
+CMD: cat /app/htest.log; cat /app/dtest.log
+OPENBLAS_NUM_THREADS=1 python3 /app/rungrid.py H2 .5 2.8 1 .6 12 .2 60 2e-10 ctest > /app/ctest.log 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/rungrid.py D2 .5 2.8 3 .2 12 .2 60 2e-10 ftest > /app/ftest.log 2>&1 &
+
+OBS: p/dtest.log
+0 2916 seconds 0.08346915245056152
+480 2916 seconds 0.8625643253326416
+960 2916 seconds 2.7424211502075195
+1440 2916 seconds 7.24531888961792
+1920 2916 seconds 15.096684217453003
+0 2916 seconds 0.11489510536193848
+480 2916 seconds 1.9318840503692627
+960 2916 seconds 13.411677122116089
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/rungrid.py H2 .5 2.8 1 .6 12 .2 60 2e-10 ctest > /app/ctest.log 2>&1 &
+[3] 528
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/rungrid.py D2 .5 2.8 3 .2 12 .2 60 2e-10 ftest > /app/ftest.log 2>&1 &
+[4] 529
+root@950379d48da3:/app#
+
+
+#### step 17 18:33:03
+MSG: Analysis: The physical normalization and mixture formulation are consistent with the Boltzmann collision bracket and with known hard-sphere limits. The remaining numerical checks are the innermost radial boundary, radial tail, and energy resonances. These can be tested independently of the already validated bracket algebra.
+Plan: Read the endpoint calculations, compare the phase shifts with a deeper repulsive-region start, and run a denser energy grid for the difficult D2 case. This will quantify whether fixed-grid results need adaptive resonance refinement.
+CMD: tail -5 /app/{htest,dtest,ctest,ftest}.log
+cat > /app/checkphase.py <<'PY'
+import sys;sys.path.insert(0,'/app')
+import scatter,numpy as np,time
+from solver import angular
+src=open('/app/scatter.py').read().split("if __name__")[0]
+ns={};exec(src.replace('12000.','120000.'),ns)
+e=np.array([.00001,.0001,.001,.01,.1,.3,.6,1.,2.,4.,8.,12.,20.])
+for A,L,M in [(0,.8,2),(.5,.8,2),(.5,2.8,1),(0,2.8,1)]:
+ d=scatter.phases(e,A,L,M,2e-11,100,55);dd=ns['phases'](e,A,L,M,2e-11,100,55)
+ q=angular(d,e,L,M,4);qq=angular(dd,e,L,M,4)
+ print(A,L,M,'phase error',np.max(abs(np.expm1(2j*(d-dd))),axis=1),'cross relative',np.max(abs(q-qq),axis=(0,2))/q[2,:,0],flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/checkphase.py > /app/checkphase.log 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/rungrid.py D2 0 .8 1 .6 16 .1 60 2e-10 dfine > /app/dfine.log 2>&1 &
+
+OBS: )
+> for A,L,M in [(0,.8,2),(.5,.8,2),(.5,2.8,1),(0,2.8,1)]:
+>  d=scatter.phases(e,A,L,M,2e-11,100,55);dd=ns['phases'](e,A,L,M,2e-11,100,55)
+>  q=angular(d,e,L,M,4);qq=angular(dd,e,L,M,4)
+>  print(A,L,M,'phase error',np.max(abs(np.expm1(2j*(d-dd))),axis=1),'cross relative',np.max(abs(q-qq),axis=(0,2))/q[2,:,0],flush=True)
+> PY
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/checkphase.py > /app/checkphase.log 2>&1 &
+[3] 550
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/rungrid.py D2 0 .8 1 .6 16 .1 60 2e-10 dfine > /app/dfine.log 2>&1 &
+[4] 551
+root@950379d48da3:/app#
+
+
+#### step 18 18:33:24
+MSG: Analysis: Several endpoint runs have completed. I am now testing the radial start condition directly and comparing a substantially denser energy grid for the most demanding D2 parameters. These checks separate scattering and quadrature errors from the Chapman–Enskog truncation error.
+Plan: Collect all convergence logs and assess the observed differences. If narrow resonances matter, locate their phase-shift poles explicitly and place integration breakpoints around their widths, ensuring that adaptive quadrature cannot simply miss them.
+CMD: for f in htest dtest ctest ftest dfine; do echo "$f"; tail -n 4 /app/$f.log; done
+cat /app/checkphase.log
+
+OBS: s 0.17265558242797852
+480 6704 seconds 2.194913148880005
+960 6704 seconds 10.410427570343018
+root@950379d48da3:/app# cat /app/checkphase.log
+0 0.8 2 phase error [1.93733918e-14 5.66213743e-15 2.28705943e-14 4.35207426e-14
+ 2.93098879e-14 3.24185123e-14 4.79616347e-14 8.03801470e-14
+ 1.92734717e-13 1.03916875e-12 1.42845735e-11 1.09798393e-10
+ 2.62514988e-09] cross relative [1.59935885e-13 1.16833888e-14 1.96131782e-14 1.49282554e-14
+ 3.61533962e-15 1.54205310e-15 3.74274565e-15 1.31835992e-15
+ 6.06316505e-15 5.95762772e-15 6.49793380e-14 6.17867185e-13
+ 1.46583268e-11]
+root@950379d48da3:/app#
+
+
+#### step 19 18:33:45
+MSG: Analysis: The endpoint calculations converge well through order 12, including the internal-energy diffusion contribution. The radial-start comparison shows negligible error in the thermally important energy range. The main unresolved discrepancy is a few parts per million between energy grids in one case, so I will focus on adaptive energy integration and resonance handling.
+Plan: Inspect the completed difficult-case comparisons and shorten the radial propagation where justified by an explicit cutoff test. Then add adaptive Gauss integration with a transport-weighted error estimator, retaining enough phase-shift information to detect sharp resonances.
+CMD: for f in dtest dfine; do echo "$f"; tail -n 4 /app/$f.log; done; cat /app/checkphase.log
+OPENBLAS_NUM_THREADS=1 python3 /app/rungrid.py H2 0 1.5 1 .4 16 .1 35 3e-10 hfine > /app/hfine.log 2>&1 &
+
+OBS: 1]
+0 2.8 1 phase error [0.00000000e+00 7.10542736e-15 1.50990331e-14 1.15463195e-14
+ 7.99360578e-15 9.76996262e-15 1.50990331e-14 1.77635684e-14
+ 3.10862447e-14 3.19744231e-14 3.64153152e-14 5.68434189e-14
+ 6.12843110e-14] cross relative [0.00000000e+00 3.65129603e-14 2.63321945e-14 1.11827395e-14
+ 5.14110321e-15 1.09483515e-14 1.13228917e-14 1.98134020e-14
+ 1.21102627e-14 4.23100860e-15 9.78153081e-15 4.22458841e-15
+ 9.37707341e-15]
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/rungrid.py H2 0 1.5 1 .4 16 .1 35 3e-10 hfine > /app/hfine.log 2>&1 &
+[5] 596
+root@950379d48da3:/app#
+
+
+#### step 20 18:34:32
+MSG: Analysis: The radial boundary error is negligible for the requested tolerance, though moving it deeper is inexpensive and safer. Order-12 Galerkin results are well converged in the tested cases. I will now replace the oversized fixed energy grid with adaptive integration, using the actual collision-bracket polynomials as the error indicators.
+Plan: Implement paired Gauss–Legendre rules on composite energy intervals, compare their integrated low-order collision brackets, and recursively refine failing intervals. Retain all accepted quadrature nodes for the final order-12 matrix assembly. This should improve resonance accuracy while reducing unnecessary high-energy work.
+CMD: sed -i 's/12000\./120000./g' /app/scatter.py
+cat > /app/adapt.py <<'PY'
+import numpy as np,time,sys
+from scipy.special import roots_legendre
+from solver import angular,matrices
+from scatter import phases
+
+def scatter_nodes(t,A,L,M,T,J=14,R=35,tol=3e-10):
+    ans=np.empty((3,len(t),J+1))
+    order=np.argsort(t)
+    for st in range(0,len(t),96):
+        inds=order[st:st+96];tt=t[inds]
+        lm=int(np.sqrt(4*np.pi**2*M/L**2*T*max(tt))*(A+1.3*(1-A))+18)
+        d=phases(tt*T,A,L,M,tol=tol,R=R,lmax=lm)
+        ans[:,inds,:]=angular(d,tt*T,L,M,J)
+    return ans
+
+def integrate(A,L,M,T,rtol=2e-8,R=35,tol=3e-10):
+    edges=np.unique(np.r_[0,.00001,.0001,.001,.003,.01,.02,.04,np.arange(.06,.5,.04),np.arange(.5,3,.1),np.arange(3,12,.25),np.arange(12,36,.75),np.arange(36,65,2),64])
+    intervals=np.c_[edges[:-1],edges[1:]]
+    rules=[roots_legendre(8),roots_legendre(16)]
+    # modest-order bracket polynomials for local error estimation
+    coeff=[]
+    for rank in [1,2]:
+        d=np.load('/app/br%d_8.npz'%rank)
+        u=d['U'];v=d['V']
+        for n,m in [(0,0),(1,1),(2,2),(3,3),(4,4),(5,5),(0,1),(1,2)]:
+            for mat in [u,v]:coeff.append(mat[n,m])
+    # pad rank-dependent angular and energy dimensions
+    C=np.zeros((len(coeff),19,11))
+    for i,c in enumerate(coeff):C[i,:c.shape[0],:c.shape[1]]=c
+    ts=[];ws=[];qs=[];st=time.time();count=0
+    for depth in range(19):
+        mid=intervals.mean(axis=1);half=(intervals[:,1]-intervals[:,0])/2
+        nodes=np.array([mid[:,None]+half[:,None]*z for z,w in rules],dtype=object)
+        low=mid[:,None]+half[:,None]*rules[0][0]
+        high=mid[:,None]+half[:,None]*rules[1][0]
+        tt=np.r_[low.ravel(),high.ravel()]
+        q=scatter_nodes(tt,A,L,M,T,R=R,tol=tol);count+=len(tt)
+        n=len(intervals)
+        ql=q[:,:n*8].reshape(3,n,8,15);qh=q[:,n*8:].reshape(3,n,16,15)
+        # monitor angular collision brackets at each node
+        def monitor(t,q,w):
+            powers=t[:,:,None]**np.arange(19)
+            vals=np.einsum('ijp,apq->ijaq',powers,C)
+            vals=np.einsum('ijaq,sijq->sija',vals,q[:,:,:,:11])
+            factor=(2*np.sqrt(2/np.pi)*t*np.exp(-t)*half[:,None]*w[None,:])
+            return np.einsum('sija,ij->sia',vals,factor)
+        a=monitor(low,ql,rules[0][1]);b=monitor(high,qh,rules[1][1])
+        # error budget per energy interval, relative to typical total brackets
+        scales=np.maximum(np.max(abs(b),axis=0).sum(axis=0),1e-4)
+        if depth==0:base=scales
+        err=np.max(abs(a-b)/base[None,None,:],axis=(0,2))
+        thresh=rtol*(intervals[:,1]-intervals[:,0])/12
+        good=(err<thresh)|(depth>=18)
+        if np.any(good):
+            ts.append(high[good].ravel());ws.append((half[good,None]*rules[1][1]).ravel());qs.append(qh[:,good].reshape(3,-1,15))
+        print('depth',depth,'intervals',n,'bad',sum(~good),'nodes',count,'time',time.time()-st,flush=True)
+        if np.all(good):break
+        iv=intervals[~good];md=iv.mean(axis=1)
+        intervals=np.concatenate([np.c_[iv[:,0],md],np.c_[md,iv[:,1]]])
+    return np.concatenate(ts),np.concatenate(ws),np.concatenate(qs,axis=1)
+
+if __name__=='__main__':
+ gas,A,L,B,T=sys.argv[1:6];A,L,B,T=map(float,[A,L,B,T]);M=1 if gas=='H2' else 2
+ st=time.time();t,w,q=integrate(A,L,M,T)
+ np.savez('/app/ad'+gas+'.npz',t=t,w=w,q=q)
+ print(matrices(t,w,q,gas,B,T,12));print('time',time.time()-st)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py H2 0 1.5 1 .4 > /app/adh.log 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py D2 0 .8 1 .6 > /app/add.log 2>&1 &
+
+OBS: ])
+>     return np.concatenate(ts),np.concatenate(ws),np.concatenate(qs,axis=1)
+>
+> if __name__=='__main__':
+>  gas,A,L,B,T=sys.argv[1:6];A,L,B,T=map(float,[A,L,B,T]);M=1 if gas=='H2' else 2
+>  st=time.time();t,w,q=integrate(A,L,M,T)
+>  np.savez('/app/ad'+gas+'.npz',t=t,w=w,q=q)
+>  print(matrices(t,w,q,gas,B,T,12));print('time',time.time()-st)
+> PY
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py H2 0 1.5 1 .4 > /app/adh.log 2>&1 &
+[6] 616
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py D2 0 .8 1 .6 > /app/add.log 2>&1 &
+[7] 617
+root@950379d48da3:/app#
+
+
+#### step 21 18:34:56
+MSG: Analysis: The adaptive integration code is running. It compares two independent Gauss rules using collision-bracket quantities, which are directly relevant to transport accuracy. The deeper radial start condition is now enabled. I also need to ensure that extremely narrow resonances are not missed by both rules, so I will inspect phase-shift structure in the low-energy region.
+Plan: Collect the adaptive and fine-grid results, fix any implementation issues, and add a low-energy resonance scan if needed. Use explicit phase-shift or inner-boundary diagnostics to bracket narrow resonances before final quadrature refinement.
+CMD: for f in adh add hfine dtest dfine; do echo "$f"; tail -n 5 /app/$f.log; done
+
+OBS: nto shape (126,)
+hfine
+4320 6704 seconds 30.694304943084717
+4800 6704 seconds 37.76232385635376
+5280 6704 seconds 49.59033751487732
+5760 6704 seconds 57.85387134552002
+6240 6704 seconds 68.58631205558777
+dtest
+0 2916 seconds 0.11489510536193848
+480 2916 seconds 1.9318840503692627
+960 2916 seconds 13.411677122116089
+1440 2916 seconds 60.87605047225952
+1920 2916 seconds 132.23520970344543
+dfine
+480 6704 seconds 2.194913148880005
+960 6704 seconds 10.410427570343018
+1440 6704 seconds 28.704330444335938
+1920 6704 seconds 47.80963850021362
+2400 6704 seconds 75.03272271156311
+root@950379d48da3:/app#
+
+
+#### step 22 18:35:19
+MSG: Analysis: The adaptive run stopped on an unused diagnostic array construction, not on the numerical method. I will remove that line. To protect against resonances narrower than the quadrature nodes, the radial solver's continuous phase branch can be used: a narrow resonance changes the sign of cos(δ), even when its cross-section peak is missed by a coarse grid.
+Plan: Fix and rerun the adaptive integrator. Add an explicit phase-branch scan and bracket every cos(δ) sign change; estimate the associated energy width and insert resonance-centered quadrature intervals. This will make narrow-resonance handling substantially more robust than cross-section sampling alone.
+CMD: sed -i '/nodes=np.array/d' /app/adapt.py
+OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py H2 0 1.5 1 .4 > /app/adh.log 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py D2 0 .8 1 .6 > /app/add.log 2>&1 &
+for f in hfine dtest dfine; do echo "$f"; tail -n 4 /app/$f.log; done
+
+OBS: 233624134), np.float64(0.046975929950018556), np.float64(0.046975929986157385), np.float64(0
+.046975929986419376), np.float64(0.046975929988686854), np.float64(0.0469759299897352), np.float64(0.04697592998992062), np.float64(0.04697592998992546)]]
+seconds 79.93719601631165
+dtest
+480 2916 seconds 1.9318840503692627
+960 2916 seconds 13.411677122116089
+1440 2916 seconds 60.87605047225952
+1920 2916 seconds 132.23520970344543
+dfine
+1440 6704 seconds 28.704330444335938
+1920 6704 seconds 47.80963850021362
+2400 6704 seconds 75.03272271156311
+2880 6704 seconds 126.6896140575409
+root@950379d48da3:/app#
+
+
+#### step 23 18:35:58
+MSG: Analysis: The adaptive implementation is now running after removal of the unused array. Fine-grid comparisons show only small differences in the representative H2 case, while the explicit resonance scan will guard against more severe hidden narrow peaks. The Galerkin order error remains far below the required tolerance in the tested cases.
+Plan: Implement a low-energy phase-pole scan using the unchanged continuous radial-solution normalization, refine pole locations with vectorized bisection, and estimate widths from the phase slope. Add breakpoints around narrow poles to the adaptive integrator.
+CMD: cat > /app/resonance.py <<'PY'
+import numpy as np,time
+from scatter import phases
+
+def resonances(A,L,M,T):
+    alpha=4*np.pi**2*M/L**2
+    # only partial waves with an effective-potential pocket can resonate narrowly
+    r=np.linspace(A+.6*(1-A),8,2000)
+    y=(1-A)/(r-A);v=4*(y**12-y**6)
+    pocket=[];barriers=[]
+    for l in range(1,28):
+        ve=v+l*(l+1)/(alpha*r*r)
+        maxima=np.where((ve[1:-1]>ve[:-2])&(ve[1:-1]>ve[2:]))[0]+1
+        minima=np.where((ve[1:-1]<ve[:-2])&(ve[1:-1]<ve[2:]))[0]+1
+        if len(maxima) and len(minima):
+            pocket.append(l);barriers.append(ve[maxima[0]])
+    if not pocket:return []
+    emax=max(barriers)*1.03
+    es=np.unique(np.r_[1e-10,np.geomspace(1e-8,.002,35),np.arange(.002,emax+.012,.012)])
+    lm=max(pocket)
+    ds=[]
+    for st in range(0,len(es),96):ds.append(phases(es[st:st+96],A,L,M,tol=2e-10,R=35,lmax=lm))
+    d=np.concatenate(ds)
+    inds=[]
+    for l,barrier in zip(pocket,barriers):
+        ix=np.where((np.cos(d[:-1,l])*np.cos(d[1:,l])<0)&(es[:-1]<barrier*1.01))[0]
+        for i in ix:inds.append((i,l))
+    if not inds:return []
+    ls=np.array([l for i,l in inds]);lo=np.array([es[i] for i,l in inds]);hi=np.array([es[i+1] for i,l in inds])
+    signs=np.array([np.sign(np.cos(d[i,l])) for i,l in inds])
+    for it in range(32):
+        md=(lo+hi)/2
+        dd=phases(md,A,L,M,tol=2e-11,R=35,lmax=lm)
+        val=np.cos(dd[np.arange(len(ls)),ls]);left=(val*signs>0)
+        lo=np.where(left,md,lo);hi=np.where(left,hi,md)
+    centers=(lo+hi)/2
+    h=np.maximum(centers*1e-5,1e-9)
+    dd=phases(np.r_[centers-h,centers+h],A,L,M,tol=2e-11,R=35,lmax=lm)
+    # inverse phase slope: Breit-Wigner half-width when isolated
+    slope=abs(np.cos(dd[len(ls):,ls].diagonal())-np.cos(dd[:len(ls),ls].diagonal()))/(2*h)
+    # above indexing intentionally selects each energy's own partial wave
+    widths=1/np.maximum(slope,1e-20)
+    result=[]
+    for c,width,l in zip(centers,widths,ls):
+        if width>.012:continue
+        # refine the slope estimate down to the resonance scale
+        hh=max(min(width*.03,h[list(centers).index(c)]),2e-11)
+        dd=phases([c-hh,c+hh],A,L,M,tol=1e-11,R=35,lmax=lm)
+        width=2*hh/max(abs(np.cos(dd[1,l])-np.cos(dd[0,l])),1e-20)
+        result.append((c/T,width/T,int(l)))
+    return result
+
+if __name__=='__main__':
+ import sys
+ A,L,M,T=map(float,sys.argv[1:]);st=time.time();print(resonances(A,L,M,T));print(time.time()-st)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/resonance.py 0 .8 2 .6 > /app/reslog 2>&1 &
+for f in adh add; do echo "$f"; tail -n 5 /app/$f.log; done
+
+OBS: (centers).index(c)]),2e-11)
+>         dd=phases([c-hh,c+hh],A,L,M,tol=1e-11,R=35,lmax=lm)
+>         width=2*hh/max(abs(np.cos(dd[1,l])-np.cos(dd[0,l])),1e-20)
+>         result.append((c/T,width/T,int(l)))
+>     return result
+>
+> if __name__=='__main__':
+>  import sys
+>  A,L,M,T=map(float,sys.argv[1:]);st=time.time();print(resonances(A,L,M,T));print(time.time()-st)
+> PY
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/resonance.py 0 .8 2 .6 > /app/reslog 2>&1 &
+[7] 684
+root@950379d48da3:/app# for f in adh add; do echo "$f"; tail -n 5 /app/$f.log; done
+adh
+add
+root@950379d48da3:/app#
+
+
+#### step 24 18:36:21
+MSG: Analysis: The adaptive runs are still working through their first integration pass. The explicit resonance scanner has been implemented and is being tested on the strongest-quantum D2 case. It searches only partial waves with an effective-potential well, then refines phase poles and their widths, so its cost should remain modest.
+Plan: Read the adaptive and resonance results, correct the width-estimation indexing if necessary, and insert resonance breakpoints into the final adaptive integration. Also verify that high-order matrix entries remain numerically stable before embedding the universal coefficient tables.
+CMD: cat /app/reslog; for f in adh add dtest dfine; do echo "$f"; tail -n 4 /app/$f.log; done; head -n 2 /app/gen12log
+
+OBS: t64(0.04697593678537246), np.float64(0.04697593678642077), np.float64(0.04697593678660621), np.float64(0.04697593678661104)]]
+time 47.27620887756348
+add
+dtest
+480 2916 seconds 1.9318840503692627
+960 2916 seconds 13.411677122116089
+1440 2916 seconds 60.87605047225952
+1920 2916 seconds 132.23520970344543
+dfine
+1440 6704 seconds 28.704330444335938
+1920 6704 seconds 47.80963850021362
+2400 6704 seconds 75.03272271156311
+2880 6704 seconds 126.6896140575409
+1 12 seconds 0.31871867179870605 maxcoef 2103.58389589068
+U00 [[ 0. -0. -0. -0. -0. -0. -0. -0. -0. -0. -0. -0. -0. -0.]
+root@950379d48da3:/app#
+
+
+#### step 25 18:36:43
+MSG: Analysis: The resonance scan finds genuinely narrow shape resonances, including one much narrower than any ordinary fixed energy grid. This confirms that explicit resonance breakpoints are necessary. The adaptive H2 result agrees with the fine-grid result to much better than the requested tolerance, and its polynomial-order convergence is excellent.
+Plan: Insert breakpoints at several multiples of every detected resonance width. Reduce unnecessary high-energy partial waves while retaining a controlled tail margin, and rerun the difficult D2 adaptive calculation in isolation to obtain a realistic checker-time estimate.
+CMD: python3 - <<'PY'
+p='/app/adapt.py';s=open(p).read().replace('from scatter import phases','from scatter import phases\nfrom resonance import resonances')
+s=s.replace('    intervals=np.c_[edges[:-1],edges[1:]]','''    extra=[]
+    rr=resonances(A,L,M,T)
+    print('resonances',rr,flush=True)
+    for center,width,l in rr:
+        for fac in [-1000,-100,-10,-1,0,1,10,100,1000]:
+            point=center+fac*width
+            if 0<point<64:extra.append(point)
+    edges=np.unique(np.r_[edges,extra])
+    intervals=np.c_[edges[:-1],edges[1:]]''')
+open(p,'w').write(s)
+PY
+jobs -l
+kill 508 551 661 2>/dev/null
+OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py D2 0 .8 1 .6 > /app/addres.log 2>&1 &
+
+OBS: app# jobs -l
+[2]    508 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/rungrid.py D2 0 .8 1 .6 12 .2 60 2e-10 dtest > /app/dtest.log 2>&1 &
+[4]-   551 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/rungrid.py D2 0 .8 1 .6 16 .1 60 2e-10 dfine > /app/dfine.log 2>&1 &
+[6]+   661 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py D2 0 .8 1 .6 > /app/add.log 2>&1 &
+root@950379d48da3:/app# kill 508 551 661 2>/dev/null
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py D2 0 .8 1 .6 > /app/addres.log 2>&1 &
+[7] 729
+root@950379d48da3:/app#
+
+
+#### step 26 18:36:58
+MSG: Analysis: The current difficult-case run now includes explicit resonance intervals and is isolated from other CPU-heavy tests. Earlier concurrent runs overstated the runtime. I will monitor this isolated run and identify any excessive high-energy ODE work; the final program must remain safely below 600 seconds even at the most demanding parameters.
+Plan: Collect timing progress and benchmark a high-energy batch independently. If the adaptive ODE solver is taking tiny steps for irrelevant high partial waves, shorten propagation intervals and revise normalization to keep the radial solutions well scaled.
+CMD: cat /app/addres.log
+cat > /app/bench.py <<'PY'
+import sys,time;sys.path.insert(0,'/app')
+from scatter import phases
+import numpy as np
+for e,lm in [(1,35),(5,65),(15,95),(30,120)]:
+ st=time.time();d=phases(np.linspace(e,e+.3,96),0,.8,2,tol=3e-10,R=35,lmax=lm);print(e,lm,time.time()-st,np.max(abs(d)),flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/bench.py > /app/bench.log 2>&1 &
+
+OBS:  2e-10 dfine > /app/dfine.log 2>&1
+[6]-  Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py D2 0 .8 1 .6 > /app/add.log 2>&1
+root@950379d48da3:/app# cat > /app/bench.py <<'PY'
+> import sys,time;sys.path.insert(0,'/app')
+> from scatter import phases
+> import numpy as np
+> for e,lm in [(1,35),(5,65),(15,95),(30,120)]:
+>  st=time.time();d=phases(np.linspace(e,e+.3,96),0,.8,2,tol=3e-10,R=35,lmax=lm);print(e,lm,time.time()-st,np.max(abs(d)),flush=True)
+> PY
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/bench.py > /app/bench.log 2>&1 &
+[8] 749
+root@950379d48da3:/app#
+
+
+#### step 27 18:37:09
+MSG: Analysis: The resonance scan completes in a modest amount of time and finds the same poles reproducibly. I am benchmarking the high-energy phase solver because its broad partial-wave arrays may be the principal runtime cost. The final numerical design will retain explicit resonance refinement and use only as much radial propagation as needed for the accuracy target.
+Plan: Read the isolated-run and batch timings, then add a controlled long-range tail correction if it offers a substantial speedup. Validate the corrected short-cutoff scattering against the existing long-cutoff solver.
+CMD: cat /app/bench.log; tail -n 4 /app/addres.log; uptime
+
+OBS:  tail -n 4 /app/addres.log; uptime
+1 35 0.7686381340026855 3.139192510380794
+5 65 3.111981153488159 3.139684994638544
+15 95 6.345793962478638 3.1415767283996385
+resonances [(np.float64(0.025398940603093556), np.float64(3.460528955316341e-05), 6), (np.float64(0.08873925076409553), np.float64(0.004952625217140892), 7), (n
+p.float64(0.008646638259136427), np.float64(2.5939920940364264e-09), 10), (np.float64(0.19005033419545123), np.float64(2.2217656311689394e-05), 11), (np.float64
+(0.37571687916837015), np.float64(0.00279049555260188), 12)]
+bash: uptime: command not found
+root@950379d48da3:/app#
+
+
+#### step 28 18:37:44
+MSG: Analysis: The high-energy batch timings are manageable, but most radial work occurs where the interaction is already negligible. A shorter radial cutoff plus a first-order variable-phase tail correction can reduce this cost while preserving accuracy. The isolated adaptive run is still being monitored.
+Plan: Implement the tail integral using the asymptotic Riccati–Bessel solution, compare it with propagation to a much larger cutoff, and use it only if the phase shifts and transport moments agree well within the required tolerance.
+CMD: cat /app/bench.log; tail -n 6 /app/addres.log
+python3 - <<'PY'
+p='/app/scatter.py';s=open(p).read();s=s.replace('    return d','''    if R<30:
+        # First variable-phase iterate in the weak long-range tail.
+        from scipy.special import roots_legendre
+        # oscillations are resolved up to 4R; the remaining tiny tail
+        # is included with coarser panels.
+        edges=np.r_[np.linspace(R,4*R,31),np.linspace(4*R,12*R,17)[1:],np.linspace(12*R,40*R,9)[1:]]
+        zz,ww=roots_legendre(16)
+        rr=((edges[1:,None]+edges[:-1,None])+(edges[1:,None]-edges[:-1,None])*zz)/2
+        weights=(edges[1:,None]-edges[:-1,None])*ww/2
+        rr=rr.ravel();weights=weights.ravel()
+        correction=np.zeros_like(d)
+        for st in range(0,len(rr),64):
+            rs=rr[st:st+64];ws=weights[st:st+64]
+            kr=k[:,None,None]*rs[None,:,None]
+            jj=kr*spherical_jn(ls[None,None,:],kr)
+            nn=kr*spherical_yn(ls[None,None,:],kr)
+            wave=jj*np.cos(d)[:,None,:]-nn*np.sin(d)[:,None,:]
+            correction+=np.sum(wave**2*(-alpha*pot(rs)*ws)[None,:,None],axis=1)/k[:,None]
+        d+=correction
+    return d''')
+open('/app/scattertail.py','w').write(s)
+PY
+cat > /app/checktail.py <<'PY'
+import sys,time;sys.path.insert(0,'/app')
+import scattertail,scatter,numpy as np
+from solver import angular
+for A,L,M in [(0,.8,2),(0,2.8,1),(.5,.8,2)]:
+ e=np.array([.00001,.0001,.001,.01,.05,.1,.2,.5,1,2,5,10,20])
+ st=time.time();d=scatter.phases(e,A,L,M,1e-11,70,85)
+ dd=scattertail.phases(e,A,L,M,2e-10,12,85)
+ q=angular(d,e,L,M,6);qq=angular(dd,e,L,M,6)
+ print(A,L,M,'seconds',time.time()-st,flush=True)
+ print('phaseerror',np.max(abs(np.expm1(2j*(d-dd))),axis=1))
+ print('cross relative',np.max(abs(q-qq),axis=(0,2))/q[2,:,0],flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/checktail.py > /app/tailcheck.log 2>&1 &
+
+OBS: rt angular
+> for A,L,M in [(0,.8,2),(0,2.8,1),(.5,.8,2)]:
+>  e=np.array([.00001,.0001,.001,.01,.05,.1,.2,.5,1,2,5,10,20])
+>  st=time.time();d=scatter.phases(e,A,L,M,1e-11,70,85)
+>  dd=scattertail.phases(e,A,L,M,2e-10,12,85)
+>  q=angular(d,e,L,M,6);qq=angular(dd,e,L,M,6)
+>  print(A,L,M,'seconds',time.time()-st,flush=True)
+>  print('phaseerror',np.max(abs(np.expm1(2j*(d-dd))),axis=1))
+>  print('cross relative',np.max(abs(q-qq),axis=(0,2))/q[2,:,0],flush=True)
+> PY
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/checktail.py > /app/tailcheck.log 2>&1 &
+[8] 792
+root@950379d48da3:/app#
+
+
+#### step 29 18:37:57
+MSG: Analysis: The short-cutoff tail-correction test is underway. The isolated adaptive D2 run has not yet printed its first-pass summary, so I will inspect its process state and elapsed time to distinguish ordinary high-energy computation from numerical stiffness or an implementation bottleneck.
+Plan: Inspect process timing and available CPU information, collect the tail test, and add per-batch progress to the integration driver. This will reveal precisely where runtime is spent before finalizing the solver.
+CMD: cat /app/tailcheck.log; tail -n 8 /app/addres.log
+python3 - <<'PY'
+import os
+for pid in [729,792]:
+ try:
+  print(pid,open('/proc/%d/stat'%pid).read())
+  print(open('/proc/%d/status'%pid).read())
+ except OSError as e:print(e)
+print(open('/sys/fs/cgroup/cpu.max').read())
+PY
+
+OBS: tionIndirectBranch:      conditional enabled
+Cpus_allowed:   ffffffff,ffffffff
+Cpus_allowed_list:      0-63
+Mems_allowed:   00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,
+00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001
+Mems_allowed_list:      0
+voluntary_ctxt_switches:        20
+nonvoluntary_ctxt_switches:     3778
+x86_Thread_features:
+x86_Thread_features_locked:
+
+200000 100000
+
+root@950379d48da3:/app#
+
+
+#### step 30 18:38:17
+MSG: Analysis: The process inspection shows that the radial ODE solver is retaining every integration step, causing unnecessary memory use and overhead. The experimental tail correction also fails for numerically negligible high partial waves because irregular Bessel functions amplify roundoff; I will not use that unvalidated shortcut. The established cutoff solver remains accurate enough.
+Plan: Make the ODE solver retain only endpoint values, add per-batch progress, and rerun the isolated adaptive calculation. Keep the validated radial cutoff and explicit resonance handling, rather than introducing an unstable tail approximation.
+CMD: python3 - <<'PY'
+p='/app/scatter.py';s=open(p).read().replace("method='DOP853',rtol=tol,atol=tol*.01)","method='DOP853',rtol=tol,atol=tol*.01,t_eval=[end])")
+open(p,'w').write(s)
+p='/app/adapt.py';s=open(p).read().replace("        ans[:,inds,:]=angular(d,tt*T,L,M,J)","        ans[:,inds,:]=angular(d,tt*T,L,M,J)\n        if st%480==0:print('batch',st,len(t),flush=True)")
+open(p,'w').write(s)
+PY
+kill 729 792 2>/dev/null
+OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py D2 0 .8 1 .6 > /app/addres.log 2>&1 &
+
+OBS: 1)","method='DOP853',rtol=tol,atol=tol*.01,t_eval=[end])")
+> open(p,'w').write(s)
+> p='/app/adapt.py';s=open(p).read().replace("        ans[:,inds,:]=angular(d,tt*T,L,M,J)","        ans[:,inds,:]=angular(d,tt*T,L,M,J)\n        if st%480==0:pr
+int('batch',st,len(t),flush=True)")
+> open(p,'w').write(s)
+> PY
+[8]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/checktail.py > /app/tailcheck.log 2>&1
+root@950379d48da3:/app# kill 729 792 2>/dev/null
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py D2 0 .8 1 .6 > /app/addres.log 2>&1 &
+[8] 831
+root@950379d48da3:/app#
+
+
+#### step 31 18:38:29
+MSG: Analysis: The solver now stores only radial endpoint values, avoiding the large arrays of intermediate ODE steps. The difficult-case adaptive run has restarted with visible batch progress. The final implementation will use the already validated phase solver, collision brackets, and resonance-aware energy quadrature.
+Plan: Monitor the restarted run and begin assembling a self-contained script by embedding the universal bracket tables. Continue independent convergence checks on additional parameter combinations and ensure the script has no dependency on development files.
+CMD: cat /app/addres.log
+python3 - <<'PY'
+import numpy as np,zlib,base64
+for rank in [1,2]:
+ d=np.load('/app/br%d_12.npz'%rank)
+ print(rank,d['U'].shape,np.max(abs(d['U'])),len(zlib.compress(d['U'].tobytes())))
+PY
+
+OBS: 56311689394e-05), 11), (np.float64
+(0.37571687916837015), np.float64(0.00279049555260188), 12)]
+batch 0 4008
+batch 480 4008
+batch 960 4008
+batch 1440 4008
+[7]-  Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py D2 0 .8 1 .6 > /app/addres.log 2>&1
+root@950379d48da3:/app# python3 - <<'PY'
+> import numpy as np,zlib,base64
+> for rank in [1,2]:
+>  d=np.load('/app/br%d_12.npz'%rank)
+>  print(rank,d['U'].shape,np.max(abs(d['U'])),len(zlib.compress(d['U'].tobytes())))
+> PY
+1 (13, 13, 26, 14) 2103.58389589068 79603
+2 (13, 13, 27, 15) 21676.348124087974 101196
+root@950379d48da3:/app#
+
+
+#### step 32 18:38:55
+MSG: Analysis: The bracket tables are small enough to embed directly in the final script, and the restarted run is progressing normally through the energy batches. I will use order 12 as the default Galerkin size, with convergence diagnostics retained during development. The remaining work is runtime validation and a final check of partial-wave and radial-cutoff errors.
+Plan: Collect the difficult-case result and timings, then compare selected scattering moments with larger partial-wave cutoffs. Assemble the self-contained program with compressed coefficient tables, remove diagnostic output, and test it from a directory containing only that file.
+CMD: tail -n 8 /app/addres.log
+python3 - <<'PY'
+import os,time
+pid=831
+try:
+ s=open('/proc/%d/stat'%pid).read().split();print('cpu seconds',(int(s[13])+int(s[14]))/100,'rss MB',int(s[23])*4096/1e6)
+except OSError:pass
+PY
+cat > /app/checklm.py <<'PY'
+import numpy as np,time
+from scatter import phases
+from solver import angular
+for A,L,M in [(0,.8,2),(0,1.5,1),(.5,.8,2)]:
+ for E in [.1,.4,1,2,4]:
+  lm=int(np.sqrt(4*np.pi**2*M/L**2*E)*(A+1.3*(1-A))+18)
+  d=phases([E],A,L,M,2e-11,50,lm+35)
+  q=angular(d,[E],L,M,14);qq=angular(d[:,:lm+1],[E],L,M,14)
+  print(A,L,M,E,lm, 'rel transport',[(qq[s,0,0]-qq[s,0,j]-(q[s,0,0]-q[s,0,j]))/(q[s,0,0]-q[s,0,j]) for s in range(3) for j in [1,2]],flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/checklm.py > /app/lmcheck.log 2>&1 &
+
+OBS: '
+> import numpy as np,time
+> from scatter import phases
+> from solver import angular
+> for A,L,M in [(0,.8,2),(0,1.5,1),(.5,.8,2)]:
+>  for E in [.1,.4,1,2,4]:
+>   lm=int(np.sqrt(4*np.pi**2*M/L**2*E)*(A+1.3*(1-A))+18)
+>   d=phases([E],A,L,M,2e-11,50,lm+35)
+>   q=angular(d,[E],L,M,14);qq=angular(d[:,:lm+1],[E],L,M,14)
+>   print(A,L,M,E,lm, 'rel transport',[(qq[s,0,0]-qq[s,0,j]-(q[s,0,0]-q[s,0,j]))/(q[s,0,0]-q[s,0,j]) for s in range(3) for j in [1,2]],flush=True)
+> PY
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/checklm.py > /app/lmcheck.log 2>&1 &
+[9] 935
+root@950379d48da3:/app#
+
+
+#### step 33 18:39:23
+MSG: Analysis: The endpoint-only ODE change has reduced the difficult-case memory use to roughly 124 MB and the CPU time substantially. The explicit partial-wave convergence test is now running. Once the adaptive D2 result finishes, I will compare it with the baseline to quantify the resonance correction and check the final runtime margin.
+Plan: Read the partial-wave and adaptive results, generate an additional higher-order bracket table for an independent convergence check, and assemble the standalone program. The final file will embed only universal numerical coefficients, not parameter-specific transport results.
+CMD: tail -n 12 /app/addres.log; cat /app/lmcheck.log
+OPENBLAS_NUM_THREADS=1 python3 /app/genbr.py 16 > /app/gen16log 2>&1 &
+
+OBS: 880 4008
+batch 3360 4008
+[9]+  Exit 1                  OPENBLAS_NUM_THREADS=1 python3 /app/checklm.py > /app/lmcheck.log 2>&1
+Traceback (most recent call last):
+  File "/app/checklm.py", line 8, in <module>
+    q=angular(d,[E],L,M,14);qq=angular(d[:,:lm+1],[E],L,M,14)
+      ^^^^^^^^^^^^^^^^^^^^^
+  File "/app/solver.py", line 12, in angular
+    k=np.sqrt(4*np.pi**2*M/L**2*e)
+              ~~~~~~~~~~~~~~~~~^~
+TypeError: can't multiply sequence by non-int of type 'float'
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/genbr.py 16 > /app/gen16log 2>&1 &
+[9] 957
+root@950379d48da3:/app#
+
+
+#### step 34 18:39:50
+MSG: Analysis: The difficult-case calculation is nearing the end of its first adaptive pass with low memory use. The partial-wave diagnostic stopped because it passed a Python list where a NumPy array was expected; the production solver already uses arrays. I will fix the diagnostic and continue the convergence checks.
+Plan: Rerun the partial-wave comparison, inspect the adaptive refinement and elapsed time, and test higher polynomial order using the saved quadrature nodes. Then package the verified implementation into one standalone file.
+CMD: sed -i 's/angular(d,\[E\]/angular(d,np.array([E])/; s/angular(d\[:,:lm+1\],\[E\]/angular(d[:,:lm+1],np.array([E])/' /app/checklm.py
+OPENBLAS_NUM_THREADS=1 python3 /app/checklm.py > /app/lmcheck.log 2>&1 &
+tail -n 8 /app/addres.log; head -n 2 /app/gen16log
+
+OBS: 0.20259260181466426)], [np.float64(0.09229812286008962), np.float64(0.09229833602397479), np.float64(0.092299
+60537323043), np.float64(0.09229995446370833), np.float64(0.0923000130609878), np.float64(0.092300023036897), np.float64(0.0923000253100849), np.float64(0.09230
+002599216842), np.float64(0.0923000262153178), np.float64(0.09230002628447997), np.float64(0.09230002630357557), np.float64(0.092300026308117)]]
+time 90.86302161216736
+1 16 seconds 0.8232219219207764 maxcoef 8807.480471835146
+U00 [[ 0. -0. -0. -0. -0. -0. -0. -0. -0. -0. -0. -0. -0. -0. -0. -0. -0. -0.]
+root@950379d48da3:/app#
+
+
+#### step 35 18:40:07
+MSG: Analysis: The resonance-aware difficult-case run completes in about 91 seconds and converges rapidly under adaptive refinement. Its result differs appreciably from the coarse-grid baseline, confirming the importance of explicit narrow-resonance integration. The order-12 transport values are stable to far better than the requested tolerance.
+Plan: Check the partial-wave convergence results and repeat several additional parameter sets with the resonance-aware solver. Also compare a stricter radial cutoff and energy tolerance on the difficult case, then build the standalone script with embedded bracket coefficients.
+CMD: cat /app/lmcheck.log
+OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py H2 0 .8 3 .2 > /app/adlow.log 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py D2 .5 .8 1 .6 > /app/adcore.log 2>&1 &
+
+OBS: 0.8 2 4 43 rel transport [np.float64(-0.00020923132729010172), np.float64(0.00016120070975762728), np.float64(-0.00016412898563535427), np.float64(0.0001199
+5080356036127), np.float64(9.940609207503292e-05), np.float64(0.00014057444639336007)]
+[1]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/checklm.py > /app/lmcheck.log 2>&1
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py H2 0 .8 3 .2 > /app/adlow.log 2>&1 &
+[1] 999
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py D2 .5 .8 1 .6 > /app/adcore.log 2>&1 &
+[2] 1000
+root@950379d48da3:/app#
+
+
+#### step 36 18:41:18
+MSG: Analysis: The partial-wave check revealed a significant long-range tail error at small Λ: the earlier cutoffs were adequate for the repulsive core but not for the attractive r^-6 tail. I will correct this before packaging. High partial waves are weak-scattering waves, so their phase shifts can be added efficiently from the analytic Born tail, while a larger exact-wave cutoff controls the approximation error.
+Plan: Implement analytic high-partial-wave phase shifts for the Kihara tail and compute angular moments directly from Legendre triple-product coefficients. Validate this hybrid result against much larger exact partial-wave calculations, then rerun transport convergence tests.
+CMD: cat > /app/highwaves.py <<'PY'
+import numpy as np
+from scipy.special import gammaln
+from functools import lru_cache
+
+def extend(d,e,A,L,M,factor=14):
+    alpha=4*np.pi**2*M/L**2;k=np.sqrt(alpha*e)
+    old=d.shape[1]
+    lm=int(max(k)*factor+120)
+    ls=np.arange(old,lm+1,dtype=float)
+    tail=np.zeros((len(k),len(ls)))
+    for p0,sign in [(6,1),(12,-1)]:
+        for n in range(25):
+            if A==0 and n:break
+            p=p0+n
+            coeff=sign*4*(1-A)**p0*np.exp(gammaln(p)-gammaln(p0)-gammaln(n+1))*A**n
+            integral=np.exp(np.log(np.pi/2)+gammaln(p-1)-(p-1)*np.log(2)-2*gammaln(p/2)+gammaln(ls+(3-p)/2)-gammaln(ls+(p+1)/2))
+            tail+=alpha*coeff*k[:,None]**(p-2)*integral[None,:]
+    return np.c_[d,tail]
+
+@lru_cache(None)
+def gaunts(lm,J):
+    out=[]
+    for j in range(J+1):
+        terms=[]
+        for shift in range(-j,j+1,2):
+            l=np.arange(max(0,-shift),min(lm+1,lm+1-shift))
+            lp=l+shift;ok=(l+lp>=j);l=l[ok];lp=lp[ok]
+            g=(l+lp+j)//2
+            log=gammaln(2*g-2*l+1)+gammaln(2*g-2*lp+1)+gammaln(2*g-2*j+1)-gammaln(2*g+2)+2*(gammaln(g+1)-gammaln(g-l+1)-gammaln(g-lp+1)-gammaln(g-j+1))
+            terms.append((l,lp,4*np.pi*np.exp(log)))
+        out.append(terms)
+    return out
+
+def moments(d,e,L,M,J):
+    e=np.asarray(e);k=np.sqrt(4*np.pi**2*M/L**2*e)
+    a=(2*np.arange(d.shape[1])+1)[None,:]*np.expm1(2j*d)/(2j*k[:,None])
+    q=np.zeros((3,len(e),J+1))
+    for j,terms in enumerate(gaunts(d.shape[1]-1,J)):
+        for l,lp,w in terms:
+            prod=(a[:,l]*a[:,lp].conj()).real*w
+            q[2,:,j]+=prod.sum(axis=1)
+            if j%2==0:
+                even=l%2==0
+                q[0,:,j]+=prod[:,even].sum(axis=1)
+                q[1,:,j]+=prod[:,~even].sum(axis=1)
+    return q
+
+if __name__=='__main__':
+ from scatter import phases
+ from solver import angular
+ import time
+ for A,L,M in [(0,.8,2),(0,1.5,1),(.5,.8,2)]:
+  for E in [.1,.4,1,2,4]:
+   lm=int(np.sqrt(4*np.pi**2*M/L**2*E)*(A+2.5*(1-A))+25)
+   st=time.time();d=phases([E],A,L,M,2e-11,50,lm+55)
+   full=extend(d,np.array([E]),A,L,M);part=extend(d[:,:lm+1],np.array([E]),A,L,M)
+   q=moments(full,np.array([E]),L,M,14);qq=moments(part,np.array([E]),L,M,14)
+   print(A,L,M,E,lm,time.time()-st, 'rel transport',[(qq[s,0,0]-qq[s,0,j]-(q[s,0,0]-q[s,0,j]))/(q[s,0,0]-q[s,0,j]) for s in range(3) for j in [1,2]],flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/highwaves.py > /app/highcheck.log 2>&1 &
+kill 999 1000 2>/dev/null
+
+OBS: ([E]),A,L,M);part=extend(d[:,:lm+1],np.array([E]),A,L,M)
+>    q=moments(full,np.array([E]),L,M,14);qq=moments(part,np.array([E]),L,M,14)
+>    print(A,L,M,E,lm,time.time()-st, 'rel transport',[(qq[s,0,0]-qq[s,0,j]-(q[s,0,0]-q[s,0,j]))/(q[s,0,0]-q[s,0,j]) for s in range(3) for j in [1,2]],flush=Tru
+e)
+> PY
+[1]-  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py H2 0 .8 3 .2 > /app/adlow.log 2>&1
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/highwaves.py > /app/highcheck.log 2>&1 &
+[3] 1019
+root@950379d48da3:/app# kill 999 1000 2>/dev/null
+root@950379d48da3:/app#
+
+
+#### step 37 18:41:29
+MSG: Analysis: The hybrid high-partial-wave implementation is now being validated. It adds the Kihara attractive tail analytically beyond a larger exact-wave cutoff and evaluates angular moments through sparse Legendre triple products, avoiding expensive angular grids with hundreds of waves.
+Plan: Read the hybrid convergence results and compare its angular moments with direct angular quadrature at modest cutoffs. If validated, connect it to the adaptive transport integrator and rerun the worst-case benchmark.
+CMD: cat /app/highcheck.log; tail -n 4 /app/adlow.log
+OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+import sys;sys.path.insert(0,'/app')
+from scatter import phases
+from solver import angular
+from highwaves import moments
+import numpy as np
+e=np.array([.1,.4,1]);d=phases(e,.3,1.5,1,2e-10,40,40)
+a=angular(d,e,1.5,1,14);b=moments(d,e,1.5,1,14)
+print('angular identity',np.max(abs(a-b)),np.max(abs(a-b))/np.max(a))
+PY
+
+OBS: (0.023071951144807416), np.float64(0.023071951626355128), np.float64(0.02307195179988167)]
+]
+time 27.589356422424316
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+> import sys;sys.path.insert(0,'/app')
+> from scatter import phases
+> from solver import angular
+> from highwaves import moments
+> import numpy as np
+> e=np.array([.1,.4,1]);d=phases(e,.3,1.5,1,2e-10,40,40)
+> a=angular(d,e,1.5,1,14);b=moments(d,e,1.5,1,14)
+> print('angular identity',np.max(abs(a-b)),np.max(abs(a-b))/np.max(a))
+> PY
+angular identity 1.105930885064721e-12 2.427205307804305e-14
+root@950379d48da3:/app#
+
+
+#### step 38 18:41:48
+MSG: Analysis: The hybrid high-wave calculation passes the larger-cutoff tests: transport angular moments agree at roughly 10^-7 or better, and the sparse angular-moment formula agrees with direct quadrature to roundoff. This resolves the previously detected attractive-tail truncation error.
+Plan: Connect the validated high-wave extension to the adaptive solver, rerun the strongest D2 case and a low-temperature H2 case, and compare polynomial orders. Then embed the universal coefficients and numerical routines in the required standalone file.
+CMD: cp /app/adapt.py /app/adapt_old.py
+python3 - <<'PY'
+p='/app/adapt.py';s=open(p).read().replace('from resonance import resonances','from resonance import resonances\nfrom highwaves import extend,moments')
+s=s.replace('(A+1.3*(1-A))+18','(A+2.5*(1-A))+25').replace('ans[:,inds,:]=angular(d,tt*T,L,M,J)','ans[:,inds,:]=moments(extend(d,tt*T,A,L,M),tt*T,L,M,J)')
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py D2 0 .8 1 .6 > /app/adhybrid.log 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py H2 0 .8 3 .2 > /app/adlowhybrid.log 2>&1 &
+
+OBS: p='/app/adapt.py';s=open(p).read().replace('from resonance import resonances','from resonance import resonances\nfrom highwaves import extend,moments')
+> s=s.replace('(A+1.3*(1-A))+18','(A+2.5*(1-A))+25').replace('ans[:,inds,:]=angular(d,tt*T,L,M,J)','ans[:,inds,:]=moments(extend(d,tt*T,A,L,M),tt*T,L,M,J)')
+> open(p,'w').write(s)
+> PY
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py D2 0 .8 1 .6 > /app/adhybrid.log 2>&1 &
+[1] 1060
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py H2 0 .8 3 .2 > /app/adlowhybrid.log 2>&1 &
+[2] 1061
+root@950379d48da3:/app#
+
+
+#### step 39 18:42:11
+MSG: Analysis: The validated hybrid solver is now running the difficult D2 and low-temperature H2 cases. The physical mixture source and collision normalization have been checked independently, and the remaining numerical uncertainty is primarily the higher-order Galerkin convergence in unusually structured scattering cases.
+Plan: Collect the hybrid results, test additional parameter combinations spanning the allowed ranges, and use order-16 calculations as an independent convergence check. Then assemble and test the required single-file program.
+CMD: tail -n 8 /app/adhybrid.log; tail -n 8 /app/adlowhybrid.log
+OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py H2 .25 2.2 1 .6 > /app/adrandom.log 2>&1 &
+
+OBS: .37571687916837015), np.float64(0.00279049555260188), 12)]
+batch 0 4008
+batch 480 4008
+batch 960 4008
+batch 1440 4008
+batch 1920 4008
+resonances [(np.float64(0.0036726172828087755), np.float64(8.647190247598548e-05), 2), (np.float64(0.4815071041206828), np.float64(0.0020125996255108015), 7), (
+np.float64(1.1283664129744282), np.float64(0.05480994380084471), 8)]
+batch 0 3552
+batch 480 3552
+batch 960 3552
+batch 1440 3552
+batch 1920 3552
+batch 2400 3552
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py H2 .25 2.2 1 .6 > /app/adrandom.log 2>&1 &
+[3] 1081
+root@950379d48da3:/app#
+
+
+#### step 40 18:42:43
+MSG: Analysis: The hybrid calculations are progressing through the energy grid, and the added random interior case will check that the method is not tuned only to endpoints. The final script will embed universal collision-bracket coefficients and compute scattering and transport anew for every input.
+Plan: Inspect the new convergence results and build a self-contained draft using compressed coefficient arrays. Test the draft from an otherwise empty directory, with the same minimal environment expected by the checker, while continuing stricter numerical comparisons.
+CMD: for f in adhybrid adlowhybrid adrandom; do echo "$f"; tail -n 5 /app/$f.log; done
+cat > /app/build.py <<'PY'
+import numpy as np,zlib,base64
+header='''#!/usr/bin/env python3
+"""Dilute quantum H2/D2 transport, using collision-bracket Galerkin equations.
+
+Equal-mass elastic collisions conserve every internal state.  The same-level
+cross sections are exchange averaged, and the heat source includes the local
+equilibrium rotational population gradient.  The velocity-space brackets are
+integrated analytically with a Gaussian generating function.  The remaining
+energy integral is adaptive, with explicit shape-resonance breakpoints.
+"""
+import os
+os.environ['OPENBLAS_NUM_THREADS']='1'
+os.environ['OMP_NUM_THREADS']='1'
+import sys,json,base64,zlib,time
+import numpy as np
+from scipy.special import spherical_jn,spherical_yn,roots_legendre,gammaln
+from scipy.integrate import solve_ivp
+from functools import lru_cache
+'''
+out=header+'\n_TABLES={}\n'
+for rank in [1,2]:
+ d=np.load('/app/br%d_12.npz'%rank)
+ for key in ['U','V']:
+  a=d[key];enc=base64.b85encode(zlib.compress(a.tobytes(),9)).decode()
+  out+="_TABLES[%r]=np.frombuffer(zlib.decompress(base64.b85decode(%r)),dtype=np.float64).reshape(%r)\n"%((rank,key),enc,a.shape)
+out+='''
+def brackets(rank,N):
+    return {'U':_TABLES[rank,'U'][:N+1,:N+1,:2*N+rank+1,:N+rank+1],
+            'V':_TABLES[rank,'V'][:N+1,:N+1,:2*N+rank+1,:N+rank+1]}
+'''
+for name in ['scatter','highwaves','resonance']:
+ s=open('/app/'+name+'.py').read().split("if __name__")[0]
+ lines=[l for l in s.splitlines() if not l.startswith('from scatter import') and not l.startswith('from solver import')]
+ out+='\n'+'\n'.join(lines)+'\n'
+s=open('/app/solver.py').read();s=s[s.index('def matrices'):s.index("if __name__")]
+s=s.replace("np.load('/app/br%d_%d.npz'%(rank,N))",'brackets(rank,N)')
+out+='\n'+s
+s=open('/app/adapt.py').read();s=s[s.index('def scatter_nodes'):s.index("if __name__")]
+s=s.replace("np.load('/app/br%d_8.npz'%rank)",'brackets(rank,8)')
+# Diagnostic output is directed to stderr.
+s=s.replace("flush=True)","file=sys.stderr,flush=True)")
+out+='\n'+s
+out+='''
+def main():
+    gas,A,L,B,T=sys.argv[1:6]
+    A,L,B,T=map(float,(A,L,B,T))
+    M=1 if gas=='H2' else 2
+    t,w,q=integrate(A,L,M,T)
+    conductivity,viscosity=matrices(t,w,q,gas,B,T,12)
+    print(json.dumps({'viscosity':float(viscosity[-1]),
+                      'thermal_conductivity':float(conductivity[-1])},separators=(',',':'),allow_nan=False))
+
+if __name__=='__main__':
+    main()
+'''
+open('/app/output/transport.py','w').write(out)
+print('file bytes',len(out))
+PY
+python3 /app/build.py
+python3 -m py_compile /app/output/transport.py
+mkdir -p /app/testonly && cp /app/output/transport.py /app/testonly/
+cd /app/testonly && env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 transport.py H2 .5 2.8 1 .6 > /app/standalone.json 2> /app/standalone.log &
+
+OBS: ite(out)
+> print('file bytes',len(out))
+> PY
+root@950379d48da3:/app# python3 /app/build.py
+file bytes 463371
+[2]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/adapt.py H2 0 .8 3 .2 > /app/adlowhybrid.log 2>&1
+root@950379d48da3:/app# python3 -m py_compile /app/output/transport.py
+root@950379d48da3:/app# mkdir -p /app/testonly && cp /app/output/transport.py /app/testonly/
+root@950379d48da3:/app# cd /app/testonly && env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 transport.py H2 .5 2.8 1 .6 > /app/standalone.json 2> /app/
+standalone.log &
+[2] 1171
+root@950379d48da3:/app#
+
+
+#### step 41 18:43:03
+MSG: Analysis: A standalone draft has been created successfully and is being tested with the checker's minimal environment. The random interior case also converges well. I will now tighten the remaining numerical checks, particularly the radial cutoff and higher polynomial orders, before finalizing the file.
+Plan: Read the standalone and hybrid results, compare stricter radial and Galerkin calculations, and adjust the default numerical margins if needed. Verify that stdout contains exactly the required JSON object and that the file has no development-directory dependencies.
+CMD: for f in adhybrid adlowhybrid standalone; do echo "$f"; tail -n 6 /app/$f.log; done; cat /app/standalone.json
+OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+import sys;sys.path.insert(0,'/app')
+from solver import matrices
+import numpy as np
+z=np.load('/app/adH2.npz');q=z['q'];q=np.pad(q,((0,0),(0,0),(0,4)))
+print('order16 random',matrices(z['t'],z['w'],q,'H2',1,.6,16))
+PY
+
+OBS: ), np.float64(0.25485661265241183)], [np.float64(0.039863928502841206), np.float64(0.03991374290969073), np.float64(0.03992093508733717), np.f
+loat64(0.039921891750175534), np.float64(0.039921996943117107), np.float64(0.03992200158374909), np.float64(0.03992200254336238), np.float64(0.03992200526718195
+), np.float64(0.039922007590152325), np.float64(0.03992200892112534), np.float64(0.039922009529008776), np.float64(0.03992200976141637), np.float64(0.0399220098
+3544376), np.float64(0.039922009853925265), np.float64(0.03992200985691109), np.float64(0.03992200985711106)]]
+root@950379d48da3:/app#
+
+
+#### step 42 18:43:25
+MSG: Analysis: The standalone draft produces exactly the required two-member JSON object and runs without development files. Higher-order comparisons show small residual Galerkin errors in the low-temperature case. I will add a convergence-controlled choice of polynomial order and verify the most demanding scattering case against a stricter radial cutoff.
+Plan: Run stricter radial and energy integration for the D2 endpoint, preserve diagnostic data under unique names, and compare orders 12–16 using sufficient angular moments. Then finalize the standalone program with explicit convergence checks rather than relying on one fixed polynomial order.
+CMD: tail -n 10 /app/adhybrid.log
+cat > /app/strict.py <<'PY'
+import sys,time;sys.path.insert(0,'/app')
+import adapt
+import numpy as np
+from solver import matrices
+G,A,L,B,T=sys.argv[1:6];A,L,B,T=map(float,[A,L,B,T]);M=1 if G=='H2' else 2
+st=time.time();t,w,q=adapt.integrate(A,L,M,T,rtol=3e-9,R=60,tol=3e-11)
+np.savez('/app/strict'+G+'.npz',t=t,w=w,q=q)
+print(matrices(t,w,q,G,B,T,12));print('time',time.time()-st)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/strict.py D2 0 .8 1 .6 > /app/strictd.log 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/strict.py H2 0 .8 3 .2 > /app/stricth.log 2>&1 &
+
+OBS: ,'/app')
+> import adapt
+> import numpy as np
+> from solver import matrices
+> G,A,L,B,T=sys.argv[1:6];A,L,B,T=map(float,[A,L,B,T]);M=1 if G=='H2' else 2
+> st=time.time();t,w,q=adapt.integrate(A,L,M,T,rtol=3e-9,R=60,tol=3e-11)
+> np.savez('/app/strict'+G+'.npz',t=t,w=w,q=q)
+> print(matrices(t,w,q,G,B,T,12));print('time',time.time()-st)
+> PY
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/strict.py D2 0 .8 1 .6 > /app/strictd.log 2>&1 &
+[2] 1212
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/strict.py H2 0 .8 3 .2 > /app/stricth.log 2>&1 &
+[3] 1213
+root@950379d48da3:/app#
+
+
+#### step 43 18:43:42
+MSG: Analysis: The standalone draft is functional, and stricter independent scattering calculations are underway. The high-wave tail correction has been validated against larger exact-wave cutoffs. I am now checking whether the stricter radial result changes the final transport values and whether the worst-case runtime remains comfortably bounded.
+Plan: Inspect CPU and elapsed times for the active calculations, collect convergence results, and optimize only where the numerical error has been quantified. Add sufficient angular moments and embedded coefficients for a convergence-controlled Galerkin solve.
+CMD: for f in adhybrid strictd stricth; do echo "$f"; tail -n 5 /app/$f.log; done
+python3 - <<'PY'
+import time
+up=float(open('/proc/uptime').read().split()[0])
+for pid in [1060,1212,1213]:
+ try:
+  s=open('/proc/%d/stat'%pid).read().split();print(pid,'elapsed',up-int(s[21])/100,'cpu',(int(s[13])+int(s[14]))/100,'rss',int(s[23])*4096/1e6)
+ except OSError:pass
+PY
+
+OBS: ), 7), (
+np.float64(1.1283664129744282), np.float64(0.05480994380084471), 8)]
+batch 0 3552
+batch 480 3552
+batch 960 3552
+root@950379d48da3:/app# python3 - <<'PY'
+> import time
+> up=float(open('/proc/uptime').read().split()[0])
+> for pid in [1060,1212,1213]:
+>  try:
+>   s=open('/proc/%d/stat'%pid).read().split();print(pid,'elapsed',up-int(s[21])/100,'cpu',(int(s[13])+int(s[14]))/100,'rss',int(s[23])*4096/1e6)
+>  except OSError:pass
+> PY
+1060 elapsed 113.93000000000029 cpu 96.41 rss 188.985344
+1212 elapsed 17.0 cpu 11.32 rss 89.37472
+1213 elapsed 17.0 cpu 11.38 rss 94.72
+root@950379d48da3:/app#
+
+
+#### step 44 18:44:05
+MSG: Analysis: The hybrid difficult-case calculation is taking roughly two minutes in the development environment, still with a large runtime margin. The stricter runs are progressing normally. I will use the remaining validation to improve robustness of the Galerkin convergence check and test additional combinations, rather than treating one fixed-order result as exact.
+Plan: Check the stricter and hybrid outputs, evaluate high-order hard-sphere brackets for numerical stability, and preserve full-precision universal coefficients where needed. Then run a broader collection of parameter combinations through the standalone solver.
+CMD: tail -n 5 /app/adhybrid.log; tail -n 3 /app/strictd.log; tail -n 3 /app/stricth.log
+OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+import numpy as np
+from scipy.special import gamma
+for rank in [1,2]:
+ d=np.load('/app/br%d_16.npz'%rank);U=d['U'].astype(np.longdouble);V=d['V'].astype(np.longdouble)
+ p=np.arange(U.shape[2]);mom=np.zeros(U.shape[2:],dtype=np.longdouble);mom[:,0]=2*np.sqrt(2*np.pi)*gamma(p+2)
+ mat=np.einsum('nmpj,pj->nm',U+V,mom)/2
+ print('rank',rank,'symmetry',np.max(abs(mat-mat.T)))
+ for nn in [8,10,12,14,16]:
+  b=np.zeros(nn+1);b[1 if rank==1 else 0]=-15/4 if rank==1 else 5/2
+  start=1 if rank==1 else 0
+  cc=np.array(mat[start:nn+1,start:nn+1],dtype=float)
+  print(nn,np.min(np.linalg.eigvalsh(cc)),b[start:]@np.linalg.solve(cc,b[start:]))
+PY
+
+OBS: pe=float)
+>   print(nn,np.min(np.linalg.eigvalsh(cc)),b[start:]@np.linalg.solve(cc,b[start:]))
+> PY
+rank 1 symmetry 1.4193356037139892578e-06
+8 9.63044058738553 1.4378998564999559
+10 9.630421079985366 1.4379006098414235
+12 9.630418386402358 1.4379007092631155
+14 9.630417942739264 1.4379007251213587
+16 9.63041785894051 1.4379007280458609
+rank 2 symmetry 0.011467623058706521988
+8 9.817313755912004 0.6333419957112746
+10 9.817312964415816 0.63334202314003
+12 9.817312857195848 0.6333420268369337
+14 9.817312839786007 0.6333420274353276
+16 9.817312836533702 0.6333420275468824
+root@950379d48da3:/app#
+
+
+#### step 45 18:44:26
+MSG: Analysis: The order-16 hard-sphere matrices remain positive and give stable transport values despite some cancellation in high-order entries. I will retain extended precision for the universal coefficients and collision-moment contractions, and explicitly symmetrize the final matrices. This provides a safer higher-order convergence check.
+Plan: Generate extended-precision coefficient tables through order 16, increase the angular-moment count accordingly, and compare orders 12–16 on representative saved quadratures. Continue collecting the stricter radial-cutoff results before choosing final numerical defaults.
+CMD: cp /app/genbr.py /app/genbr_ld.py
+sed -i 's/return np.array(U,dtype=float),np.array(V,dtype=float),out/return U,V,out/' /app/genbr_ld.py
+OPENBLAS_NUM_THREADS=1 python3 /app/genbr_ld.py 16 > /app/gen16ldlog 2>&1 &
+for f in adhybrid strictd stricth; do echo "$f"; tail -n 5 /app/$f.log; done
+
+OBS: app# sed -i 's/return np.array(U,dtype=float),np.array(V,dtype=float),out/return U,V,out/' /app/genbr_ld.py
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/genbr_ld.py 16 > /app/gen16ldlog 2>&1 &
+[4] 1279
+root@950379d48da3:/app# for f in adhybrid strictd stricth; do echo "$f"; tail -n 5 /app/$f.log; done
+adhybrid
+batch 1440 4008
+batch 1920 4008
+batch 2400 4008
+batch 2880 4008
+batch 3360 4008
+strictd
+batch 0 4008
+batch 480 4008
+batch 960 4008
+batch 1440 4008
+batch 1920 4008
+stricth
+batch 480 3552
+batch 960 3552
+batch 1440 3552
+batch 1920 3552
+batch 2400 3552
+root@950379d48da3:/app#
+
+
+#### step 46 18:45:11
+MSG: Analysis: Extended-precision coefficient generation is underway. The difficult-case runs are spending most of their remaining time at high collision energies, where many exact partial waves are included. Their process timing will determine whether to reduce that work using the already validated weak-tail approximation.
+Plan: Wait briefly for the active validation runs, then inspect their transport results and resource use. Adjust the high-energy exact-wave cutoff only after comparing its effect with the validated larger-cutoff calculation.
+CMD: 
+CMD: for f in adhybrid strictd stricth; do echo "$f"; tail -n 7 /app/$f.log; done
+python3 - <<'PY'
+import time
+up=float(open('/proc/uptime').read().split()[0])
+for pid in [1060,1212,1213]:
+ try:
+  s=open('/proc/%d/stat'%pid).read().split();print(pid,'elapsed',up-int(s[21])/100,'cpu',(int(s[13])+int(s[14]))/100,'rss',int(s[23])*4096/1e6)
+ except OSError:pass
+PY
+
+OBS: 0 3552
+batch 960 3552
+batch 1440 3552
+batch 1920 3552
+batch 2400 3552
+batch 2880 3552
+root@950379d48da3:/app# python3 - <<'PY'
+> import time
+> up=float(open('/proc/uptime').read().split()[0])
+> for pid in [1060,1212,1213]:
+>  try:
+>   s=open('/proc/%d/stat'%pid).read().split();print(pid,'elapsed',up-int(s[21])/100,'cpu',(int(s[13])+int(s[14]))/100,'rss',int(s[23])*4096/1e6)
+>  except OSError:pass
+> PY
+1060 elapsed 203.85000000000036 cpu 155.87 rss 221.659136
+1212 elapsed 106.92000000000007 cpu 70.23 rss 123.744256
+1213 elapsed 106.92000000000007 cpu 69.83 rss 124.14976
+root@950379d48da3:/app#
+
+
+#### step 47 18:45:37
+MSG: Analysis: The high-energy radial work is slower than desired, though still within the checker budget. More frequent radial renormalization is a numerically safe way to avoid enormous growing forbidden-region solutions and improve the ODE scaling. I will test this optimization against the established solver rather than lowering accuracy targets.
+Plan: Add geometrically spaced radial renormalization points and benchmark high-energy batches against the current solver. If the phase shifts agree, use the faster scaling strategy, then complete the strict transport comparisons and final standalone convergence tests.
+CMD: cp /app/scatter.py /app/scatter_before.py
+python3 - <<'PY'
+p='/app/scatter.py';s=open(p).read().replace('for end in [1.1,1.8,3.,6.,12.,R]:','for end in np.r_[np.geomspace(r0,R,int(np.ceil(np.log(R/r0)/np.log(1.45)))+1)[1:]]:')
+open(p,'w').write(s)
+PY
+cat > /app/benchrenorm.py <<'PY'
+import time,numpy as np
+import scatter,scatter_before
+for E,lm in [(1,55),(10,120),(25,180),(38,210)]:
+ e=np.linspace(E,E+.5,96)
+ st=time.time();d=scatter.phases(e,0,.8,2,3e-10,35,lm);tn=time.time()-st
+ st=time.time();dd=scatter_before.phases(e,0,.8,2,3e-10,35,lm);to=time.time()-st
+ print(E,lm,'new',tn,'old',to,'phaseerror',np.max(abs(np.expm1(2j*(d-dd)))),flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/benchrenorm.py > /app/renorm.log 2>&1 &
+
+OBS: ,'w').write(s)
+> PY
+root@950379d48da3:/app# cat > /app/benchrenorm.py <<'PY'
+> import time,numpy as np
+> import scatter,scatter_before
+> for E,lm in [(1,55),(10,120),(25,180),(38,210)]:
+>  e=np.linspace(E,E+.5,96)
+>  st=time.time();d=scatter.phases(e,0,.8,2,3e-10,35,lm);tn=time.time()-st
+>  st=time.time();dd=scatter_before.phases(e,0,.8,2,3e-10,35,lm);to=time.time()-st
+>  print(E,lm,'new',tn,'old',to,'phaseerror',np.max(abs(np.expm1(2j*(d-dd)))),flush=True)
+> PY
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/benchrenorm.py > /app/renorm.log 2>&1 &
+[4] 1330
+root@950379d48da3:/app#
+
+
+#### step 48 18:45:45
+MSG: Analysis: The renormalization benchmark is running. This change does not alter the radial equation or scattering boundary condition; it only keeps the numerical solution scaled over shorter intervals. The extended-precision bracket tables are ready, so the final solver can compare several Galerkin orders without regenerating coefficients at runtime.
+Plan: Collect the optimization and strict-cutoff results. Then rebuild the standalone program with extended-precision order-16 tables, sufficient angular moments, and a convergence check, and test the most demanding inputs under the checker's resource limits.
+CMD: cat /app/renorm.log; for f in adhybrid strictd stricth; do echo "$f"; tail -n 5 /app/$f.log; done
+
+OBS: 2863045853863), np.float64(0.0869286882091559), np.float64(0.0869287273482
+9447), np.float64(0.08692874711224362), np.float64(0.08692875523633697)], [np.float64(0.02304018226771427), np.float64(0.02306984397178483), np.float64(0.023074
+1586430842), np.float64(0.02307472231237901), np.float64(0.02307477810401989), np.float64(0.023074779242774283), np.float64(0.023074780613365098), np.float64(0.
+023074783296456), np.float64(0.023074785353797735), np.float64(0.023074786463535276), np.float64(0.023074786944771313), np.float64(0.023074787118138367)]]
+time 133.80731439590454
+root@950379d48da3:/app#
+
+
+#### step 49 18:46:10
+MSG: Analysis: The stricter low-temperature H2 calculation agrees with the default hybrid solver to about 10^-10 relative, confirming that the radial cutoff and tolerance are adequate. The hybrid D2 run also converges rapidly under adaptive refinement. I will now finish the order-convergence safeguard and final resource-limit testing.
+Plan: Increase angular moments to support order 16, use extended-precision universal coefficients, symmetrize the collision matrices, and rebuild the standalone program. Then test endpoint and interior cases with the minimal environment and compare the remaining strict D2 result.
+CMD: cat /app/renorm.log; tail -n 5 /app/strictd.log
+cp /app/scatter_before.py /app/scatter.py
+python3 - <<'PY'
+p='/app/adapt.py';s=open(p).read().replace('J=14','J=18').replace('J+1))','J+1))').replace('reshape(3,n,8,15)','reshape(3,n,8,19)').replace('reshape(3,n,16,15)','reshape(3,n,16,19)').replace('reshape(3,-1,15)','reshape(3,-1,19)')
+open(p,'w').write(s)
+p='/app/solver.py';s=open(p).read().replace("        C[:size,:size]=", "        Us=(Us+Us.transpose(0,2,1))/2\n        Vs=(Vs+Vs.transpose(0,2,1))/2\n        C[:size,:size]=")
+open(p,'w').write(s)
+p='/app/build.py';s=open(p).read().replace("br%d_12.npz","br%d_16.npz").replace('dtype=np.float64).reshape','dtype=np.longdouble).reshape').replace('matrices(t,w,q,gas,B,T,12)','matrices(t,w,q,gas,B,T,16)')
+open(p,'w').write(s)
+PY
+python3 /app/build.py
+python3 -m py_compile /app/output/transport.py
+cd /app/testonly && cp /app/output/transport.py transport.py && env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 transport.py D2 0 .8 1 .6 > /app/finald.json 2> /app/finald.log &
+
+OBS: eplace('reshape(3,n,16,15
+)','reshape(3,n,16,19)').replace('reshape(3,-1,15)','reshape(3,-1,19)')
+> open(p,'w').write(s)
+> p='/app/solver.py';s=open(p).read().replace("        C[:size,:size]=", "        Us=(Us+Us.transpose(0,2,1))/2\n        Vs=(Vs+Vs.transpose(0,2,1))/2\n
+C[:size,:size]=")
+> open(p,'w').write(s)
+> p='/app/build.py';s=open(p).read().replace("br%d_12.npz","br%d_16.npz").replace('dtype=np.float64).reshape','dtype=np.longdouble).reshape').replace('matrices(
+t,w,q,gas,B,T,12)','matrices(t,w,q,gas,B,T,16)')
+> open(p,'w').write(s)
+> PY
+root@950379d48da3:/app# python3 /app/build.py
+
+
+
+#### step 50 18:46:30
+MSG: Analysis: The final draft is being rebuilt with extended-precision order-16 coefficients and enough angular moments for a stronger Galerkin convergence check. The validated radial scaling strategy has been retained because the experimental renormalization offered no consistent speed advantage.
+Plan: Collect the rebuild and standalone endpoint test, then run several additional cases and inspect convergence through order 16. Verify the strict D2 comparison, stdout format, resource use, and absence of external file dependencies before declaring completion.
+CMD: 
+ls -lh /app/output/transport.py; tail -n 5 /app/strictd.log; cat /app/finald.json; tail -n 5 /app/finald.log
+
+OBS: 1 root root 1.6M Nov  5 18:46 /app/output/transport.py
+batch 960 4008
+batch 1440 4008
+batch 1920 4008
+batch 2400 4008
+batch 2880 4008
+resonances [(np.float64(0.025398940603093556), np.float64(3.460528955316341e-05), 6), (np.float64(0.08873925076409553), np.float64(0.004952625217140892), 7), (n
+p.float64(0.008646638259136427), np.float64(2.5939920940364264e-09), 10), (np.float64(0.19005033419545123), np.float64(2.2217656311689394e-05), 11), (np.float64
+(0.37571687916837015), np.float64(0.00279049555260188), 12)]
+batch 0 4008
+batch 480 4008
+batch 960 4008
+batch 1440 4008
+root@950379d48da3:/app#
+
+
+#### step 51 18:46:55
+MSG: Analysis: The standalone order-16 draft is running the most demanding D2 endpoint successfully so far. Its file size is about 1.6 MB, well below the limit. I will now test a broader set of endpoint and interior combinations and inspect both Galerkin convergence and runtime.
+Plan: Run representative H2 and D2 cases through the standalone module, recording the final few polynomial-order values and timing. Compare the difficult D2 endpoint with the stricter radial calculation, then address any remaining numerical discrepancies.
+CMD: cat > /app/testcases.py <<'PY'
+import importlib.util,time,numpy as np,sys
+spec=importlib.util.spec_from_file_location('transport','/app/output/transport.py');s=importlib.util.module_from_spec(spec);spec.loader.exec_module(s)
+cases=[('D2',.5,.8,1,.6),('H2',0,2.8,1,.2),('D2',0,2.8,1,.2),('H2',.5,.8,1,.6),('D2',.23,1.37,2.2,.31),('H2',.1,1.1,1,.6),('H2',0,.8,3,.2)]
+for idx,(gas,A,L,B,T) in enumerate(cases):
+ st=time.time();M=1 if gas=='H2' else 2
+ t,w,q=s.integrate(A,L,M,T)
+ result=s.matrices(t,w,q,gas,B,T,16)
+ np.savez('/app/case%d.npz'%idx,t=t,w=w,q=q)
+ print('CASE',idx,(gas,A,L,B,T),'time',time.time()-st,'results',result,flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/testcases.py > /app/cases.log 2> /app/caseserr.log &
+cat /app/renorm.log; tail -n 5 /app/strictd.log; tail -n 5 /app/finald.log
+
+OBS: /testcases.py > /app/cases.log 2> /app/caseserr.log &
+[6] 1480
+root@950379d48da3:/app# cat /app/renorm.log; tail -n 5 /app/strictd.log; tail -n 5 /app/finald.log
+1 55 new 1.9829769134521484 old 1.1529178619384766 phaseerror 1.0249501247727721e-10
+10 120 new 6.7482545375823975 old 6.724877834320068 phaseerror 9.742917583821509e-11
+25 180 new 14.920592784881592 old 22.907158136367798 phaseerror 1.3205919691117174e-10
+batch 960 4008
+batch 1440 4008
+batch 1920 4008
+batch 2400 4008
+batch 2880 4008
+batch 480 4008
+batch 960 4008
+batch 1440 4008
+batch 1920 4008
+batch 2400 4008
+root@950379d48da3:/app#
+
+
+#### step 52 18:47:17
+MSG: Analysis: The broader standalone validation suite is running. The high-energy renormalization benchmark shows a useful speedup only in the largest batches, so that optimization can be applied selectively without changing the scattering model. The strict D2 calculation is still in progress and will provide the final radial-accuracy comparison.
+Plan: Inspect completed test cases, compare their last Galerkin orders, and check the difficult-case timing. Apply selective renormalization only where its phase-shift agreement has been verified, then repeat the worst-case standalone run if necessary.
+CMD: tail -n 3 /app/cases.log; tail -n 8 /app/caseserr.log; tail -n 8 /app/finald.log; cat /app/finald.json; tail -n 6 /app/strictd.log; cat /app/renorm.log
+
+OBS: 19005033419545123), np.float64(2.2217656311689394e-05), 11), (np.float64
+(0.37571687916837015), np.float64(0.00279049555260188), 12)]
+batch 0 4008
+batch 480 4008
+batch 960 4008
+batch 1440 4008
+batch 1920 4008
+batch 2400 4008
+batch 480 4008
+batch 960 4008
+batch 1440 4008
+batch 1920 4008
+batch 2400 4008
+batch 2880 4008
+1 55 new 1.9829769134521484 old 1.1529178619384766 phaseerror 1.0249501247727721e-10
+10 120 new 6.7482545375823975 old 6.724877834320068 phaseerror 9.742917583821509e-11
+25 180 new 14.920592784881592 old 22.907158136367798 phaseerror 1.3205919691117174e-10
+root@950379d48da3:/app#
+
+
+#### step 53 18:48:17
+MSG: Analysis: The standalone validation suite is still progressing, with explicit resonance handling in each case. The largest-batch renormalization test confirms phase-shift agreement while improving high-energy runtime. I will use that change only for large exact-wave arrays and keep the established scaling at lower energies.
+Plan: Add selective radial renormalization for high-wave-count batches, then finish the strict D2 and standalone comparisons. Check the final several Galerkin orders for every completed test case and confirm that the output file remains self-contained and within all size limits.
+CMD: python3 - <<'PY'
+p='/app/scatter.py';s=open(p).read().replace('    for end in [1.1,1.8,3.,6.,12.,R]:','    endpoints=(np.geomspace(r0,R,int(np.ceil(np.log(R/r0)/np.log(1.45)))+1)[1:] if lmax>=145 else [1.1,1.8,3.,6.,12.,R])\n    for end in endpoints:')
+open(p,'w').write(s)
+PY
+python3 /app/build.py
+
+CMD: 
+CMD: tail -n 4 /app/cases.log; tail -n 5 /app/finald.log; cat /app/finald.json; tail -n 5 /app/strictd.log; jobs -l
+
+OBS: ch 2400 4008
+batch 2880 4008
+batch 1440 4008
+batch 1920 4008
+batch 2400 4008
+batch 2880 4008
+batch 3360 4008
+[2]   1212 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/strict.py D2 0 .8 1 .6 > /app/strictd.log 2>&1 &
+[5]-  1449 Running                 cd /app/testonly && cp /app/output/transport.py transport.py && env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 tran
+sport.py D2 0 .8 1 .6 > /app/finald.json 2> /app/finald.log &
+[6]+  1480 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/testcases.py > /app/cases.log 2> /app/caseserr.log &
+root@950379d48da3:/app#
+
+
+#### step 54 18:49:09
+MSG: Analysis: The selective scaling optimization has been incorporated into the standalone file. The remaining tests are independent convergence and resource checks: a stricter D2 radial calculation, the standalone worst-case run, and a suite spanning both gases and the parameter ranges.
+Plan: Allow the active tests to finish, then compare their numerical results and measured runtimes. If any test approaches the wall-clock limit, reduce only demonstrably unnecessary high-energy work while retaining the validated accuracy margins.
+CMD: 
+CMD: tail -n 4 /app/cases.log; tail -n 5 /app/caseserr.log; tail -n 6 /app/finald.log; cat /app/finald.json; tail -n 6 /app/strictd.log
+python3 - <<'PY'
+import time,os
+up=float(open('/proc/uptime').read().split()[0])
+for pid in [1212,1480]:
+ try:
+  s=open('/proc/%d/stat'%pid).read().split();print(pid,'elapsed',up-int(s[21])/100,'cpu',(int(s[13])+int(s[14]))/100,'rss',int(s[23])*4096/1e6)
+ except OSError:pass
+for p in os.listdir('/proc'):
+ if p.isdigit():
+  try:
+   cmd=open('/proc/'+p+'/cmdline','rb').read().replace(b'\x00',b' ')
+   if b'python3 transport.py' in cmd and b' env ' not in cmd and len(cmd)<100:
+    s=open('/proc/'+p+'/stat').read().split();print(p,cmd,'elapsed',up-int(s[21])/100,'cpu',(int(s[13])+int(s[14]))/100)
+  except OSError:pass
+PY
+
+OBS: xcept OSError:pass
+> for p in os.listdir('/proc'):
+>  if p.isdigit():
+>   try:
+>    cmd=open('/proc/'+p+'/cmdline','rb').read().replace(b'\x00',b' ')
+>    if b'python3 transport.py' in cmd and b' env ' not in cmd and len(cmd)<100:
+>     s=open('/proc/'+p+'/stat').read().split();print(p,cmd,'elapsed',up-int(s[21])/100,'cpu',(int(s[13])+int(s[14]))/100)
+>   except OSError:pass
+> PY
+1212 elapsed 344.9399999999987 cpu 226.13 rss 208.6912
+1480 elapsed 134.98999999999978 cpu 80.36 rss 177.893376
+1451 b'python3 transport.py D2 0 .8 1 .6 ' elapsed 178.59000000000015 cpu 108.65
+root@950379d48da3:/app#
+
+
+#### step 55 18:49:24
+MSG: Analysis: The worst-case standalone run is using about 109 CPU seconds so far, with low memory use; concurrent validation jobs inflate its elapsed time. I will verify the resonance scan's partial-wave coverage and inspect the final high-order convergence once the runs finish.
+Plan: Check the maximum partial wave that can support an effective-potential pocket over the allowed parameters. Extend the resonance scan if needed, and review the completed transport results and resource measurements.
+CMD: OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+import numpy as np
+for A in [0,.25,.5]:
+ alpha=4*np.pi**2*2/.8**2;r=np.linspace(A+.6*(1-A),12,8000);y=(1-A)/(r-A);v=4*(y**12-y**6)
+ pockets=[]
+ for l in range(1,80):
+  ve=v+l*(l+1)/(alpha*r*r)
+  maxima=np.where((ve[1:-1]>ve[:-2])&(ve[1:-1]>ve[2:]))[0]+1
+  minima=np.where((ve[1:-1]<ve[:-2])&(ve[1:-1]<ve[2:]))[0]+1
+  if len(maxima) and len(minima):pockets.append((l,float(ve[maxima[0]])))
+ print(A,pockets)
+PY
+
+OBS: 8484254210185387), (17, 1.0070520056916994)]
+0.5 [(1, 0.0016758886685162952), (2, 0.007460731676511461), (3, 0.018879205637667307), (4, 0.037161746684422875), (5, 0.06334595255454972), (6, 0.09833927680108
+143), (7, 0.1429571553976322), (8, 0.19794684158545311), (9, 0.26400680463710147), (10, 0.3418019662868048), (11, 0.4319717804689486), (12, 0.5351451501016049),
+ (13, 0.6519563093044988), (14, 0.7830461985691473), (15, 0.929094512812296), (16, 1.0908435898266213), (17, 1.2691361323516048), (18, 1.4650310753606024), (19,
+ 1.6800216689357428), (20, 1.9171924912212606)]
+root@950379d48da3:/app#
+
+
+#### step 56 18:50:17
+MSG: Analysis: The effective-potential check confirms that the resonance scan covers every partial wave that can support a pocket over the allowed parameter range. The remaining validation jobs are exercising the final standalone numerical pipeline; memory remains well below the checker limit.
+Plan: Collect completed strict and standalone results, compare the final Galerkin orders, and inspect the parameter-suite output. Then perform a clean isolated worst-case timing test and remove any unnecessary development artifacts from the output directory.
+CMD: 
+CMD: tail -n 4 /app/cases.log; tail -n 6 /app/caseserr.log; tail -n 8 /app/finald.log; cat /app/finald.json; tail -n 8 /app/strictd.log
+
+OBS:  np.float64(0.11941173296610198), np.float64(0.
+11941173301004522), np.float64(0.11941173302939634), np.float64(0.11941173303808346), np.float64(0.11941173304206242), np.float64(0.11941173304392502)]]
+batch 0 48
+depth 2 intervals 2 bad 0 nodes 4032 time 182.45861673355103
+resonances []
+batch 0 3024
+batch 480 3024
+batch 960 3024
+batch 0 4008
+batch 480 4008
+batch 960 4008
+batch 1440 4008
+batch 1920 4008
+batch 2400 4008
+batch 2880 4008
+batch 3360 4008
+batch 0 4008
+batch 480 4008
+batch 960 4008
+batch 1440 4008
+batch 1920 4008
+batch 2400 4008
+batch 2880 4008
+batch 3360 4008
+root@950379d48da3:/app#
+
+
+#### step 57 18:50:39
+MSG: Analysis: The first broader test case has completed with excellent order-16 convergence. The remaining cases are still running, including endpoint combinations with very different equilibrium rotational populations. I will inspect runtime and high-order convergence before finalizing the numerical defaults.
+Plan: Measure the active worst-case runs, compare the parameter-suite convergence trends, and test the standalone file in isolation. If needed, reduce high-energy runtime using the validated selective scaling strategy without altering thermally important scattering.
+CMD: python3 - <<'PY'
+import time,os
+up=float(open('/proc/uptime').read().split()[0])
+for pid in [1212,1451,1480]:
+ try:
+  s=open('/proc/%d/stat'%pid).read().split();print(pid,'elapsed',up-int(s[21])/100,'cpu',(int(s[13])+int(s[14]))/100,'rss',int(s[23])*4096/1e6)
+ except OSError:pass
+PY
+cat /app/renorm.log; tail -n 4 /app/cases.log; tail -n 4 /app/finald.log; tail -n 4 /app/strictd.log
+
+OBS: 2930496), np.float64(0.035821877662585905), np.float64(0.035827472559300876), np.float64(0.03582983816586056), np.float64
+(0.035830699498097716), np.float64(0.03583095174788794), np.float64(0.035831007029012894), np.float64(0.035831013330970905), np.float64(0.0358310133770502), np.
+float64(0.03583101590939079), np.float64(0.03583102045317089), np.float64(0.035831025161991735), np.float64(0.03583102892518282), np.float64(0.03583103147950907
+)]]
+batch 2400 4008
+batch 2880 4008
+batch 3360 4008
+batch 3840 4008
+batch 1920 4008
+batch 2400 4008
+batch 2880 4008
+batch 3360 4008
+root@950379d48da3:/app#
+
+
+#### step 58 18:51:01
+MSG: Analysis: The parameter-suite results show good convergence, including a low-temperature H2 case with slower convergence than the earlier tests. Order 16 is already close, but I will add a higher-order fallback so the final program checks convergence instead of assuming that one fixed basis size is sufficient.
+Plan: Generate additional extended-precision bracket coefficients and test orders 16–20 on the slow-convergence case. Use the higher order only when the convergence diagnostic requires it. Continue collecting the strict D2 and worst-case standalone results.
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/genbr_ld.py 20 > /app/gen20log 2>&1 &
+for f in finald strictd; do echo "$f"; tail -n 7 /app/$f.log; done; cat /app/finald.json; tail -n 2 /app/cases.log
+
+OBS: 96), np.float64(0.07432445692883195)], [np.float64(0.03659469896906975), np.float64(0.036
+604263545383015), np.float64(0.036604329471870777), np.float64(0.036604360322835726), np.float64(0.03660437474354099), np.float64(0.03660437611670409), np.float
+64(0.03660437611779234), np.float64(0.03660437618849262), np.float64(0.03660437621980129), np.float64(0.03660437622380481), np.float64(0.03660437622381107), np.
+float64(0.0366043762240603), np.float64(0.03660437622425436), np.float64(0.03660437622430984), np.float64(0.036604376224315706), np.float64(0.03660437622431569)
+]]
+root@950379d48da3:/app#
+
+
+#### step 59 18:51:29
+MSG: Analysis: The standalone worst-case D2 run completed successfully, producing the expected JSON with low memory use and ample runtime margin. The parameter-suite cases completed so far show excellent convergence, with one low-temperature H2 case benefiting from a higher-order check.
+Plan: Validate the new higher-order coefficient tables on that slower-convergence case, finish the stricter D2 comparison, and add a convergence-controlled fallback to the final program. Check the final file in an otherwise empty directory once more before completion.
+CMD: tail -n 2 /app/gen20log; tail -n 5 /app/strictd.log; tail -n 2 /app/cases.log
+OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+import numpy as np
+from scipy.special import gamma
+for rank in [1,2]:
+ d=np.load('/app/br%d_20.npz'%rank);U=d['U'];V=d['V'];print(rank,U.dtype,U.shape)
+ p=np.arange(U.shape[2]);mom=np.zeros(U.shape[2:],dtype=np.longdouble);mom[:,0]=2*np.sqrt(2*np.pi)*gamma(p+2)
+ mat=np.einsum('nmpj,pj->nm',U+V,mom)/2;mat=(mat+mat.T)/2
+ for nn in [12,16,18,20]:
+  b=np.zeros(nn+1);b[1 if rank==1 else 0]=-15/4 if rank==1 else 5/2;start=1 if rank==1 else 0
+  cc=np.array(mat[start:nn+1,start:nn+1],dtype=float)
+  print(nn,np.min(np.linalg.eigvalsh(cc)),b[start:]@np.linalg.solve(cc,b[start:]))
+PY
+
+OBS: else 0]=-15/4 if rank==1 else 5/2;start=1 if rank==1 else 0
+>   cc=np.array(mat[start:nn+1,start:nn+1],dtype=float)
+>   print(nn,np.min(np.linalg.eigvalsh(cc)),b[start:]@np.linalg.solve(cc,b[start:]))
+> PY
+1 float128 (21, 21, 42, 22)
+12 9.630418386402356 1.4379007092631158
+16 9.630417858940508 1.437900728045861
+18 9.63041784126819 1.4379007286513272
+20 9.630417837185563 1.4379007287891632
+2 float128 (21, 21, 43, 23)
+12 9.81731285719585 0.6333420268369337
+16 9.817312836533693 0.6333420275468824
+18 9.817312835853768 0.6333420275701713
+20 9.8173128356985 0.633342027575484
+root@950379d48da3:/app#
+
+
+#### step 60 18:51:59
+MSG: Analysis: The order-20 extended-precision bracket tables pass the hard-sphere stability checks. They provide a higher-order fallback for cases where order-16 convergence is slower. The standalone worst-case run has completed successfully, and the broader parameter suite is still checking additional combinations.
+Plan: Embed the order-20 tables, retain enough angular moments for the fallback, and select the Galerkin order using a conservative convergence diagnostic. Validate the fallback on the slower-convergence H2 case, then finish the strict D2 comparison and final file checks.
+CMD: python3 - <<'PY'
+p='/app/adapt.py';s=open(p).read().replace('J=18','J=22').replace('reshape(3,n,8,19)','reshape(3,n,8,23)').replace('reshape(3,n,16,19)','reshape(3,n,16,23)').replace('reshape(3,-1,19)','reshape(3,-1,23)')
+open(p,'w').write(s)
+p='/app/build.py';s=open(p).read().replace('br%d_16.npz','br%d_20.npz')
+s=s.replace("    conductivity,viscosity=matrices(t,w,q,gas,B,T,16)","    conductivity,viscosity=matrices(t,w,q,gas,B,T,16)\n    if any(abs(v[-1]-v[-6])>2e-7*abs(v[-1]) for v in (conductivity,viscosity)):\n        conductivity,viscosity=matrices(t,w,q,gas,B,T,20)")
+open(p,'w').write(s)
+PY
+python3 /app/build.py
+cat > /app/testfallback.py <<'PY'
+import importlib.util,time,numpy as np
+spec=importlib.util.spec_from_file_location('tr','/app/output/transport.py');s=importlib.util.module_from_spec(spec);spec.loader.exec_module(s)
+st=time.time();t,w,q=s.integrate(0,2.8,1,.2)
+print('integrated',time.time()-st,flush=True)
+for N in [12,16,18,20]:
+ print(N,s.matrices(t,w,q,'H2',1,.2,N),flush=True)
+np.savez('/app/fallback.npz',t=t,w=w,q=q)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/testfallback.py > /app/fallback.log 2> /app/fallbackerr.log &
+tail -n 6 /app/strictd.log; tail -n 2 /app/cases.log
+
+OBS: 18','J=22').replace('reshape(3,n,8,19)','reshape(3,n,8,23)').replace('reshape(3,n,16,19)','reshape(3,n,16,23)').
+replace('reshape(3,-1,19)','reshape(3,-1,23)')
+> open(p,'w').write(s)
+> p='/app/build.py';s=open(p).read().replace('br%d_16.npz','br%d_20.npz')
+> s=s.replace("    conductivity,viscosity=matrices(t,w,q,gas,B,T,16)","    conductivity,viscosity=matrices(t,w,q,gas,B,T,16)\n    if any(abs(v[-1]-v[-6])>2e-7*a
+bs(v[-1]) for v in (conductivity,viscosity)):\n        conductivity,viscosity=matrices(t,w,q,gas,B,T,20)")
+> open(p,'w').write(s)
+> PY
+root@950379d48da3:/app# python3 /app/build.py
+
+
+
+#### step 61 18:52:28
+MSG: Analysis: The final program is being rebuilt with a convergence-controlled order-20 fallback. The higher-order universal brackets are numerically stable in the independent hard-sphere test. I am validating that fallback on the slowest-converging case found so far and checking the remaining strict-cutoff comparison.
+Plan: Collect the rebuild and fallback results, inspect all completed parameter-suite cases, and compare the final D2 values with the stricter calculation. Then run the finished script from a clean directory and verify its output and file-size constraints.
+CMD: 
+tail -n 5 /app/fallback.log; tail -n 5 /app/fallbackerr.log; tail -n 7 /app/strictd.log; tail -n 3 /app/cases.log; ls -lh /app/output/transport.py
+
+OBS: 10175068622), np.float64(0.09256859456029602),
+ np.float64(0.09256904020059135), np.float64(0.09256907754579287), np.float64(0.09256907862213905), np.float64(0.0925690786469701), np.float64(0.092569078714824
+16), np.float64(0.09256907874044809), np.float64(0.09256907874581317), np.float64(0.0925690787465021), np.float64(0.09256907874653922), np.float64(0.09256907874
+653973), np.float64(0.09256907874654366), np.float64(0.09256907874654624), np.float64(0.0925690787465471), np.float64(0.09256907874654728)]]
+-rw-r--r-- 1 root root 3.5M Nov  5 18:52 /app/output/transport.py
+root@950379d48da3:/app#
+
+
+#### step 62 18:52:52
+MSG: Analysis: The strict D2 calculation now agrees with the default standalone result to much better than the required tolerance, and the higher-order fallback improves the slow-convergence H2 case. The numerical pipeline is therefore validated independently for radial accuracy, partial-wave tails, energy resonances, and Galerkin convergence.
+Plan: Summarize the completed parameter-suite convergence checks, inspect the higher-order fallback quantitatively, and run the final standalone file in a clean directory. Also check worst-case runtime with the finalized angular-moment count and convergence safeguard.
+CMD: python3 - <<'PY'
+import re,ast
+s=open('/app/fallback.log').read()
+for line in s.splitlines()[1:]:
+ n,r=line.split(' ',1);r=ast.literal_eval(re.sub(r'np.float64\(([^)]*)\)',r'\1',r));print('fallback order',n,'conductivity',r[0][-1],'viscosity',r[1][-1])
+for line in open('/app/cases.log'):
+ if line.startswith('CASE'):
+  pre,r=line.split(' results ');r=ast.literal_eval(re.sub(r'np.float64\(([^)]*)\)',r'\1',r))
+  print(pre,'values',[v[-1] for v in r],'last6 relative',[abs(v[-1]-v[-6])/v[-1] for v in r])
+PY
+cp /app/output/transport.py /app/testonly/transport.py
+cd /app/testonly && env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 transport.py H2 0 2.8 1 .2 > /app/clean.json 2> /app/clean.log &
+
+OBS:  0.8, 1, 0.6) time 71.46589875221252 values [0.585362951648803, 0.09256907874654728] last6 relative [3.646291175124506e-12, 8.71024625665397e-
+14]
+CASE 4 ('D2', 0.23, 1.37, 2.2, 0.31) time 41.76373887062073 values [0.10125361227481221, 0.05285830684890772] last6 relative [4.572100848743171e-09, 3.141636931
+0311976e-10]
+root@950379d48da3:/app# cp /app/output/transport.py /app/testonly/transport.py
+root@950379d48da3:/app# cd /app/testonly && env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 transport.py H2 0 2.8 1 .2 > /app/clean.json 2> /app/clean.
+log &
+[7] 1889
+root@950379d48da3:/app#
+
+
+#### step 63 18:53:13
+MSG: Analysis: The completed parameter-suite cases show convergence errors well below the required tolerance, and the order-20 fallback handles the slower low-temperature H2 case. The strict radial comparison also agrees closely with the default solver. A clean minimal-environment test of the finished script is now running.
+Plan: Finish the remaining parameter-suite cases and the clean-directory test, then benchmark the finalized worst-case run without competing jobs. Inspect stdout as JSON, confirm the required file is regular and self-contained, and remove cache files from the output directory.
+CMD: cat /app/clean.json; tail -n 4 /app/clean.log; tail -n 4 /app/caseserr.log; jobs -l
+python3 -m py_compile /app/output/transport.py
+find /app/output -maxdepth 2 -type f -printf '%p %s bytes\n'
+
+OBS: 2> /app/
+clean.log
+batch 1920 3024
+batch 2400 3024
+batch 2880 3024
+depth 0 intervals 126 bad 0 nodes 3024 time 10.260222911834717
+batch 960 3192
+batch 1440 3192
+batch 1920 3192
+batch 2400 3192
+[6]+  1480 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/testcases.py > /app/cases.log 2> /app/caseserr.log &
+root@950379d48da3:/app# python3 -m py_compile /app/output/transport.py
+root@950379d48da3:/app# find /app/output -maxdepth 2 -type f -printf '%p %s bytes\n'
+/app/output/__pycache__/transport.cpython-312.pyc 3644006 bytes
+/app/output/transport.py 3626693 bytes
+root@950379d48da3:/app#
+
+
+#### step 64 18:54:04
+MSG: Analysis: The finished script passes the clean-directory, minimal-environment test and emits exactly the required JSON object. Its file size is safely below the limit. The remaining validation suite is almost finished; I will complete it and perform one isolated worst-case runtime check before final cleanup.
+Plan: Collect the remaining convergence results, run the finalized D2 worst-case endpoint without competing CPU-heavy work, and verify resource use and JSON output. Remove the output-directory bytecode cache so only the required regular Python file remains.
+CMD: 
+CMD: python3 - <<'PY'
+import re,ast
+for line in open('/app/cases.log'):
+ if line.startswith('CASE'):
+  pre,r=line.split(' results ');r=ast.literal_eval(re.sub(r'np.float64\(([^)]*)\)',r'\1',r));print(pre,'values',[v[-1] for v in r],'last6 relative',[abs(v[-1]-v[-6])/v[-1] for v in r])
+PY
+tail -n 5 /app/caseserr.log; jobs -l
+rm -rf /app/output/__pycache__
+
+OBS: 21, 0.05285830684890772] last6 relative [4.572100848743171e-09, 3.141636931
+0311976e-10]
+CASE 5 ('H2', 0.1, 1.1, 1, 0.6) time 52.01367425918579 values [0.4605265149639039, 0.07205061922818573] last6 relative [5.1280671798376365e-12, 1.09480455191923
+6e-12]
+root@950379d48da3:/app# tail -n 5 /app/caseserr.log; jobs -l
+batch 960 3552
+batch 1440 3552
+batch 1920 3552
+batch 2400 3552
+batch 2880 3552
+[6]+  1480 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/testcases.py > /app/cases.log 2> /app/caseserr.log &
+root@950379d48da3:/app# rm -rf /app/output/__pycache__
+root@950379d48da3:/app#
+
+
+#### step 65 18:54:41
+MSG: Analysis: The completed endpoint and interior tests show small Galerkin convergence errors, and the clean standalone test succeeds. The last parameter-suite case is nearly finished. I will now perform a final isolated worst-case timing check and a few additional low-temperature convergence checks, where scattering minima can make the velocity-space solution harder to resolve.
+Plan: Wait for the remaining suite case, then run the finished script on the strongest D2 endpoint with timing and memory measurements. In parallel during development, inspect additional low-temperature H2 combinations using the saved convergence diagnostics.
+CMD: 
+CMD: tail -n 2 /app/cases.log; jobs -l
+cat > /app/timefinal.py <<'PY'
+import subprocess,time,resource,os,json
+st=time.time()
+p=subprocess.run(['python3','transport.py','D2','0','.8','1','.6'],cwd='/app/testonly',env={'HOME':'/tmp','TMPDIR':'/tmp','PATH':os.environ['PATH'],'LANG':'C'},stdout=subprocess.PIPE,stderr=open('/app/timingerr.log','w'))
+print('elapsed',time.time()-st,'returncode',p.returncode,'maxrss_kb',resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
+print(p.stdout.decode());print(json.loads(p.stdout))
+PY
+python3 /app/timefinal.py > /app/timing.log 2>&1 &
+
+OBS: /timefinal.py <<'PY'
+> import subprocess,time,resource,os,json
+> st=time.time()
+> p=subprocess.run(['python3','transport.py','D2','0','.8','1','.6'],cwd='/app/testonly',env={'HOME':'/tmp','TMPDIR':'/tmp','PATH':os.environ['PATH'],'LANG':'C'
+},stdout=subprocess.PIPE,stderr=open('/app/timingerr.log','w'))
+> print('elapsed',time.time()-st,'returncode',p.returncode,'maxrss_kb',resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
+> print(p.stdout.decode());print(json.loads(p.stdout))
+> PY
+root@950379d48da3:/app# python3 /app/timefinal.py > /app/timing.log 2>&1 &
+[1] 1971
+root@950379d48da3:/app#
+
+
+#### step 66 18:55:12
+MSG: Analysis: The full development parameter suite has completed successfully, including the slower-convergence low-temperature H2 case. The finished script uses a higher-order fallback where needed and agrees with stricter scattering calculations. An isolated worst-case timing run is now in progress.
+Plan: Complete the isolated timing test and perform a few additional low-temperature convergence checks. Then confirm the final file's regular-file status, exact stdout format, and lack of external dependencies, and leave only transport.py in the output directory.
+CMD: cat > /app/lowcheck.py <<'PY'
+import importlib.util,time,numpy as np
+spec=importlib.util.spec_from_file_location('tr','/app/output/transport.py');s=importlib.util.module_from_spec(spec);spec.loader.exec_module(s)
+for A,L in [(0,2.4),(.2,2.8),(.5,1.5),(0,1.8)]:
+ st=time.time();t,w,q=s.integrate(A,L,1,.2)
+ r=s.matrices(t,w,q,'H2',3,.2,20)
+ print(A,L,'time',time.time()-st,'values',[v[-1] for v in r],'order16 relative',[abs(v[-1]-v[15])/v[-1] for v in r],'last4 relative',[abs(v[-1]-v[-5])/v[-1] for v in r],flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/lowcheck.py > /app/lowcheck.log 2> /app/lowcheckerr.log &
+cat /app/timing.log; tail -n 6 /app/timingerr.log
+
+OBS: 5),(0,1.8)]:
+>  st=time.time();t,w,q=s.integrate(A,L,1,.2)
+>  r=s.matrices(t,w,q,'H2',3,.2,20)
+>  print(A,L,'time',time.time()-st,'values',[v[-1] for v in r],'order16 relative',[abs(v[-1]-v[15])/v[-1] for v in r],'last4 relative',[abs(v[-1]-v[-5])/v[-1] f
+or v in r],flush=True)
+> PY
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/lowcheck.py > /app/lowcheck.log 2> /app/lowcheckerr.log &
+[2] 1992
+root@950379d48da3:/app# cat /app/timing.log; tail -n 6 /app/timingerr.log
+batch 0 4008
+batch 480 4008
+batch 960 4008
+batch 1440 4008
+batch 1920 4008
+batch 2400 4008
+root@950379d48da3:/app#
+
+
+#### step 67 18:55:44
+MSG: Analysis: The isolated worst-case run is progressing normally, and the extra low-temperature checks are exercising the convergence fallback. The physical and scattering formulations are already independently validated; the remaining checks concern numerical convergence and resource margins.
+Plan: Collect the low-temperature convergence results and the worst-case timing. Also test the energy-domain cutoff on the slowest-converging case to ensure the higher-order fallback is not biased by the negligible but highly weighted high-energy tail.
+CMD: cat /app/lowcheck.log; tail -n 5 /app/lowcheckerr.log; cat /app/timing.log; tail -n 5 /app/timingerr.log
+cat > /app/checktailenergy.py <<'PY'
+import importlib.util,time,numpy as np
+from scipy.special import roots_legendre
+spec=importlib.util.spec_from_file_location('tr','/app/output/transport.py');s=importlib.util.module_from_spec(spec);spec.loader.exec_module(s)
+z=np.load('/app/fallback.npz');t=z['t'];w=z['w'];q=z['q'];st=time.time()
+edges=np.arange(64,101,2);x,ww=roots_legendre(12)
+tt=((edges[1:,None]+edges[:-1,None])+(edges[1:,None]-edges[:-1,None])*x)/2
+wt=(edges[1:,None]-edges[:-1,None])*ww/2
+tt=tt.ravel();wt=wt.ravel();qq=s.scatter_nodes(tt,0,2.8,1,.2)
+for N in [16,20]:
+ a=s.matrices(t,w,q,'H2',1,.2,N);b=s.matrices(np.r_[t,tt],np.r_[w,wt],np.concatenate([q,qq],axis=1),'H2',1,.2,N)
+ print(N,'before',[v[-1] for v in a],'after',[v[-1] for v in b],'relative',[(v[-1]-u[-1])/v[-1] for u,v in zip(a,b)],flush=True)
+print('time',time.time()-st)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/checktailenergy.py > /app/tailenergy.log 2> /app/tailenergyerr.log &
+
+OBS: ,None]-edges[:-1,None])*x)/2
+> wt=(edges[1:,None]-edges[:-1,None])*ww/2
+> tt=tt.ravel();wt=wt.ravel();qq=s.scatter_nodes(tt,0,2.8,1,.2)
+> for N in [16,20]:
+>  a=s.matrices(t,w,q,'H2',1,.2,N);b=s.matrices(np.r_[t,tt],np.r_[w,wt],np.concatenate([q,qq],axis=1),'H2',1,.2,N)
+>  print(N,'before',[v[-1] for v in a],'after',[v[-1] for v in b],'relative',[(v[-1]-u[-1])/v[-1] for u,v in zip(a,b)],flush=True)
+> print('time',time.time()-st)
+> PY
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/checktailenergy.py > /app/tailenergy.log 2> /app/tailenergyerr.log &
+[3] 2018
+root@950379d48da3:/app#
+
+
+#### step 68 18:56:09
+MSG: Analysis: The extra low-temperature checks confirm that the higher-order fallback is useful and still well within the requested accuracy in the cases tested. The worst-case timing run remains in progress. I am also checking the high-energy integration cutoff independently, because high polynomial orders can amplify an otherwise negligible Maxwellian tail.
+Plan: Collect the energy-tail and low-temperature results, then sample additional low-temperature parameter combinations to look for unusually slow Galerkin convergence. Keep the current file unchanged unless these checks reveal a measurable accuracy issue.
+CMD: cat /app/lowcheck.log; cat /app/tailenergy.log; cat /app/timing.log; tail -n 5 /app/timingerr.log
+cat > /app/sweep.py <<'PY'
+import importlib.util,time,numpy as np
+spec=importlib.util.spec_from_file_location('tr','/app/output/transport.py');s=importlib.util.module_from_spec(spec);spec.loader.exec_module(s)
+rng=np.random.default_rng(98172)
+cases=[(0,L) for L in np.linspace(.9,2.7,10)]+[(.5,L) for L in np.linspace(.8,2.8,8)]+[(float(rng.uniform(0,.5)),float(rng.uniform(.8,2.8))) for _ in range(14)]
+for idx,(A,L) in enumerate(cases):
+ st=time.time();t,w,q=s.integrate(A,L,1,.2)
+ r=s.matrices(t,w,q,'H2',3,.2,20)
+ rel=[abs(v[-1]-v[15])/v[-1] for v in r]
+ print(idx,A,L,'time',time.time()-st,'values',[float(v[-1]) for v in r],'rel16',rel,'rel18',[abs(v[-1]-v[17])/v[-1] for v in r],flush=True)
+ if max(rel)>1e-6:np.savez('/app/sweep%d.npz'%idx,t=t,w=w,q=q,A=A,L=L)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/sweep.py > /app/sweep.log 2> /app/sweeperr.log &
+
+OBS: [(float(rng.uniform(0,.5)),float(rng.uniform(.8,2.8))) for _ in range(14
+)]
+> for idx,(A,L) in enumerate(cases):
+>  st=time.time();t,w,q=s.integrate(A,L,1,.2)
+>  r=s.matrices(t,w,q,'H2',3,.2,20)
+>  rel=[abs(v[-1]-v[15])/v[-1] for v in r]
+>  print(idx,A,L,'time',time.time()-st,'values',[float(v[-1]) for v in r],'rel16',rel,'rel18',[abs(v[-1]-v[17])/v[-1] for v in r],flush=True)
+>  if max(rel)>1e-6:np.savez('/app/sweep%d.npz'%idx,t=t,w=w,q=q,A=A,L=L)
+> PY
+root@950379d48da3:/app# OPENBLAS_NUM_THREADS=1 python3 /app/sweep.py > /app/sweep.log 2> /app/sweeperr.log &
+[2] 2042
+root@950379d48da3:/app#
+
+
+#### step 69 18:57:21
+MSG: Analysis: The additional low-temperature and energy-tail checks pass: extending the energy integral beyond the default cutoff changes the transport values by only about 10^-12 relative in the tested slow-convergence case. A broader low-temperature sweep is now checking for unusually slow Galerkin convergence, while the finalized worst-case timing test continues.
+Plan: Collect the timing and sweep results. If the sweep identifies any convergence issue, strengthen the fallback only for those numerically difficult cases. Otherwise retain the validated implementation and finish the final file and output checks.
+CMD: 
+CMD: cat /app/timing.log; tail -n 7 /app/timingerr.log; tail -n 5 /app/sweep.log; tail -n 4 /app/sweeperr.log
+
+OBS: 80 4008
+batch 3360 4008
+batch 3840 4008
+0 0 0.9 time 35.80339956283569 values [0.08219128498692446, 0.02184174847857495] rel16 [np.float64(1.0551285451356926e-08), np.float64(1.120509411065746e-09)] r
+el18 [np.float64(2.909411029933795e-09), np.float64(2.85545030748793e-10)]
+1 0 1.1 time 29.761435508728027 values [0.07461695308249343, 0.01988702735971337] rel16 [np.float64(1.5420613885413256e-08), np.float64(1.2862202784222137e-09)]
+ rel18 [np.float64(2.7477365723759594e-09), np.float64(2.2598739453923738e-10)]
+batch 0 3192
+batch 480 3192
+batch 960 3192
+batch 1440 3192
+root@950379d48da3:/app#
+
+
+#### step 70 18:57:42
+MSG: Analysis: The broad low-temperature sweep has started and its first cases show small order-convergence errors. The finalized worst-case run has reached the end of its main energy pass. The high-energy cutoff and strict radial comparisons already agree far more closely than the required tolerance.
+Plan: Collect the completed runtime result and continue the low-temperature convergence sweep. Also inspect any implementation edge cases in the standalone script, including tiny equilibrium species fractions, and confirm that the output directory contains only the required file.
+CMD: cat /app/timing.log; tail -n 7 /app/timingerr.log; tail -n 5 /app/sweep.log
+python3 - <<'PY'
+import ast,os
+p='/app/output/transport.py';s=open(p).read();ast.parse(s)
+print('regular file',os.path.isfile(p),'is link',os.path.islink(p),'bytes',os.path.getsize(p))
+for needle in ['/app/', 'np.load(', 'open(', 'subprocess', 'multiprocessing']:
+ print(needle,needle in s)
+print('output files',os.listdir('/app/output'))
+PY
+
+OBS: 64(8.513434036190567e-14)]
+root@950379d48da3:/app# python3 - <<'PY'
+> import ast,os
+> p='/app/output/transport.py';s=open(p).read();ast.parse(s)
+> print('regular file',os.path.isfile(p),'is link',os.path.islink(p),'bytes',os.path.getsize(p))
+> for needle in ['/app/', 'np.load(', 'open(', 'subprocess', 'multiprocessing']:
+>  print(needle,needle in s)
+> print('output files',os.listdir('/app/output'))
+> PY
+regular file True is link False bytes 3626693
+/app/ False
+np.load( False
+open( False
+subprocess False
+multiprocessing False
+output files ['__pycache__', 'transport.py']
+root@950379d48da3:/app#
+
+
+#### step 71 18:58:36
+MSG: Analysis: The finalized worst-case standalone run completed in about 177 seconds, used roughly 344 MB maximum resident memory, exited with status 0, and emitted exactly the required JSON object. The script has no external-file or development-directory dependencies. The ongoing low-temperature sweep is an additional robustness check beyond the completed endpoint and interior tests.
+Plan: Finish the low-temperature convergence sweep, review any unusually slow-converging cases, and remove the output-directory bytecode cache. If no additional issue is found, leave the validated standalone transport.py as the sole output artifact.
+CMD: 
+CMD: tail -n 8 /app/sweep.log; tail -n 5 /app/sweeperr.log; rm -rf /app/output/__pycache__
+
+OBS: 00000000002 time 16.66177225112915 values [0.08374450401045544, 0.022278150351502025] rel16 [np.float64(4.210026570726234e-11), np.float64(4.86292393
+2749171e-12)] rel18 [np.float64(1.0143298643484264e-11), np.float64(2.1428884043626656e-13)]
+5 0 1.9000000000000004 time 13.506620407104492 values [0.09096588806014669, 0.024094785806865214] rel16 [np.float64(3.910933416163567e-10), np.float64(7.8663047
+40725591e-11)] rel18 [np.float64(1.8135688000506805e-10), np.float64(4.976061988127376e-12)]
+batch 960 3024
+batch 1440 3024
+batch 1920 3024
+batch 2400 3024
+batch 2880 3024
+root@950379d48da3:/app#
+
+
+#### step 72 18:59:27
+MSG: Analysis: The validated standalone file satisfies the output and resource requirements, and the continuing low-temperature sweep has not found a convergence problem. The numerical checks separately cover the collision-bracket algebra, exchange averaging, radial phase shifts, high partial-wave tails, shape resonances, energy cutoff, and Galerkin order.
+Plan: Allow the remaining low-temperature sweep cases to finish and review their largest order-convergence differences. Then perform final cleanup and confirm that /app/output contains only the required regular transport.py file.
+CMD: 
+CMD: tail -n 6 /app/sweep.log; tail -n 4 /app/sweeperr.log
+
+OBS: .1259929690230756e-10)]
+8 0 2.5000000000000004 time 10.883289813995361 values [0.11818713987869768, 0.031442297060683536] rel16 [np.float64(4.617681338825604e-08), np.float64(5.0283754
+93031793e-09)] rel18 [np.float64(9.783827650763449e-09), np.float64(8.492349520740205e-10)]
+9 0 2.7 time 10.3411123752594 values [0.1295248974065851, 0.03435013748705197] rel16 [np.float64(2.962370924142486e-07), np.float64(3.3758577388413455e-08)] rel
+18 [np.float64(5.2108807438355665e-08), np.float64(5.476283241587616e-09)]
+batch 960 3192
+batch 1440 3192
+batch 1920 3192
+batch 2400 3192
+root@950379d48da3:/app#
+
+
+#### step 73 19:00:21
+MSG: Analysis: The low-temperature sweep has completed the Lennard-Jones endpoint sequence without finding a significant convergence error. It is now checking nonzero core ratios, where scattering minima can produce slower velocity-space convergence. The standalone worst-case runtime and memory checks have already passed.
+Plan: Finish the remaining endpoint and interior sweep cases, inspect any cases that trigger the higher-order fallback, and confirm that the final file remains unchanged unless an accuracy issue is detected.
+CMD: 
+CMD: tail -n 5 /app/sweep.log; tail -n 4 /app/sweeperr.log
+
+OBS: 
+11 0.5 1.0857142857142859 time 18.793829441070557 values [0.16325708757437213, 0.043529833223717534] rel16 [np.float64(3.572195766276396e-11), np.float64(1.1568
+055591175154e-12)] rel18 [np.float64(1.6657722731825965e-12), np.float64(1.1796005425753911e-14)]
+12 0.5 1.3714285714285714 time 14.339014053344727 values [0.23299171119312304, 0.06191169875183365] rel16 [np.float64(2.0825084517418505e-09), np.float64(3.0332
+01956421724e-10)] rel18 [np.float64(7.9089169506856e-10), np.float64(7.193376683038514e-11)]
+batch 480 3024
+batch 960 3024
+batch 1440 3024
+batch 1920 3024
+root@950379d48da3:/app#
+
+
+#### step 74 19:01:03
+MSG: Analysis: The nonzero-core endpoint sweep is also showing small order-convergence errors so far. The final program's higher-order safeguard is active, and all completed validation runs satisfy the required JSON and resource constraints.
+Plan: Continue the remaining convergence sweep, focusing on cases near scattering minima. Review the largest observed order-16 to order-20 differences, then finalize cleanup and leave the standalone program in place.
+CMD: 
+CMD: tail -n 5 /app/sweep.log; tail -n 4 /app/sweeperr.log
+
+OBS: 4.82335978521924e-12)]
+16 0.5 2.5142857142857142 time 8.487122774124146 values [0.15666672287263958, 0.04176235341559803] rel16 [np.float64(1.0975808519786957e-10), np.float64(6.73945
+29165868995e-12)] rel18 [np.float64(1.599978440514647e-11), np.float64(7.076408947227356e-13)]
+17 0.5 2.8 time 7.595964193344116 values [0.13485201993088086, 0.03594889451202037] rel16 [np.float64(6.943071074460686e-11), np.float64(4.887679407665432e-12)]
+ rel18 [np.float64(1.1862372145786721e-11), np.float64(9.712819990274248e-13)]
+resonances []
+batch 0 3024
+batch 480 3024
+batch 960 3024
+root@950379d48da3:/app#
+
+
+#### step 75 19:01:46
+MSG: Analysis: The endpoint low-temperature sweep is complete and all its order-convergence differences are small. The remaining interior sweep cases are additional checks near possible scattering minima. The finished standalone program has already passed strict numerical comparisons and the worst-case resource test.
+Plan: Finish the interior convergence sweep and summarize the largest observed differences. Then perform final artifact cleanup and confirm that the required regular Python file is the only item left in the output directory.
+CMD: 
+CMD: tail -n 6 /app/sweep.log; tail -n 4 /app/sweeperr.log
+
+OBS: 7555460582 time 11.072193145751953 values [0.1766648016438324, 0.047072665334179045] rel16 [np.float64(1.2703467775121565e-09), np
+.float64(1.362769064169321e-10)] rel18 [np.float64(1.8264796482554352e-10), np.float64(8.587894880096716e-11)]
+19 0.4924011775822768 2.143626395056399 time 12.914639472961426 values [0.1969442738054473, 0.05250197705703577] rel16 [np.float64(2.2780950617513495e-11), np.f
+loat64(8.851712740442562e-12)] rel18 [np.float64(2.2083341610444396e-11), np.float64(6.638222856501808e-12)]
+batch 1440 3192
+batch 1920 3192
+batch 2400 3192
+batch 2880 3192
+root@950379d48da3:/app#
+
+
+#### step 76 19:01:55
+MSG: Analysis: The interior low-temperature sweep has not found an accuracy issue so far. The standalone implementation is complete, with numerical convergence checks and no external data dependencies. I will review the compact numerical routines once more while the last sweep cases finish.
+Plan: Inspect the final numerical code excluding the embedded universal coefficient strings, then collect the remaining sweep results and perform final cleanup. This final review will check edge cases such as very small equilibrium populations and the output JSON construction.
+CMD: grep -v '^_TABLES\[' /app/output/transport.py | sed -n '1,360p'
+
+OBS: s),np.concatenate(ws),np.concatenate(qs,axis=1)
+
+
+def main():
+    gas,A,L,B,T=sys.argv[1:6]
+    A,L,B,T=map(float,(A,L,B,T))
+    M=1 if gas=='H2' else 2
+    t,w,q=integrate(A,L,M,T)
+    conductivity,viscosity=matrices(t,w,q,gas,B,T,16)
+    if any(abs(v[-1]-v[-6])>2e-7*abs(v[-1]) for v in (conductivity,viscosity)):
+        conductivity,viscosity=matrices(t,w,q,gas,B,T,20)
+    print(json.dumps({'viscosity':float(viscosity[-1]),
+                      'thermal_conductivity':float(conductivity[-1])},separators=(',',':'),allow_nan=False))
+
+if __name__=='__main__':
+    main()
+root@950379d48da3:/app#
+
+
+#### step 77 19:02:46
+MSG: Analysis: The final code review confirms that the equilibrium heat/diffusion source, exchange-averaged cross sections, collision-matrix normalization, and JSON construction are consistent with the task. The remaining low-temperature sweep is a numerical robustness check; all completed cases have small order-convergence errors.
+Plan: Collect the remaining sweep results and identify the largest order-convergence differences. Then remove the bytecode cache and confirm the final output artifact and successful standalone test results.
+CMD: 
+CMD: tail -n 8 /app/sweep.log; tail -n 4 /app/sweeperr.log; jobs -l
+
+OBS: e-09), np.
+float64(9.529705778986851e-11)] rel18 [np.float64(1.4378703702896269e-10), np.float64(2.347675750135405e-12)]
+24 0.21066584687475637 1.9613083696380245 time 11.394481658935547 values [0.15309585973819284, 0.040750598981256596] rel16 [np.float64(9.45279308424717e-10), np
+.float64(8.300974672600154e-11)] rel18 [np.float64(1.5332442319138252e-10), np.float64(1.2982607373522068e-11)]
+batch 480 3024
+batch 960 3024
+batch 1440 3024
+batch 1920 3024
+[2]+  2042 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/sweep.py > /app/sweep.log 2> /app/sweeperr.log &
+root@950379d48da3:/app#
+
+
+#### step 78 19:03:40
+MSG: Analysis: The interior low-temperature sweep continues to show small convergence differences, with no additional accuracy issue found. The standalone solver is complete and has passed independent strict-scattering comparisons, clean-environment execution, and a worst-case runtime and memory test.
+Plan: Finish the last sweep cases, summarize their convergence bounds, and perform final cleanup. Leave only the required regular transport.py file in /app/output.
+CMD: 
+CMD: tail -n 6 /app/sweep.log; tail -n 4 /app/sweeperr.log; jobs -l
+
+OBS: 6775e-14), n
+p.float64(3.616857275702446e-14)] rel18 [np.float64(5.0079888056531004e-14), np.float64(6.608875420718755e-15)]
+27 0.21534762716512307 1.825270136173108 time 12.822632551193237 values [0.1423992853304584, 0.037883815007143856] rel16 [np.float64(8.53859934101844e-10), np.f
+loat64(2.1452485418532997e-10)] rel18 [np.float64(5.695922951174782e-10), np.float64(5.28960451003469e-11)]
+batch 480 3192
+batch 960 3192
+batch 1440 3192
+batch 1920 3192
+[2]+  2042 Running                 OPENBLAS_NUM_THREADS=1 python3 /app/sweep.py > /app/sweep.log 2> /app/sweeperr.log &
+root@950379d48da3:/app#
+
+
+#### step 79 19:04:22
+MSG: Analysis: The numerical validation is complete except for the last few optional low-temperature sweep cases. All completed cases show small Galerkin-order differences, and the standalone program has passed strict radial comparisons, energy-tail checks, clean-environment execution, and the worst-case resource benchmark.
+Plan: Collect the final sweep results, remove the bytecode cache, and verify the final artifact and JSON test output. No further implementation changes are planned unless the remaining checks reveal an issue.
+CMD: 
+CMD: tail -n 5 /app/sweep.log; tail -n 4 /app/sweeperr.log; jobs -l
+rm -rf /app/output/__pycache__
+ls -l /app/output
+python3 - <<'PY'
+import json,os,stat
+p='/app/output/transport.py'
+assert stat.S_ISREG(os.lstat(p).st_mode)
+assert os.path.getsize(p)<=20971520
+for f in ['/app/clean.json','/app/finald.json']:
+ d=json.load(open(f));assert set(d)=={'viscosity','thermal_conductivity'};assert all(isinstance(v,(float,int)) and v>0 for v in d.values());print(f,d)
+print(open('/app/timing.log').read())
+PY
+
+OBS: assert set(d)=={'viscosity','thermal_conductivity'};assert all(isinstance(v,(float,int)) and v>0 for v in d.values());print(f,d)
+> print(open('/app/timing.log').read())
+> PY
+/app/clean.json {'viscosity': 0.03583103441663597, 'thermal_conductivity': 0.13829517683471795}
+/app/finald.json {'viscosity': 0.0926847373650881, 'thermal_conductivity': 0.2033882466650319}
+elapsed 177.0650656223297 returncode 0 maxrss_kb 344000
+{"viscosity":0.0926847373650881,"thermal_conductivity":0.2033882466650319}
+
+{'viscosity': 0.0926847373650881, 'thermal_conductivity': 0.2033882466650319}
+
+root@950379d48da3:/app#
+
+
+#### step 80 19:04:45
+MSG: Analysis: The required standalone program is in place as a regular 3.6 MB file, with no external data dependencies. It emits exactly the required JSON object, and the demanding D2 endpoint completed in about 177 seconds using about 344 MB of memory. Independent stricter-scattering and convergence checks agree well within the requested tolerance on the tested cases.
+Plan: Collect the final optional sweep result and remove any regenerated bytecode cache. Confirm that transport.py is the sole output artifact, then mark the task complete.
+CMD: 
+CMD: tail -n 2 /app/sweep.log; jobs -l; rm -rf /app/output/__pycache__; ls -l /app/output
+
+OBS: 788147e-09), n
+p.float64(1.3723823968452523e-10)] rel18 [np.float64(3.627566435999617e-10), np.float64(2.36863186926652e-11)]
+31 0.2318386477925345 2.16031892484786 time 10.566006660461426 values [0.17257368213166013, 0.045985081683167256] rel16 [np.float64(4.094362913529567e-08), np.f
+loat64(4.497673187935231e-09)] rel18 [np.float64(8.475206213438481e-09), np.float64(6.841432429470962e-10)]
+[2]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/sweep.py > /app/sweep.log 2> /app/sweeperr.log
+total 3548
+-rw-r--r-- 1 root root 3626693 Nov  5 18:52 transport.py
+root@950379d48da3:/app#
+
+
+#### step 81 19:04:51
+MSG: Analysis: Implemented and validated /app/output/transport.py. The program is self-contained, uses resonance-aware quantum scattering and convergence-checked collision-bracket transport calculations, and writes exactly the two required JSON numbers. Clean-environment tests succeeded; the demanding endpoint ran in about 177 seconds with about 344 MB maximum memory. All development convergence checks completed, and the output directory contains only the required regular Python file.
+Plan: No further changes are needed.
+CMD: 
+OBS: Current terminal state:
+New Terminal Output:
+
+root@950379d48da3:/app#
+
+
+Are you sure you want to mark the task as complete? This will trigger your solution to be graded and you won't be able to make any further corrections. If so, include "task_complete": true in your JSON response again.
+
+#### step 82 19:04:59
+MSG: Analysis: The required file is complete and has passed standalone execution, output-format, numerical-convergence, and resource-limit checks.
+Plan: Submit the current /app/output/transport.py for grading.
+CMD: 
+OBS: New Terminal Output:
+
+root@950379d48da3:/app#
+
+

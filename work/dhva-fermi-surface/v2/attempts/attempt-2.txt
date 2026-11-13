@@ -1,0 +1,742 @@
+#### step 2 01:17:07
+MSG: Analysis: The terminal is at /app and no data have been inspected yet. We need identify the oscillation frequencies, distinguish genuine extremal orbits from harmonics or combination frequencies, and extract their cyclotron masses from temperature dependence.
+Plan: Inspect the experiment notes and the data file layout before choosing an analysis method.
+CMD: ls -la /app/data && cat /app/data/NOTES.md
+
+OBS:  sample, what remains is a slow drift of the bridge's zero, a few units over
+  a sweep.
+
+The capacitance bridge now and then records a single-point transient while the magnet's supply switches; these are a
+few points in the whole run.
+
+## Files
+
+One file per temperature, `sweep_00.35K.txt` to `sweep_18.00K.txt`. Lines starting with `#` are a header, and one of
+them gives the temperature, as in `# temperature 0.350 K`. Then come two columns separated by spaces: the field in
+tesla and the magnetic moment in units of 1e-9 A m^2, one line per reading, the field increasing.
+root@2e09af766268:/app#
+
+
+#### step 3 01:17:17
+MSG: Analysis: The files contain moment versus applied field at twelve temperatures. The sample dimensions and absolute moment calibration may matter: internal-field magnetic feedback can generate frequencies that are not separate Fermi-surface orbits. There are also isolated bridge transients and a slowly varying background to remove.
+Plan: Check the numerical signal scale, available scientific Python packages, and basic ranges for each sweep.
+CMD: head -12 /app/data/sweep_00.35K.txt; python3 - <<'PY'
+import numpy as np, scipy
+from pathlib import Path
+print('numpy', np.__version__, 'scipy', scipy.__version__)
+for p in sorted(Path('/app/data').glob('sweep*')):
+ a=np.loadtxt(p)
+ print(p.name,a.shape, 'range',np.min(a[:,1]),np.max(a[:,1]),'quantiles',np.quantile(a[:,1],[.01,.5,.99]))
+PY
+
+OBS: .403]
+sweep_03.30K.txt (15001, 2) range 7295.917 47176.991 quantiles [ 7732.043 28375.361 47014.96 ]
+sweep_04.50K.txt (15001, 2) range 7291.235 46956.433 quantiles [ 7724.175 28464.825 46819.64 ]
+sweep_06.50K.txt (15001, 2) range 7288.797 46564.461 quantiles [ 7727.21  28400.925 46469.181]
+sweep_09.00K.txt (15001, 2) range 7290.775 46181.143 quantiles [ 7730.307 28364.78  46128.943]
+sweep_13.00K.txt (15001, 2) range 7291.099 46090.137 quantiles [ 7726.699 28349.473 45943.062]
+sweep_18.00K.txt (15001, 2) range 7288.601 46350.553 quantiles [ 7725.401 28341.805 46085.221]
+root@2e09af766268:/app#
+
+
+#### step 4 01:17:39
+MSG: Analysis: The moment is large enough that the sample's magnetization changes the internal induction by several tenths of a tesla. Therefore using the applied field alone could bias frequencies beyond the required tolerance and introduce combination peaks. We first need a spectral inventory and a check of this magnetic-interaction effect.
+Plan: Create a reusable Python analysis script that loads the sweeps, removes isolated transients, subtracts a smooth background, and lists Fourier peaks versus both applied field and a first estimate of internal induction.
+CMD: mkdir -p /app/output /app/work; cat > /app/work/explore.py <<'PY'
+import numpy as np
+from pathlib import Path
+from scipy.signal import savgol_filter, find_peaks
+from scipy.interpolate import PchipInterpolator
+from scipy.fft import rfft,rfftfreq
+files=sorted(Path('/app/data').glob('sweep*'))
+Ts=np.array([float(p.stem.split('_')[1][:-1]) for p in files])
+Y=np.array([np.loadtxt(p)[:,1] for p in files]); H=np.loadtxt(files[0])[:,0]
+# Identify single-point excursions from local curvature
+for i,y in enumerate(Y):
+ d=y[1:-1]-(y[:-2]+y[2:])/2
+ ids=np.where(abs(d)>max(35,12*np.median(abs(d))))[0]+1
+ # Only replace isolated spikes, not their immediate neighbors
+ ids=ids[np.abs(d[ids-1])>np.abs(d[np.maximum(ids-2,0)])]
+ ids=ids[np.abs(d[ids-1])>np.abs(d[np.minimum(ids,len(d)-1)])]
+ print('T',Ts[i],'spikes',ids.tolist())
+ y[ids]=(y[ids-1]+y[ids+1])/2
+np.savez('/app/work/data.npz',T=Ts,H=H,Y=Y)
+mu=4*np.pi*1e-7/(1.6e-3*.25e-3*.2e-3)*1e-9
+print('mu0 moment/volume coefficient',mu)
+for corr in [0,mu*.98]:
+ for it in [0,7,11]:
+  y=Y[it]; b=H+corr*y
+  bg=np.polynomial.polynomial.polyval(b,np.polynomial.polynomial.polyfit(b,y,4))
+  for lo,hi in [(5,35),(10,35),(18,35)]:
+   x=np.linspace(1/(hi+corr*np.interp(hi,H,y)),1/(lo+corr*np.interp(lo,H,y)),32768)
+   yy=PchipInterpolator((1/b)[::-1],(y-bg)[::-1])(x)
+   z=abs(rfft(yy*np.hanning(len(x)),n=262144))*2/sum(np.hanning(len(x)))
+   f=rfftfreq(262144,x[1]-x[0]); peaks,_=find_peaks(z)
+   peaks=sorted([p for p in peaks if f[p]>35],key=lambda p:z[p],reverse=True)[:30]
+   print('corr',corr,'T',Ts[it],'window',lo,hi,[(round(f[p],2),round(z[p],2)) for p in peaks])
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/explore.py
+
+OBS: ial.polyfit(b,y,4))
+>   for lo,hi in [(5,35),(10,35),(18,35)]:
+>    x=np.linspace(1/(hi+corr*np.interp(hi,H,y)),1/(lo+corr*np.interp(lo,H,y)),32768)
+>    yy=PchipInterpolator((1/b)[::-1],(y-bg)[::-1])(x)
+>    z=abs(rfft(yy*np.hanning(len(x)),n=262144))*2/sum(np.hanning(len(x)))
+>    f=rfftfreq(262144,x[1]-x[0]); peaks,_=find_peaks(z)
+>    peaks=sorted([p for p in peaks if f[p]>35],key=lambda p:z[p],reverse=True)[:30]
+>    print('corr',corr,'T',Ts[it],'window',lo,hi,[(round(f[p],2),round(z[p],2)) for p in peaks])
+> PY
+root@2e09af766268:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/explore.py
+
+
+
+#### step 5 01:17:44
+MSG: Analysis: The exploratory script has started; no results have appeared yet.
+Plan: Wait briefly for the spectral inventory.
+CMD: 
+OBS: 4(33977.71), np.float64(0.13)), (np.float64(28145.64), np.float64(0.13)), (np.float64
+(2181.1), np.float64(0.13)), (np.float64(22569.62), np.float64(0.13)), (np.float64(92047.06), np.float64(0.13)), (np.float64(35807.93), np.float64(0.13)), (np.f
+loat64(50914.4), np.float64(0.13)), (np.float64(22854.11), np.float64(0.12)), (np.float64(5870.0), np.float64(0.12)), (np.float64(60174.59), np.float64(0.12)),
+(np.float64(46803.51), np.float64(0.12)), (np.float64(28686.17), np.float64(0.12)), (np.float64(15637.52), np.float64(0.12)), (np.float64(56618.45), np.float64(
+0.12))]
+root@2e09af766268:/app#
+
+
+#### step 6 01:17:57
+MSG: Analysis: The dominant apparent frequency is about 451 T, with peaks near multiples and weaker frequencies around 1161 T and 2322 T. A peak near twice the dominant frequency survives to high temperature, so it may be an independent lighter orbit rather than only a harmonic. Internal-field correction shifts the dominant frequency toward 460 T. The full inventory was truncated by the terminal.
+Plan: Save the output and print only the most significant corrected peaks. Then fit the large oscillations directly in the measured internal field to separate harmonics from independent signals.
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/work/explore.py > /app/work/explore.log; python3 - <<'PY'
+from pathlib import Path
+for line in Path('/app/work/explore.log').read_text().splitlines():
+ if line.startswith('corr 1.') and ('T 0.35 ' in line or 'T 4.5 ' in line):
+  print(line[:1100].replace('np.float64(', '').replace(')', ''))
+PY
+
+OBS: New Terminal Output:
+
+root@2e09af766268:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/explore.py > /app/work/explore.log; python3 - <<'PY'
+> from pathlib import Path
+> for line in Path('/app/work/explore.log').read_text().splitlines():
+>  if line.startswith('corr 1.') and ('T 0.35 ' in line or 'T 4.5 ' in line):
+>   print(line[:1100].replace('np.float64(', '').replace(')', ''))
+> PY
+
+
+
+#### step 7 01:18:02
+MSG: Analysis: The saved spectral calculation is still running.
+Plan: Wait for the compact corrected-frequency output.
+CMD: 
+OBS: 69.6, 0.15, (10716.17, 0.14, (818.4, 0.14, (12166.73, 0.14, (15734.01, 0.13, (3465.21, 0.13, (7813.28, 0.13, (667.97, 0.12
+corr 1.5393804002589985e-05 T 4.5 window 18 35 [(460.11, 911.37, (924.97, 52.34, (374.73, 29.2, (550.24, 29.03, (1385.09, 11.42, (588.19, 9.05, (332.04, 8.83, (
+630.88, 4.11, (294.09, 3.99, (2376.47, 3.88, (668.83, 2.16, (256.15, 2.04, (2651.59, 1.77, (1185.86, 1.75, (706.77, 1.38, (796.9, 1.14, (744.72, 1.1, (218.2, 1.
+08, (1854.69, 0.69, (1053.04, 0.69, (180.25, 0.61, (147.05, 0.5, (3718.86, 0.27, (3012.09, 0.18, (44099.8, 0.17, (2243.65, 0.15, (
+root@2e09af766268:/app#
+
+
+#### step 8 01:18:41
+MSG: Analysis: Corrected spectra show a dominant family near 462, 924, 1386, and 1848 T, plus a temperature-persistent signal near 930 T and weak signals near 1188 and 2376 T. Fourier-window sidelobes from the large oscillation obscure smaller components. We need quantitative subtraction and temperature-dependent fitting rather than counting Fourier peaks.
+Plan: Fit the strongest family to the Lifshitz–Kosevich form over all temperatures, allowing a fitted internal-field correction and several harmonics. Include the nearby 930 T component provisionally and inspect the residual spectrum for additional genuine signals.
+CMD: cat > /app/work/fit.py <<'PY'
+import numpy as np
+from scipy.optimize import least_squares
+from scipy.signal import find_peaks
+from scipy.interpolate import PchipInterpolator
+from scipy.fft import rfft,rfftfreq
+D=np.load('/app/work/data.npz'); T=D['T']; H=D['H']; Y=D['Y']
+step=5; h=H[::step]; y=Y[:,::step]; t=T[:,None]
+# Parameters: c in 1e-5 units, F1,m1,d1,F2,m2,d2,
+# harmonic sine/cos coefficients scaled for amplitude at B=20,T=0, then per-T polynomial backgrounds
+harm=np.array([1,2,3,4,5])
+
+def rt(x):
+ return x/np.sinh(np.clip(x,1e-8,700))
+
+def calc(p,h,y):
+ b=h[None,:]+p[0]*1e-5*y
+ xx=(b-20)/15
+ bg=np.einsum('tk,tkn->tn',p[17:].reshape(len(T),5),np.array([xx**j for j in range(5)]).transpose(1,0,2))
+ osc=np.zeros_like(y)
+ for j,pp in enumerate(harm):
+  env=(b/20)**.5*np.exp(-p[3]*pp*(1/b-1/20))*rt(14.694*p[2]*pp*t/b)
+  ph=2*np.pi*pp*p[1]/b
+  osc+=env*(p[7+2*j]*np.sin(ph)+p[8+2*j]*np.cos(ph))
+ env=(b/20)**.5*np.exp(-p[6]*(1/b-1/20))*rt(14.694*p[5]*t/b)
+ # F2 coeff separate, append after background
+ ph=2*np.pi*p[4]/b
+ osc+=env*(p[-2]*np.sin(ph)+p[-1]*np.cos(ph))
+ return bg+osc
+# actual bg slice excludes final 2
+src=open(__file__).read() if False else ''
+PY
+# fix background slice
+sed -i 's/p\[17:\]/p[17:-2]/' /app/work/fit.py
+cat >> /app/work/fit.py <<'PY'
+p=np.zeros(17+len(T)*5+2); p[:7]=[1.54,462,1.25,20,930,.65,20]
+b=h[None,:]+p[0]*1e-5*y
+for i in range(len(T)):
+ p[17+5*i:22+5*i]=np.polynomial.polynomial.polyfit((b[i]-20)/15,y[i],4)
+# Estimate linear harmonic coeffs for first temperature
+basis=[]
+for pp in harm:
+ e=(b[0]/20)**.5*np.exp(-p[3]*pp*(1/b[0]-1/20))*rt(14.694*p[2]*pp*T[0]/b[0])
+ basis.extend([e*np.sin(2*np.pi*pp*p[1]/b[0]),e*np.cos(2*np.pi*pp*p[1]/b[0])])
+co=np.linalg.lstsq(np.array(basis).T,y[0]-calc(p,h,y)[0],rcond=None)[0]
+p[7:17]=co; p[-2:]=[20,20]
+lo=np.full(len(p),-np.inf);hi=np.full(len(p),np.inf)
+lo[:7]=[0,440,.05,0,910,.05,0];hi[:7]=[2,480,5,300,950,5,300]
+print('initial',p[:17],flush=True)
+r=least_squares(lambda p:(calc(p,h,y)-y).ravel(),p,bounds=(lo,hi),x_scale='jac',diff_step=1e-5,max_nfev=200,verbose=1,ftol=1e-10,xtol=1e-10)
+p=r.x;print('fit',p[:17],p[-2:], 'rms',np.std(r.fun),flush=True)
+np.savez('/app/work/fit.npz',p=p, residual=Y-calc(p,H,Y))
+res=Y-calc(p,H,Y)
+for it in [0,5,7,11]:
+ b=H+p[0]*1e-5*Y[it];x=np.linspace(1/b[-1],1/b[0],32768)
+ yy=PchipInterpolator((1/b)[::-1],res[it,::-1])(x)
+ z=abs(rfft(yy*np.hanning(len(x)),n=262144))*2/sum(np.hanning(len(x)))
+ f=rfftfreq(262144,x[1]-x[0]);ids,_=find_peaks(z);ids=sorted([i for i in ids if 35<f[i]<10000],key=lambda i:z[i],reverse=True)[:30]
+ print('res',T[it],[(round(f[i],2),round(z[i],3)) for i in ids],flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/fit.py > /app/work/fit.log 2>&1
+
+OBS: .savez('/app/work/fit.npz',p=p, residual=Y-calc(p,H,Y))
+> res=Y-calc(p,H,Y)
+> for it in [0,5,7,11]:
+>  b=H+p[0]*1e-5*Y[it];x=np.linspace(1/b[-1],1/b[0],32768)
+>  yy=PchipInterpolator((1/b)[::-1],res[it,::-1])(x)
+>  z=abs(rfft(yy*np.hanning(len(x)),n=262144))*2/sum(np.hanning(len(x)))
+>  f=rfftfreq(262144,x[1]-x[0]);ids,_=find_peaks(z);ids=sorted([i for i in ids if 35<f[i]<10000],key=lambda i:z[i],reverse=True)[:30]
+>  print('res',T[it],[(round(f[i],2),round(z[i],3)) for i in ids],flush=True)
+> PY
+root@2e09af766268:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/fit.py > /app/work/fit.log 2>&1
+
+
+
+#### step 9 01:18:51
+MSG: Analysis: The global nonlinear fit is running. It models the dominant orbit's harmonics and a second nearby component, with the internal induction inferred from the absolute magnetization.
+Plan: Check the fit progress and residual peaks.
+CMD: tail -10 /app/work/fit.log
+
+OBS: New Terminal Output:
+
+root@2e09af766268:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/fit.py > /app/work/fit.log 2>&1
+tail -10 /app/work/fit.log
+
+
+
+#### step 10 01:19:05
+MSG: Analysis: The fit has not returned to the shell yet, so the requested log check is queued.
+Plan: Allow a short interval for the optimization to finish.
+CMD: 
+OBS: 2517.33), np.float64(0.12)), (np.float64(4827.79), np.float64(0.117)), (np.float64(3895.42), np.float64(0.117)), (n
+p.float64(6022.09), np.float64(0.116)), (np.float64(7103.29), np.float64(0.116)), (np.float64(2580.58), np.float64(0.115)), (np.float64(7122.63), np.float64(0.1
+15)), (np.float64(2712.29), np.float64(0.114)), (np.float64(5012.33), np.float64(0.114)), (np.float64(692.77), np.float64(0.114)), (np.float64(4970.66), np.floa
+t64(0.114)), (np.float64(7920.32), np.float64(0.113)), (np.float64(762.71), np.float64(0.113)), (np.float64(4247.39), np.float64(0.112))]
+root@2e09af766268:/app#
+
+
+#### step 11 01:19:41
+MSG: Analysis: The first global fit finds masses near 0.66 and 0.23 electron masses for the dominant ~461 T signal and the nearby ~927 T signal. The latter is much lighter than a second harmonic of the dominant orbit, confirming it needs an independent orbit. Residual coherent peaks remain near 1185, 2370, 2638, and 2700 T. The dominant-family residual suggests the simple amplitude model also needs refinement.
+Plan: Use a more flexible variable-projection fit: fit frequencies, masses, damping, and field powers nonlinearly, while solving backgrounds and sine/cosine amplitudes linearly. Test whether 2370 T is the second harmonic of 1185 T and include the remaining two residual frequencies provisionally.
+CMD: cat > /app/work/fit2.py <<'PY'
+import numpy as np
+from scipy.optimize import least_squares
+from scipy.signal import find_peaks
+from scipy.interpolate import PchipInterpolator
+from scipy.fft import rfft,rfftfreq
+D=np.load('/app/work/data.npz');T=D['T'];H=D['H'];Y=D['Y'];step=8;h=H[::step];y=Y[:,::step];t=T[:,None]
+# orbit: F, m, D, field power; 1185 and 2370 initially independent to test harmonics
+nh=[6,2,1,2,1,1]
+p0=np.array([1.4,460.8,.66,12,.5,927,.23,12,.5,1185,.5,20,.5,2370,1,20,.5,2638,1,20,.5,2700,1,20,.5])
+
+def rt(x):return x/np.sinh(np.clip(x,1e-8,700))
+
+def solve(p,h,y,ret=False):
+ b=h[None,:]+p[0]*1e-5*y;xx=(b-20)/15
+ # Block polynomial backgrounds, project out first without large full matrix
+ bg=np.array([xx**j for j in range(5)]).transpose(1,2,0)
+ Q=np.array([np.linalg.qr(bb)[0] for bb in bg])
+ def project(v):return v-np.einsum('tnk,tkc->tnc',Q,np.einsum('tnk,tnc->tkc',Q,v))
+ basis=[]
+ for o,n in enumerate(nh):
+  F,m,d,power=p[1+4*o:5+4*o]
+  for pp in range(1,n+1):
+   env=(b/20)**power*np.exp(-d*pp*(1/b-1/20))*rt(14.694*m*pp*t/b)
+   ph=2*np.pi*pp*F/b
+   basis.extend([env*np.sin(ph),env*np.cos(ph)])
+ A=np.array(basis).transpose(1,2,0)
+ Ap=project(A);yp=project(y[:,:,None])[:,:,0]
+ coef=np.linalg.lstsq(Ap.reshape(-1,Ap.shape[-1]),yp.ravel(),rcond=None)[0]
+ res=yp-np.einsum('tnc,c->tn',Ap,coef)
+ if ret:return res,coef
+ return res.ravel()
+lo=np.r_[0,np.tile([0,.03,0,-2],len(nh))];hi=np.r_[2,np.tile([10000,5,300,3],len(nh))]
+for o,F in enumerate(p0[1::4]):lo[1+4*o]=F-15;hi[1+4*o]=F+15
+if __name__=='__main__':
+ r=least_squares(lambda p:solve(p,h,y),p0,bounds=(lo,hi),diff_step=2e-6,x_scale='jac',max_nfev=150,ftol=2e-9,verbose=1)
+ res,coef=solve(r.x,H,Y,True);print('p',r.x,'rms',np.std(res), 'coef',coef,flush=True)
+ np.savez('/app/work/fit2.npz',p=r.x,residual=res,coef=coef)
+ for it in [0,5,7,11]:
+  b=H+r.x[0]*1e-5*Y[it];x=np.linspace(1/b[-1],1/b[0],32768)
+  yy=PchipInterpolator((1/b)[::-1],res[it,::-1])(x);z=abs(rfft(yy*np.hanning(len(x)),n=262144))*2/sum(np.hanning(len(x)));f=rfftfreq(262144,x[1]-x[0]);ids,_=find_peaks(z);ids=sorted([i for i in ids if 35<f[i]<8000],key=lambda i:z[i],reverse=True)[:15]
+  print('res',T[it],[(round(float(f[i]),2),round(float(z[i]),3)) for i in ids],flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/fit2.py > /app/work/fit2.log 2>&1
+
+OBS: np.savez('/app/work/fit2.npz',p=r.x,residual=res,coef=coef)
+>  for it in [0,5,7,11]:
+>   b=H+r.x[0]*1e-5*Y[it];x=np.linspace(1/b[-1],1/b[0],32768)
+>   yy=PchipInterpolator((1/b)[::-1],res[it,::-1])(x);z=abs(rfft(yy*np.hanning(len(x)),n=262144))*2/sum(np.hanning(len(x)));f=rfftfreq(262144,x[1]-x[0]);ids,_=f
+ind_peaks(z);ids=sorted([i for i in ids if 35<f[i]<8000],key=lambda i:z[i],reverse=True)[:15]
+>   print('res',T[it],[(round(float(f[i]),2),round(float(z[i]),3)) for i in ids],flush=True)
+> PY
+root@2e09af766268:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/fit2.py > /app/work/fit2.log 2>&1
+
+
+
+#### step 12 01:19:59
+MSG: Analysis: The refined fit is running. Its temperature dependences will determine whether the apparent 1185/2370 T pair can be represented by one orbit and whether the 2638/2700 T peaks are independent or combination signals.
+Plan: Wait briefly and inspect the refined fit output.
+CMD: 
+CMD: tail -15 /app/work/fit2.log
+
+OBS: , 0.133), (5181.82, 0.129)]
+res 4.5 [(5023.07, 0.188), (930.89, 0.174), (2675.75, 0.145), (3672.91, 0.141), (7243.8, 0.137), (2126.15, 0.137), (1558.68, 0.137), (1639.11, 0.135), (1778.37,
+ 0.134), (1737.41, 0.131), (461.72, 0.13), (113.94, 0.129), (2387.54, 0.128), (2421.05, 0.127), (501.19, 0.126)]
+res 18.0 [(3707.59, 0.162), (889.11, 0.154), (1020.91, 0.153), (6167.15, 0.144), (6125.45, 0.142), (2416.37, 0.135), (2499.03, 0.131), (1374.61, 0.129), (81.17,
+ 0.129), (475.83, 0.128), (586.04, 0.124), (6834.35, 0.123), (1303.87, 0.121), (1636.73, 0.12), (3674.08, 0.12)]
+root@2e09af766268:/app#
+
+
+#### step 13 01:20:12
+MSG: Analysis: The refined fit reduces the residual noise to about 3.17 moment units. The 1185/2370 T pair has fitted masses about 0.50/0.96, compatible with a fundamental and second harmonic. The other two weak peaks have masses around 1.14 and 1.54; these may instead be sum/difference frequencies from magnetic breakdown. We should examine their frequency arithmetic and field dependence before adding orbits.
+Plan: Print the fitted parameters clearly, check simple frequency relations, and test whether the remaining structured residual results from inadequate background/internal-field modeling.
+CMD: head -8 /app/work/fit2.log; python3 - <<'PY'
+import numpy as np
+p=np.load('/app/work/fit2.npz')['p'];print('correction',p[0]);q=p[1:].reshape(-1,4);print('F,m,D,power');print(q)
+from itertools import product
+for target in q[4:,0]:
+ print('target',target)
+ for cs in product(range(-6,7),repeat=3):
+  v=np.dot(cs,q[:3,0]);
+  if abs(v-target)<8:print(cs,v,v-target)
+PY
+
+OBS: [:3,0]);
+>   if abs(v-target)<8:print(cs,v,v-target)
+> PY
+`ftol` termination condition is satisfied.
+Function evaluations 10, initial cost 3.9769e+05, final cost 1.1332e+05, first-order optimality 2.18e-01.
+p [ 1.43637328e+00  4.61057511e+02  6.59627239e-01  1.25874363e+01
+  5.00598161e-01  9.27103342e+02  2.53294518e-01  8.84932926e+00
+  6.20989760e-01  1.18582771e+03  4.98089929e-01  4.04913646e+00
+  7.77772089e-01  2.37168778e+03  9.58728360e-01  1.43658114e+01
+  5.36803051e-01  2.63912176e+03  1.13902405e+00  3.74186154e+01
+ -3.73600624e-01  2.70067575e+03  1.54364461e+00  1.13424741e-15
+
+
+
+#### step 14 01:20:20
+MSG: Analysis: The main fitted frequencies are approximately 461.06, 927.10, 1185.83, 2371.69, 2639.12, and 2700.68 T. Masses and frequency relations still need assessment, particularly for the weak pair near 2640/2700 T.
+Plan: Wait for the frequency-combination check to finish.
+CMD: 
+OBS: 7103342e+02  2.53294518e-01  8.84932926e+00  6.20989760e-01]
+ [ 1.18582771e+03  4.98089929e-01  4.04913646e+00  7.77772089e-01]
+ [ 2.37168778e+03  9.58728360e-01  1.43658114e+01  5.36803051e-01]
+ [ 2.63912176e+03  1.13902405e+00  3.74186154e+01 -3.73600624e-01]
+ [ 2.70067575e+03  1.54364461e+00  1.13424741e-15  1.61767481e+00]]
+target 2639.1217585542972
+(-6, 2, 3) 2645.344751667514 6.222993113216944
+(-4, 1, 3) 2640.356430882648 1.2346723283508254
+(-2, 0, 3) 2635.3681100977824 -3.7536484565148385
+target 2700.6757457357585
+(-5, -1, 5) 2696.747656443652 -3.928089292106506
+root@2e09af766268:/app#
+
+
+#### step 15 01:20:55
+MSG: Analysis: The 2371.7 T peak agrees with twice 1185.8 T to within 0.04 T, and its mass is approximately doubled, so it does not require a separate orbit. The 2639 and 2701 T peaks have no convincing low-order relation to the three lower fundamentals. Before finalizing five orbits, we should improve the dominant harmonic model and verify the weak peaks and their temperature dependence.
+Plan: Refit with three candidate fundamentals plus two high-frequency candidates. Allow each observed harmonic its own field envelope while enforcing the harmonic frequency and mass relations. This tests the one-orbit interpretation of the 1185/2371 T pair and removes systematic residuals from the large oscillations.
+CMD: cat > /app/work/fit3.py <<'PY'
+import numpy as np
+from scipy.optimize import least_squares
+from scipy.signal import find_peaks
+from scipy.interpolate import PchipInterpolator
+from scipy.fft import rfft,rfftfreq
+D=np.load('/app/work/data.npz');T=D['T'];H=D['H'];Y=D['Y'];step=8;h=H[::step];y=Y[:,::step];t=T[:,None]
+nh=[8,2,3,1,1]
+old=np.load('/app/work/fit2.npz')['p'];q=old[1:].reshape(-1,4)[[0,1,2,4,5]]
+p0=np.r_[old[0],q[:,:2].ravel(),np.array([[qq[2]*pp,qq[3]] for qq,n in zip(q,nh) for pp in range(1,n+1)]).ravel()]
+
+def rt(x):return x/np.sinh(np.clip(x,1e-8,700))
+
+def solve(p,h,y,ret=False):
+ b=h[None,:]+p[0]*1e-5*y;xx=(b-20)/15
+ bg=np.array([xx**j for j in range(5)]).transpose(1,2,0)
+ Q=np.array([np.linalg.qr(bb)[0] for bb in bg])
+ def project(v):return v-np.einsum('tnk,tkc->tnc',Q,np.einsum('tnk,tnc->tkc',Q,v))
+ basis=[];j=1+2*len(nh)
+ for o,n in enumerate(nh):
+  F,m=p[1+2*o:3+2*o]
+  for pp in range(1,n+1):
+   d,power=p[j:j+2];j+=2
+   env=(b/20)**power*np.exp(-d*(1/b-1/20))*rt(14.694*m*pp*t/b)
+   ph=2*np.pi*pp*F/b
+   basis.extend([env*np.sin(ph),env*np.cos(ph)])
+ A=np.array(basis).transpose(1,2,0);Ap=project(A);yp=project(y[:,:,None])[:,:,0]
+ coef=np.linalg.lstsq(Ap.reshape(-1,Ap.shape[-1]),yp.ravel(),rcond=None)[0]
+ res=yp-np.einsum('tnc,c->tn',Ap,coef)
+ if ret:return res,coef
+ return res.ravel()
+lo=np.r_[0,np.array([[F-10,.03] for F,m in q[:,:2]]).ravel(),np.tile([0,-3],sum(nh))]
+hi=np.r_[2,np.array([[F+10,5] for F,m in q[:,:2]]).ravel(),np.tile([800,5],sum(nh))]
+if __name__=='__main__':
+ r=least_squares(lambda p:solve(p,h,y),p0,bounds=(lo,hi),diff_step=2e-6,x_scale='jac',max_nfev=150,ftol=3e-8,verbose=1)
+ res,coef=solve(r.x,H,Y,True);print('p',r.x,'rms',np.std(res),'coef',coef,flush=True)
+ np.savez('/app/work/fit3.npz',p=r.x,residual=res,coef=coef)
+ for it in [0,5,7,11]:
+  b=H+r.x[0]*1e-5*Y[it];x=np.linspace(1/b[-1],1/b[0],32768)
+  yy=PchipInterpolator((1/b)[::-1],res[it,::-1])(x);z=abs(rfft(yy*np.hanning(len(x)),n=262144))*2/sum(np.hanning(len(x)));f=rfftfreq(262144,x[1]-x[0]);ids,_=find_peaks(z);ids=sorted([i for i in ids if 35<f[i]<10000],key=lambda i:z[i],reverse=True)[:20]
+  print('res',T[it],[(round(float(f[i]),2),round(float(z[i]),3)) for i in ids],flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/fit3.py > /app/work/fit3.log 2>&1
+
+OBS: p.savez('/app/work/fit3.npz',p=r.x,residual=res,coef=coef)
+>  for it in [0,5,7,11]:
+>   b=H+r.x[0]*1e-5*Y[it];x=np.linspace(1/b[-1],1/b[0],32768)
+>   yy=PchipInterpolator((1/b)[::-1],res[it,::-1])(x);z=abs(rfft(yy*np.hanning(len(x)),n=262144))*2/sum(np.hanning(len(x)));f=rfftfreq(262144,x[1]-x[0]);ids,_=f
+ind_peaks(z);ids=sorted([i for i in ids if 35<f[i]<10000],key=lambda i:z[i],reverse=True)[:20]
+>   print('res',T[it],[(round(float(f[i]),2),round(float(z[i]),3)) for i in ids],flush=True)
+> PY
+root@2e09af766268:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/fit3.py > /app/work/fit3.log 2>&1
+
+
+
+#### step 16 01:21:26
+MSG: Analysis: The harmonic-constrained fit is running. It will test whether the 1185/2371 T pair is fully explained by a single orbit and whether the high-frequency peaks remain after flexible subtraction of the dominant family.
+Plan: Wait for the fit and read its result.
+CMD: 
+CMD: head -12 /app/work/fit3.log; tail -4 /app/work/fit3.log
+
+OBS: , (1779.32
+, 0.134), (8013.63, 0.133), (1738.34, 0.131), (114.0, 0.129), (2388.07, 0.129), (2422.34, 0.127), (502.2, 0.126), (1199.62, 0.125), (395.65, 0.123), (9767.61, 0
+.122), (2355.28, 0.122), (7918.26, 0.121)]
+res 18.0 [(3709.55, 0.162), (889.58, 0.154), (1021.45, 0.153), (6170.42, 0.144), (6128.7, 0.142), (2417.65, 0.135), (2500.35, 0.131), (1375.34, 0.129), (81.21,
+0.129), (476.08, 0.128), (586.35, 0.123), (6837.98, 0.123), (1304.56, 0.121), (1637.6, 0.12), (3676.03, 0.12), (2520.47, 0.12), (4833.82, 0.117), (3900.28, 0.11
+7), (6029.61, 0.116), (7112.15, 0.115)]
+root@2e09af766268:/app#
+
+
+#### step 17 01:21:52
+MSG: Analysis: The harmonic-constrained model explains the 1186/2373 T pair with one mass near 0.475, confirming that the higher peak is a harmonic. Five provisional fundamental signals remain. The two weakest masses vary somewhat with the global fit, and the internal-field coefficient is still mildly model-dependent; a focused check is needed before writing the result.
+Plan: Inspect residual amplitudes by temperature and field and perform fits with the physically plausible internal-field coefficient fixed near the geometry-based value. This will reveal whether mass estimates and the weak frequencies are stable.
+CMD: cat > /app/work/check.py <<'PY'
+import sys
+sys.path.insert(0,'/app/work')
+import fit3 as m
+import numpy as np
+from scipy.optimize import least_squares
+p=np.load('/app/work/fit3.npz')['p']
+print('current',p[:11],flush=True)
+for c in [1.50,1.53]:
+ pp=p.copy();pp[0]=c
+ r=least_squares(lambda z:m.solve(np.r_[c,z],m.h,m.y),pp[1:],bounds=(m.lo[1:],m.hi[1:]),diff_step=2e-6,x_scale='jac',max_nfev=75,ftol=1e-7)
+ pp=np.r_[c,r.x];res,coef=m.solve(pp,m.H,m.Y,True)
+ print('fixed c',c,'F,m',pp[1:11].reshape(-1,2),'RMS',np.std(res),'envelopes',pp[11:].reshape(-1,2),flush=True)
+ np.savez('/app/work/check_'+str(c)+'.npz',p=pp,residual=res,coef=coef)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/check.py > /app/work/check.log 2>&1
+
+OBS: /app/work/fit3.npz')['p']
+> print('current',p[:11],flush=True)
+> for c in [1.50,1.53]:
+>  pp=p.copy();pp[0]=c
+>  r=least_squares(lambda z:m.solve(np.r_[c,z],m.h,m.y),pp[1:],bounds=(m.lo[1:],m.hi[1:]),diff_step=2e-6,x_scale='jac',max_nfev=75,ftol=1e-7)
+>  pp=np.r_[c,r.x];res,coef=m.solve(pp,m.H,m.Y,True)
+>  print('fixed c',c,'F,m',pp[1:11].reshape(-1,2),'RMS',np.std(res),'envelopes',pp[11:].reshape(-1,2),flush=True)
+>  np.savez('/app/work/check_'+str(c)+'.npz',p=pp,residual=res,coef=coef)
+> PY
+root@2e09af766268:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/check.py > /app/work/check.log 2>&1
+
+
+
+#### step 18 01:22:20
+MSG: Analysis: The fixed-internal-field fits are running. The main masses are already stable around 0.66, 0.27, and 0.48. The remaining uncertainty is primarily the weaker ~2640 and ~2700 T signals and the absolute induction correction.
+Plan: Read the constrained-fit results after a short wait.
+CMD: 
+CMD: cat /app/work/check.log
+
+OBS: New Terminal Output:
+
+root@2e09af766268:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/check.py > /app/work/check.log 2>&1
+cat /app/work/check.log
+
+
+
+#### step 19 01:22:49
+MSG: Analysis: The constrained fits have not yet finished. We should not finalize while the weakest masses are still changing with model choices.
+Plan: Wait for the fixed-coefficient fits to return.
+CMD: 
+OBS: 1.38578997e+00]] RMS 2.3643048033210214 envelopes [[ 1.26112353e+01  5.00539585e-01]
+ [ 2.50761530e+01  5.26743691e-01]
+ [ 3.80331168e+01  4.84483737e-01]
+ [ 4.93656371e+01  5.16430315e-01]
+ [ 7.35115256e+01  6.85127509e-02]
+ [ 5.58954411e+00  3.13403584e+00]
+ [ 2.99064783e+01  2.68878830e+00]
+ [ 2.27470937e+02 -2.99999999e+00]
+ [ 1.57562323e+01  1.42955743e-01]
+ [ 1.10210293e-03  3.96209996e-01]
+ [ 1.08544228e+01  3.30076456e-01]
+ [ 1.34677352e+01  5.41568763e-01]
+ [ 2.31077729e+01  1.25454349e-01]
+ [ 3.12202147e+01 -4.73156713e-02]
+ [ 2.75696231e+01  1.89248601e-03]]
+root@2e09af766268:/app#
+
+
+#### step 20 01:23:22
+MSG: Analysis: The fixed-coefficient fits give stable masses near 0.66, 0.28, 0.48, 1.21, and 1.38. The weak high-frequency peaks remain independent of the lower orbit families. A few small residual peaks match higher harmonics not yet included, so these should be modeled before the final count and parameter estimates.
+Plan: Extend the harmonic model for the lighter orbits, then check whether any coherent non-harmonic frequency remains. This also provides a final stability check on the masses.
+CMD: sed "s/nh=\[8,2,3,1,1\]/nh=[8,5,5,2,2]/; s@fit3.npz@fit4.npz@" /app/work/fit3.py > /app/work/fit4.py
+OPENBLAS_NUM_THREADS=1 python3 /app/work/fit4.py > /app/work/fit4.log 2>&1
+
+OBS: New Terminal Output:
+
+root@2e09af766268:/app# sed "s/nh=\[8,2,3,1,1\]/nh=[8,5,5,2,2]/; s@fit3.npz@fit4.npz@" /app/work/fit3.py > /app/work/fit4.py
+root@2e09af766268:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/fit4.py > /app/work/fit4.log 2>&1
+
+
+
+#### step 21 01:23:50
+MSG: Analysis: The expanded harmonic fit is running. Five independent frequency families currently account for the data, but the residual spectrum must be checked for any additional fundamental before writing the JSON.
+Plan: Wait for the expanded fit, then inspect its frequencies, masses, and strongest residual peaks.
+CMD: 
+CMD: head -8 /app/work/fit4.log; tail -4 /app/work/fit4.log
+
+OBS: New Terminal Output:
+
+root@2e09af766268:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/fit4.py > /app/work/fit4.log 2>&1
+head -8 /app/work/fit4.log; tail -4 /app/work/fit4.log
+
+
+
+#### step 22 01:24:12
+MSG: Analysis: The expanded fit is still running. Current estimates are stable enough in frequency, but the final residual check will guard against counting harmonics as orbits or missing a weak independent signal.
+Plan: Allow the optimization a short additional interval.
+CMD: 
+OBS: (1779.2
+9, 0.134), (8013.51, 0.133), (1738.31, 0.131), (114.0, 0.129), (2388.03, 0.128), (2422.31, 0.127), (502.19, 0.126), (1199.61, 0.125), (395.65, 0.123), (9767.47,
+ 0.122), (2355.25, 0.122), (7918.14, 0.121)]
+res 18.0 [(3709.5, 0.162), (889.56, 0.154), (1021.43, 0.153), (6170.33, 0.144), (6128.61, 0.142), (2417.62, 0.135), (2500.32, 0.131), (1375.32, 0.129), (81.21,
+0.129), (476.07, 0.128), (586.34, 0.123), (6837.87, 0.123), (1304.55, 0.121), (1637.57, 0.12), (3675.97, 0.12), (2520.43, 0.12), (4833.75, 0.117), (3900.23, 0.1
+17), (6029.52, 0.116), (7112.04, 0.115)]
+root@2e09af766268:/app#
+
+
+#### step 23 01:24:51
+MSG: Analysis: After including higher harmonics, the residual spectra are consistent with noise apart from a small mismatch at the dominant fundamental. No further independent frequency is apparent. The five candidate masses are approximately 0.66, 0.27, 0.48, 1.23, and 1.29, but the two weakest estimates deserve a full-resolution check because downsampling and flexible weak-harmonic envelopes can bias them.
+Plan: Refit the two weak high-frequency fundamentals at full sampling while holding the other families fixed. Also inspect the amplitudes of their modeled higher harmonics to ensure the orbit assignments are supported.
+CMD: cat > /app/work/refine.py <<'PY'
+import sys
+sys.path.insert(0,'/app/work')
+import fit4 as m
+import numpy as np
+from scipy.optimize import least_squares
+p=np.load('/app/work/fit4.npz')['p'];res,coef=m.solve(p,m.H,m.Y,True)
+print('F,m',p[1:11].reshape(-1,2),'coef',coef.reshape(-1,2),flush=True)
+# Adjust high-frequency families using every sample; preserve lower-frequency nuisance families.
+ids=np.array([7,8,9,10,47,48,49,50])
+# envelopes: start at 11; high fundamentals follow 8+5+5 preceding harmonics
+ids=np.array([7,8,9,10,47,48,51,52])
+# impose B^0.5 for high fundamental envelopes (standard 3D LK)
+p[48]=.5;p[52]=.5
+ids=np.array([7,8,9,10,47,51])
+def fun(z):
+ pp=p.copy();pp[ids]=z
+ return m.solve(pp,m.H,m.Y)
+r=least_squares(fun,p[ids],bounds=(m.lo[ids],m.hi[ids]),diff_step=1e-6,x_scale='jac',max_nfev=40,ftol=1e-8,verbose=1)
+p[ids]=r.x
+print('refined',p[1:11].reshape(-1,2),'rms',np.std(r.fun),flush=True)
+np.savez('/app/work/refined.npz',p=p)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/refine.py > /app/work/refine.log 2>&1
+
+OBS: preceding harmonics
+> ids=np.array([7,8,9,10,47,48,51,52])
+> # impose B^0.5 for high fundamental envelopes (standard 3D LK)
+> p[48]=.5;p[52]=.5
+> ids=np.array([7,8,9,10,47,51])
+> def fun(z):
+>  pp=p.copy();pp[ids]=z
+>  return m.solve(pp,m.H,m.Y)
+> r=least_squares(fun,p[ids],bounds=(m.lo[ids],m.hi[ids]),diff_step=1e-6,x_scale='jac',max_nfev=40,ftol=1e-8,verbose=1)
+> p[ids]=r.x
+> print('refined',p[1:11].reshape(-1,2),'rms',np.std(r.fun),flush=True)
+> np.savez('/app/work/refined.npz',p=p)
+> PY
+root@2e09af766268:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/refine.py > /app/work/refine.log 2>&1
+
+
+
+#### step 24 01:25:18
+MSG: Analysis: The full-resolution refinement is running. The remaining dominant-frequency residual may reflect how the smooth background is parameterized rather than another orbit.
+Plan: Wait for the high-frequency refinement, and then compare a fit with the smooth background expressed in applied field instead of internal induction. The notes describe instrumental drift versus sweep position, so this is a useful systematic check.
+CMD: 
+CMD: cat /app/work/refine.log; sed "s/xx=(b-20)\/15/xx=np.broadcast_to((h[None,:]-20)\/15,y.shape)/; s@fit4.npz@fit5.npz@" /app/work/fit4.py > /app/work/fit5.py
+OPENBLAS_NUM_THREADS=1 python3 /app/work/fit5.py > /app/work/fit5.log 2>&1
+
+OBS: 95262387e-01]
+ [ 3.02967958e+00  3.24793312e+00]
+ [-4.80284549e-02 -1.10480040e-01]
+ [ 3.18591030e+00 -3.07786778e+00]
+ [-6.25747889e-01  5.33088057e-01]]
+`ftol` termination condition is satisfied.
+Function evaluations 4, initial cost 4.0020e+05, final cost 3.9892e+05, first-order optimality 5.97e-01.
+refined [[4.61300174e+02 6.59967254e-01]
+ [9.27578457e+02 2.69284508e-01]
+ [1.18640898e+03 4.78111605e-01]
+ [2.64096248e+03 1.20933506e+00]
+ [2.70264548e+03 1.29029835e+00]] rms 2.1052548023793967
+root@2e09af766268:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/fit5.py > /app/work/fit5.log 2>&1
+
+
+
+#### step 25 01:25:37
+MSG: Analysis: Full-resolution fitting confirms the high-frequency masses around 1.21 and 1.29. Their frequencies remain near 2641 and 2703 T. The alternate background model is running and may improve the absolute internal-field correction and thus the reported frequencies.
+Plan: Wait for the applied-field-background fit and inspect whether it removes the remaining dominant-frequency mismatch.
+CMD: 
+CMD: head -8 /app/work/fit5.log; tail -4 /app/work/fit5.log
+
+OBS: New Terminal Output:
+
+root@2e09af766268:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/fit5.py > /app/work/fit5.log 2>&1
+head -8 /app/work/fit5.log; tail -4 /app/work/fit5.log
+
+
+
+#### step 26 01:25:51
+MSG: Analysis: The alternate background fit is still optimizing. All five masses have now been cross-checked, and there is no evidence for an additional frequency family.
+Plan: Wait briefly for the last systematic check.
+CMD: 
+OBS: New Terminal Output:
+
+head -8 /app/work/fit5.log; tail -4 /app/work/fit5.log
+
+
+
+#### step 27 01:26:11
+MSG: Analysis: The last fit is taking longer because it includes many weak harmonics and an alternate background model. It is still useful to let it finish rather than use model-dependent frequency estimates.
+Plan: Wait for another short interval.
+CMD: 
+OBS: New Terminal Output:
+
+head -8 /app/work/fit5.log; tail -4 /app/work/fit5.log
+
+
+
+#### step 28 01:26:38
+MSG: Analysis: The fit has not returned yet; no new output is available.
+Plan: Wait up to a short additional interval for the final systematic check.
+CMD: 
+OBS: (1779.26,
+0.137), (8013.39, 0.136), (1738.28, 0.134), (114.0, 0.132), (2388.74, 0.131), (2422.27, 0.13), (501.44, 0.128), (1199.59, 0.128), (395.64, 0.126), (9767.32, 0.1
+25), (2355.21, 0.124), (7918.02, 0.123)]
+res 18.0 [(3709.44, 0.166), (889.55, 0.157), (1021.42, 0.156), (6170.24, 0.147), (6128.52, 0.145), (2417.58, 0.137), (2500.28, 0.134), (1375.3, 0.132), (81.21,
+0.131), (476.07, 0.131), (586.33, 0.126), (6837.77, 0.126), (1304.53, 0.123), (1637.55, 0.123), (3675.92, 0.123), (2520.39, 0.122), (4833.67, 0.119), (3900.17,
+0.119), (6029.43, 0.119), (7111.94, 0.118)]
+root@2e09af766268:/app#
+
+
+#### step 29 01:27:32
+MSG: Analysis: The alternate background fit confirms the same five independent families. The ~2373 T signal is explained as the second harmonic of the ~1186 T orbit; multiples of the dominant and lighter ~928 T orbit also need no extra entries. The weak high-frequency fundamentals are stable near 2641–2644 and 2703–2704 T, with masses about 1.21 and 1.3. We will make one final coherent-residual check for potentially obscured lower-frequency signals.
+Plan: Average low-temperature residual spectra and inspect the regions beneath the weak high-frequency peaks and their possible subharmonics. If no additional coherent peaks appear, write the five-orbit JSON and validate its exact schema.
+CMD: python3 - <<'PY'
+import numpy as np
+from scipy.interpolate import PchipInterpolator
+from scipy.signal import find_peaks
+from scipy.fft import rfft,rfftfreq
+D=np.load('/app/work/data.npz');R=np.load('/app/work/fit4.npz');H=D['H'];Y=D['Y'];p=R['p'];res=R['residual'];x=np.linspace(.030,.190,32768)
+s=[]
+for i in range(5):
+ b=H+p[0]*1e-5*Y[i]
+ s.append(PchipInterpolator((1/b)[::-1],res[i,::-1])(x))
+z=abs(rfft(np.mean(s,axis=0)*np.hanning(len(x)),n=262144))*2/sum(np.hanning(len(x)));f=rfftfreq(262144,x[1]-x[0]);ids,_=find_peaks(z)
+print('coherent residual peaks',[(round(float(f[i]),2),round(float(z[i]),3)) for i in sorted([i for i in ids if 35<f[i]<8000],key=lambda i:z[i],reverse=True)[:25]])
+for lo,hi in [(1300,1335),(1335,1365),(870,910),(890,915)]:
+ mask=(f>lo)&(f<hi);i=np.where(mask)[0][np.argmax(z[mask])];print('region',lo,hi,'maximum',float(f[i]),float(z[i]))
+PY
+
+OBS: .43, 0.071), (2640.54, 0.071), (3159.28, 0.
+065), (414.05, 0.063), (203.12, 0.063), (1978.85, 0.062), (7434.15, 0.062), (5031.88, 0.062), (2521.8, 0.061), (118.75, 0.06), (2441.33, 0.06), (5169.37, 0.06),
+ (7860.7, 0.059), (993.72, 0.058), (5579.52, 0.058), (6424.02, 0.058), (7417.74, 0.057), (4720.17, 0.056), (7528.68, 0.056), (1616.36, 0.056)]
+region 1300 1335 maximum 1328.0844688415527 0.02668921900398912
+region 1335 1365 maximum 1364.0208721160889 0.031232958346394994
+region 870 910 maximum 882.0043325424194 0.04458472044964471
+region 890 915 maximum 914.8158311843872 0.03489996541899838
+
+
+
+#### step 30 01:28:05
+MSG: Analysis: The coherent residual check finds no additional independent oscillation family or detectable subharmonics. Five orbits account for the sweeps: the dominant ~462 T orbit, a lighter independent orbit near 928 T, an orbit near 1188 T whose second harmonic is prominent, and two weak orbits near 2644 and 2704 T. Harmonics, magnetic-feedback mixing, window sidelobes, and isolated transients do not require additional entries. Temperature-dependent fits give masses approximately 0.66, 0.28, 0.48, 1.21, and 1.30 electron masses.
+Plan: Write the requested JSON containing only the five extremal orbits, then validate the exact member names and numeric values.
+CMD: python3 - <<'PY'
+import json
+from pathlib import Path
+result={'orbits':[
+ {'frequency_T':462.0,'mass_me':0.66},
+ {'frequency_T':928.0,'mass_me':0.28},
+ {'frequency_T':1188.0,'mass_me':0.48},
+ {'frequency_T':2644.0,'mass_me':1.21},
+ {'frequency_T':2704.0,'mass_me':1.30}
+]}
+p=Path('/app/output/orbits.json')
+p.write_text(json.dumps(result,indent=2)+'\n')
+v=json.loads(p.read_text())
+assert set(v)=={'orbits'}
+assert all(set(o)=={'frequency_T','mass_me'} and all(isinstance(x,(int,float)) for x in o.values()) for o in v['orbits'])
+print(p.read_text())
+PY
+
+CMD: 
+OBS: read_text())
+> PY
+{
+  "orbits": [
+    {
+      "frequency_T": 462.0,
+      "mass_me": 0.66
+    },
+    {
+      "frequency_T": 928.0,
+      "mass_me": 0.28
+    },
+    {
+      "frequency_T": 1188.0,
+      "mass_me": 0.48
+    },
+    {
+      "frequency_T": 2644.0,
+      "mass_me": 1.21
+    },
+    {
+      "frequency_T": 2704.0,
+      "mass_me": 1.3
+    }
+  ]
+}
+
+root@2e09af766268:/app#
+
+
+Are you sure you want to mark the task as complete? This will trigger your solution to be graded and you won't be able to make any further corrections. If so, include "task_complete": true in your JSON response again.
+
+#### step 31 01:28:19
+MSG: Analysis: /app/output/orbits.json has been written and validated. It contains exactly the required top-level member and five orbit entries with numeric frequencies and masses, excluding harmonics and other non-orbit spectral features.
+Plan: No further commands are needed.
+CMD: 
+OBS: New Terminal Output:
+
+root@2e09af766268:/app#
+
+

@@ -1,0 +1,86 @@
+# Kater pendulum, release runs
+
+A rigid steel bar carries two pivots, A and B, facing each other, a fixed brass bob near pivot A and
+two sliding weights that lock at engraved marks. The bar was hung on one pivot at a time, always on the
+same stand, and released from rest. Runs a1, a2, a3 hang on pivot A; runs b1, b2, b3 hang on pivot B.
+Before each release an electromagnetic catch held the bar still at a chosen angle, on one side of the
+vertical or the other; the release angles were not measured and differ from run to run. A camera
+filmed each swing and a tracker logged the bar angle per frame.
+
+## Pivots
+
+The stand carries two flat, level agate plates, one on either side of the bar, and the pivot in use
+rests on both. Pivot B is the bar's original knife edge, ground sharp. Pivot A is not a knife edge: the
+original edge A chipped, and the workshop replaced it with a hardened steel dowel pin pressed through
+the bar at right angles to it and parallel to edge B. When the bar hangs on A, the two ends of the pin
+rest on the agate plates, and as the bar swings the pin rolls on them without slipping.
+
+    pin_diameter_m = 0.003002                    micrometer
+
+## Geometry (measured, SI units)
+
+The centre of mass lies on the bar's axis, between the two pivots. Both lengths are measured along that
+axis from the line of the pin's surface that faces edge B, which is the line on which the pin rests on
+the plates when the bar hangs on A.
+
+    pivot_separation_m = 1.00003                 from that line to edge B, gauge blocks
+    centre_of_mass_from_pivot_a_m = 0.20346      from that line to the centre of mass
+
+The centre of mass was found on 12 October, after the pin was fitted, by balancing the bar across a
+third knife edge with the sliding weights locked at their marks of that day.
+
+## Sliding weights
+
+A weight's mark is the distance of its centre from the pin's facing surface, along the bar.
+
+    weight    mass_kg    mark_12_october_m    mark_for_these_runs_m
+    heavy     0.815      0.4120               0.3920
+    light     0.240      0.6550               0.6550
+
+Both weights were locked at their marks for these runs before run a1 and were not touched during the
+session. The whole bar as swung, with the pin, the bob and both weights, has a mass of:
+
+    bar_mass_kg = 4.862                          workshop scale
+
+## Camera
+
+One camera on a tripod filmed all six runs. It does not look square-on at the plane of the
+swing: it stands off to one side of the stand and above the bar, turned about the vertical and
+tilted down towards the bar, by angles that were not measured. Its lens is a long telephoto, so
+the picture is a parallel (orthographic) projection of the scene to well within the tracker's
+accuracy. The camera may also be slightly rolled about its own optical axis. The tracker measures
+the angle of the bar's image in the picture, from the picture's vertical axis, and makes no
+correction for the oblique view. The camera, its tripod and the stand were not moved during the
+session, so the same view applies to every run. No angle calibration of the camera was made.
+
+## Files
+
+    /app/data/runs/<run>.csv    tracker log, one row per frame the tracker received
+    /app/data/sync/<run>.csv    camera clock check for the same run
+
+### /app/data/runs/<run>.csv
+
+Leading lines that start with `#` are metadata: `unit` is the angle unit used in this file and
+`nominal_fps` is the frame rate the camera is set to. Then a header row and one row per frame:
+
+    frame_counter   the camera's hardware frame counter, 16 bits, counting each frame delivered
+                    to the tracker; no time stamps are recorded
+    theta           angle of the bar's image from the picture's vertical axis, in the unit named
+                    in the header
+    tracker_ok      1 when the tracker found the bar in that frame; 0 when it lost the bar, in
+                    which case theta repeats the last good value
+
+Each log starts while the catch still holds the bar, so its first rows show the bar at rest at
+the release angle; the catch lets go between half a second and a second and a half into the log.
+
+### /app/data/sync/<run>.csv
+
+The camera's own oscillator is free-running and is not locked to anything. To check it, an LED
+in the camera's view is switched on by a GPS-disciplined pulse at the start of every GPS second.
+`gps_s` is the whole GPS second and `frame_counter` is the counter value of the first frame in
+which the LED was seen lit. The detector occasionally misses a second; those rows are absent.
+
+## Damping
+
+The bar loses amplitude through air drag and pivot friction; both are small, but at the larger
+release angles the swing decays noticeably over a run.

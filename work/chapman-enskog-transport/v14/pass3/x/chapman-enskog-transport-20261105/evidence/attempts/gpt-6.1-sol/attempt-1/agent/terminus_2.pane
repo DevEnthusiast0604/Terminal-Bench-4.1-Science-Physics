@@ -1,0 +1,1931 @@
+[?2004hroot@80c1e2a6cbf9:/app# asciinema rec --stdin /logs/agent/recording.cast
+[?2004l[0;32masciinema: recording asciicast to /logs/agent/recording.cast[0m
+[0;32masciinema: press <ctrl-d> or type "exit" when you're done[0m
+[?2004hroot@80c1e2a6cbf9:/app# clear
+[?2004l[H[J[3J[?2004hroot@80c1e2a6cbf9:/app# mkdir -p /app/output && python3 - <<'PY'
+[?2004l[?2004h> import numpy,scipy,sys
+[?2004l[?2004h> print(sys.version)
+[?2004l[?2004h> print(numpy.__version__,scipy.__version__)
+[?2004l[?2004h> PY
+[?2004l3.12.14 (main, Sep  1 2026, 00:10:15) [GCC 12.2.0]
+2.3.3 1.18.1
+[?2004hroot@80c1e2a6cbf9:/app# pwd; uname -m; which gcc; python3 -c 'import numpy, scipy; print(numpy.__version__, scipy.__version__)'; ls -la /app/output
+[?2004l/app
+x86_64
+2.3.3 1.18.1
+total 8
+drwxr-xr-x 2 root root 4096 Nov  3 00:51 .
+drwxr-xr-x 1 root root 4096 Nov  3 00:51 ..
+[?2004hroot@80c1e2a6cbf9:/app# command -v cc clang gcc g++ tcc; ls /usr/bin/*gcc* /usr/bin/*clang* 2>/dev/null; python3 - <<'PY'
+[?2004l[?2004h> import importlib.util
+[?2004l[?2004h> for s in ['numba','Cython','cffi']:
+[?2004l[?2004h>  print(s,importlib.util.find_spec(s))
+[?2004l[?2004h> PY
+[?2004lnumba None
+Cython None
+cffi None
+[?2004hroot@80c1e2a6cbf9:/app# cat > /app/output/transport.py <<'PY'
+[?2004l[?2004h> import os
+[?2004l[?2004h> os.environ['OPENBLAS_NUM_THREADS']='2'
+[?2004l[?2004h> os.environ['OMP_NUM_THREADS']='2'
+[?2004l[?2004h> import sys, json, math, time
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from scipy.special import roots_hermite, roots_legendre, roots_genlaguerre, eval_genlaguerre, gammaln, spherical_jn, spherical_yn, expit
+[?2004l[?2004h> from scipy.linalg import solve
+[?2004l[?2004h> 
+[?2004l[?2004h> def bracket_polynomials(N,rank):
+[?2004l[?2004h>     # K(chi)=sum_l G_l(x)(1-P_l(cos chi)), x=E/T.
+[?2004l[?2004h>     # The covariance of the opposite particle has the factor (-1)^l.
+[?2004l[?2004h>     D=2*N+rank
+[?2004l[?2004h>     cx,cw=roots_hermite(2*N+rank+1)
+[?2004l[?2004h>     cx=cx/np.sqrt(2.)
+[?2004l[?2004h>     cw=cw/np.sqrt(np.pi)
+[?2004l[?2004h>     C=np.stack(np.meshgrid(cx,cx,cx,indexing='ij'),-1).reshape(-1,3)
+[?2004l[?2004h>     w=(cw[:,None,None]*cw[None,:,None]*cw[None,None,:]).ravel()
+[?2004l[?2004h>     zs,zw=roots_legendre(D+1)
+[?2004l[?2004h>     xs,xw=roots_genlaguerre(D+1,1)
+[?2004l[?2004h>     Pl=np.array([np.polynomial.legendre.legval(zs,[0]*l+[1]) for l in range(1,D+1)])
+[?2004l[?2004h>     proj=Pl*zw[None,:]*(2*np.arange(1,D+1)[:,None]+1)/2
+[?2004l[?2004h>     norms=np.exp(.5*(gammaln(np.arange(N+1)+rank+1.5)-gammaln(rank+1.5)-gammaln(np.arange(N+1)+1)))
+[?2004l[?2004h>     def values(v):
+[?2004l[?2004h>         r2=np.sum(v*v,axis=1)
+[?2004l[?2004h>         S=np.array([eval_genlaguerre(n,rank+.5,r2)/norms[n] for n in range(N+1)])
+[?2004l[?2004h>         if rank==1:
+[?2004l[?2004h>             F=v/np.sqrt(3.)
+[?2004l[?2004h>         else:
+[?2004l[?2004h>             # Orthonormal coordinates for a traceless symmetric tensor.
+[?2004l[?2004h>             F=np.stack([(v[:,0]**2-v[:,1]**2)/np.sqrt(2.),(v[:,0]**2+v[:,1]**2-2*v[:,2]**2)/np.sqrt(6.),np.sqrt(2.)*v[:,0]*v[:,1],np.sqrt(2.)*v[:,0]*v[:,2],np.sqrt(2.)*v[:,1]*v[:,2]],axis=1)/np.sqrt(10.)
+[?2004l[?2004h>         return S[:,:,None]*F[None,:,:]
+[?2004l[?2004h>     G=np.empty((D+1,D,N+1,N+1))
+[?2004l[?2004h>     for ix,x in enumerate(xs):
+[?2004l[?2004h>         q=np.sqrt(x/2.)
+[?2004l[?2004h>         vin=C.copy();vin[:,2]+=q
+[?2004l[?2004h>         fin=values(vin)
+[?2004l[?2004h>         K=[]
+[?2004l[?2004h>         for z in zs:
+[?2004l[?2004h>             v=C.copy();v[:,0]+=q*np.sqrt(1-z*z);v[:,2]+=q*z
+[?2004l[?2004h>             a=(values(v)-fin)*np.sqrt(w)[None,:,None]
+[?2004l[?2004h>             a=a.reshape(N+1,-1)
+[?2004l[?2004h>             K.append(a@a.T)
+[?2004l[?2004h>         G[ix]=-np.einsum('lz,zij->lij',proj,np.array(K))
+[?2004l[?2004h>     # x-polynomial coefficients in normalized L_p^1.
+[?2004l[?2004h>     xp=np.array([eval_genlaguerre(p,1,xs)/np.sqrt(p+1) for p in range(D+1)])
+[?2004l[?2004h>     coeff=np.einsum('px,x,xlij->plij',xp,xw,G,optimize=True)
+[?2004l[?2004h>     # Exact degree and parity constraints remove quadrature noise.
+[?2004l[?2004h>     for i in range(N+1):
+[?2004l[?2004h>         for j in range(N+1):
+[?2004l[?2004h>             coeff[i+j+rank+1:,:,i,j]=0
+[?2004l[?2004h>             coeff[:,2*min(i,j)+rank:,i,j]=0
+[?2004l[?2004h>     return coeff,norms
+[?2004l[?2004h> 
+[?2004l[?2004h> def matrices(coeff, moments, xpop, ds):
+[?2004l[?2004h>     # moments: integrals x exp(-x) L_p^1(x)/sqrt(p+1) Q_l(Tx)
+[?2004l[?2004h>     base=np.einsum('plij,pl->lij',coeff,moments[0],optimize=True)
+[?2004l[?2004h>     exch=np.einsum('plij,pl->lij',coeff,moments[1],optimize=True)
+[?2004l[?2004h>     nn=base.shape[1]; D=base.shape[0]
+[?2004l[?2004h>     odd=np.arange(1,D+1)%2==1
+[?2004l[?2004h>     aa=base.sum(axis=0); ab=np.einsum('l,lij->ij',(-1.)**np.arange(1,D+1),base)
+[?2004l[?2004h>     out=np.zeros((2*nn,2*nn))
+[?2004l[?2004h>     for i in range(2):
+[?2004l[?2004h>         same=(base+exch/ds[i])[~odd].sum(axis=0)
+[?2004l[?2004h>         out[i*nn:(i+1)*nn,i*nn:(i+1)*nn]=xpop[i]*same+xpop[1-i]*aa/2
+[?2004l[?2004h>     out[:nn,nn:]=np.sqrt(xpop[0]*xpop[1])*ab/2
+[?2004l[?2004h>     out[nn:,:nn]=out[:nn,nn:].T
+[?2004l[?2004h>     return (out+out.T)/2
+[?2004l[?2004h> 
+[?2004l[?2004h> def properties(cv,ch,mv,mh,xpop,ds,T,M,gap):
+[?2004l[?2004h>     Nv=cv.shape[-1]; Nh=ch.shape[-1]
+[?2004l[?2004h>     bv=matrices(cv,mv,xpop,ds)
+[?2004l[?2004h>     bh=matrices(ch,mh,xpop,ds)
+[?2004l[?2004h>     factor=4*np.sqrt(T/M)/np.sqrt(np.pi)
+[?2004l[?2004h>     bv*=factor;bh*=factor
+[?2004l[?2004h>     b=np.zeros(2*Nv);b[::Nv]=np.sqrt(xpop)/4
+[?2004l[?2004h>     eta=4*T*b@solve(bv,b,assume_a='pos')
+[?2004l[?2004h>     norms=np.exp(.5*(gammaln(np.arange(Nh)+2.5)-gammaln(2.5)-gammaln(np.arange(Nh)+1)))
+[?2004l[?2004h>     d=np.zeros((2,Nh));d[:,0]=np.sqrt(xpop)*(np.array([0.,gap])-gap*xpop[1])/(2*T)
+[?2004l[?2004h>     d[:,1]=-np.sqrt(xpop)*1.25/norms[1]
+[?2004l[?2004h>     # Orthogonal projection excluding conserved total momentum.
+[?2004l[?2004h>     P=np.zeros((2*Nh,2*Nh-1));P[0,0]=np.sqrt(xpop[1]);P[Nh,0]=-np.sqrt(xpop[0])
+[?2004l[?2004h>     j=1
+[?2004l[?2004h>     for i in range(2):
+[?2004l[?2004h>         for n in range(1,Nh):
+[?2004l[?2004h>             P[i*Nh+n,j]=1;j+=1
+[?2004l[?2004h>     dp=P.T@d.ravel(); hp=P.T@bh@P
+[?2004l[?2004h>     lam=2*T/M*dp@solve(hp,dp,assume_a='pos')
+[?2004l[?2004h>     return eta,lam
+[?2004l[?2004h> 
+[?2004l[?2004h> if __name__=='__main__' and sys.argv[1:] == ['test']:
+[?2004l[?2004h>     t=time.time()
+[?2004l[?2004h>     for N in [1,3,5]:
+[?2004l[?2004h>         cv,_=bracket_polynomials(N,2);ch,_=bracket_polynomials(N,1)
+[?2004l[?2004h>         D=cv.shape[1];mom=np.zeros((2,cv.shape[0],D));mom[0,0,:]=np.pi
+[?2004l[?2004h>         mh=np.zeros((2,ch.shape[0],ch.shape[1]));mh[0,0,:]=np.pi
+[?2004l[?2004h>         print(N,properties(cv,ch,mom,mh,np.array([.7,.3]),[1,9],1,1,0),time.time()-t,flush=True)
+[?2004l[?2004h>     print('HS first',5/16/np.sqrt(np.pi),75/64/np.sqrt(np.pi))
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 /app/output/transport.py test
+[?2004l1 (np.float64(0.1789276989902385), np.float64(0.6611596682200266)) 0.010262727737426758
+3 (np.float64(0.17913123631242153), np.float64(0.6775686753103737)) 0.036742210388183594
+5 (np.float64(0.1791358914864064), np.float64(0.6778190950930536)) 0.25310277938842773
+HS first 0.17630924485867386 0.6611596682200269
+[?2004hroot@80c1e2a6cbf9:/app# cat >> /app/output/transport.py <<'PY'
+[?2004l[?2004h> 
+[?2004l[?2004h> def analytic_brackets(N,rank,K=96):
+[?2004l[?2004h>     from scipy.fft import fft2
+[?2004l[?2004h>     rho=np.longdouble(.5)
+[?2004l[?2004h>     theta=np.arange(K,dtype=np.longdouble)*2*np.arccos(np.longdouble(-1))/K
+[?2004l[?2004h>     t=(rho*np.exp(1j*theta))[:,None];s=t.T
+[?2004l[?2004h>     d=2-t-s
+[?2004l[?2004h>     F0=-2*(t+s-t*s);F1=2*(d+t*s)
+[?2004l[?2004h>     a0=(2-s)**2+s*s;a1=-2*s*(2-s)
+[?2004l[?2004h>     b0=(2-t)**2+t*t;b1=-2*t*(2-t)
+[?2004l[?2004h>     D=2*N+rank
+[?2004l[?2004h>     coeff=np.zeros((D+1,D,N+1,N+1),dtype=np.longdouble)
+[?2004l[?2004h>     zs,zw=roots_legendre(D+1)
+[?2004l[?2004h>     Pl=np.array([np.polynomial.legendre.legval(zs,[0]*l+[1]) for l in range(1,D+1)])
+[?2004l[?2004h>     norms=np.exp(.5*(gammaln(np.arange(N+1)+rank+1.5)-gammaln(rank+1.5)-gammaln(np.arange(N+1)+1)))
+[?2004l[?2004h>     scales=rho**(-np.arange(N+1)[:,None]-np.arange(N+1)[None,:])/norms[:,None]/norms[None,:]/K**2
+[?2004l[?2004h>     for z,w,pp in zip(zs,zw,Pl.T):
+[?2004l[?2004h>         beta=(2-t*s*(1+z))/d
+[?2004l[?2004h>         h=beta-1
+[?2004l[?2004h>         F=F0+z*F1
+[?2004l[?2004h>         if rank==1:
+[?2004l[?2004h>             A0=1/(2*d);A1=F/(6*d*d);A2=0
+[?2004l[?2004h>         else:
+[?2004l[?2004h>             A0=1/(4*d*d);A1=F/(6*d**3)
+[?2004l[?2004h>             A2=(F*F-(a0+z*a1)*(b0+z*b1)/3)/(40*d**4)
+[?2004l[?2004h>         hp=[h**p for p in range(D+1)]
+[?2004l[?2004h>         for p in range(D+1):
+[?2004l[?2004h>             J0=(p+1)*hp[p]/beta**(p+2)
+[?2004l[?2004h>             J1=(p+1)*(2*hp[p]-(p*hp[p-1] if p else 0))/beta**(p+3)
+[?2004l[?2004h>             J2=(p+1)*(6*hp[p]-(6*p*hp[p-1] if p else 0)+(p*(p-1)*hp[p-2] if p>1 else 0))/beta**(p+4)
+[?2004l[?2004h>             v=(2/d)**np.longdouble(1.5)*(A0*J0+A1*J1+A2*J2)/np.sqrt(np.longdouble(p+1))
+[?2004l[?2004h>             v=fft2(v)[:N+1,:N+1].real*scales
+[?2004l[?2004h>             coeff[p]+=((2*np.arange(1,D+1)+1)*w*pp)[:,None,None]*v[None,:,:]
+[?2004l[?2004h>     for i in range(N+1):
+[?2004l[?2004h>         for j in range(N+1):
+[?2004l[?2004h>             coeff[i+j+rank+1:,:,i,j]=0
+[?2004l[?2004h>             coeff[:,2*min(i,j)+rank:,i,j]=0
+[?2004l[?2004h>     coeff=(coeff+coeff.transpose(0,1,3,2))/2
+[?2004l[?2004h>     return np.array(coeff,dtype=float),norms
+[?2004l[?2004h> 
+[?2004l[?2004h> 
+[?2004l[?2004h> def phases(E,A,L,M,step=.002,R=32.,nodes=False):
+[?2004l[?2004h>     E=np.asarray(E);gam=4*np.pi**2*M/L**2;k=np.sqrt(gam*E)
+[?2004l[?2004h>     lmax=int(np.ceil(4*k.max()+12))
+[?2004l[?2004h>     ls=np.arange(lmax+1); ll=ls*(ls+1)
+[?2004l[?2004h>     r0=A+.5*(1-A)
+[?2004l[?2004h>     nr=int(np.ceil((R-r0)/step));h=(R-r0)/nr
+[?2004l[?2004h>     def q(r):
+[?2004l[?2004h>         v=((1-A)/(r-A))**6
+[?2004l[?2004h>         return (ll[None,:]/r**2+gam*(4*v*(v-1)-E[:,None]))*(h*h/12)
+[?2004l[?2004h>     qm=q(r0);qc=q(r0+h)
+[?2004l[?2004h>     um=np.zeros((len(E),lmax+1));uc=np.ones_like(um)*h
+[?2004l[?2004h>     nm=np.zeros((len(E),min(lmax+1,25)),dtype=np.int32)
+[?2004l[?2004h>     last=[]
+[?2004l[?2004h>     for j in range(1,nr+4):
+[?2004l[?2004h>         qp=q(r0+(j+1)*h)
+[?2004l[?2004h>         un=(2*(1+5*qc)*uc-(1-qm)*um)/(1-qp)
+[?2004l[?2004h>         if j < nr:
+[?2004l[?2004h>             nm+=(un[:,:nm.shape[1]]*uc[:,:nm.shape[1]]<0)
+[?2004l[?2004h>         if j >=nr-3:
+[?2004l[?2004h>             last.append(uc.copy())
+[?2004l[?2004h>         if j%128==0 and j<nr-4:
+[?2004l[?2004h>             scale=np.maximum(np.maximum(abs(uc),abs(un)),1e-100)
+[?2004l[?2004h>             uc/=scale;un/=scale
+[?2004l[?2004h>         um,uc=uc,un;qm,qc=qc,qp
+[?2004l[?2004h>     # last contains u(R-3h),...,u(R+3h).
+[?2004l[?2004h>     u=last[3]
+[?2004l[?2004h>     ud=(-last[0]+9*last[1]-45*last[2]+45*last[4]-9*last[5]+last[6])/(60*h)
+[?2004l[?2004h>     kr=k[:,None]*R
+[?2004l[?2004h>     jj=kr*spherical_jn(ls[None,:],kr);yy=kr*spherical_yn(ls[None,:],kr)
+[?2004l[?2004h>     jd=k[:,None]*(spherical_jn(ls[None,:],kr)+kr*spherical_jn(ls[None,:],kr,True))
+[?2004l[?2004h>     yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+[?2004l[?2004h>     delta=np.arctan2(jd*u-jj*ud,yd*u-yy*ud)
+[?2004l[?2004h>     # Leading tail correction; adequate for kR large.
+[?2004l[?2004h>     delta+=2*gam*(1-A)**6/(5*k[:,None]*(R-A)**5)
+[?2004l[?2004h>     return delta,k,nm,u[:,:nm.shape[1]],ud[:,:nm.shape[1]],jj[:,:nm.shape[1]],jd[:,:nm.shape[1]]
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> import sys,time,numpy as np
+[?2004l[?2004h> sys.path.insert(0,'/app/output');import transport as tr
+[?2004l[?2004h> for rank in [1,2]:
+[?2004l[?2004h>  t=time.time();a,_=tr.analytic_brackets(5,rank);b,_=tr.bracket_polynomials(5,rank)
+[?2004l[?2004h>  print('brackets',rank,np.max(abs(a-b)),time.time()-t)
+[?2004l[?2004h> t=time.time();d,k,*_=tr.phases(np.linspace(.002,12,200),0,1.5,1)
+[?2004l[?2004h> print('phase time',time.time()-t,d.shape)
+[?2004l[?2004h> PY
+[?2004lbrackets 1 2.4781853379683253e-12 1.1816959381103516
+brackets 2 1.9788380730700533e-12 1.3404343128204346
+phase time 1.384310007095337 (200, 72)
+[?2004hroot@80c1e2a6cbf9:/app# cat >> /app/output/transport.py <<'PY'
+[?2004l[?2004h> 
+[?2004l[?2004h> def transport_sections(delta,k,D):
+[?2004l[?2004h>     # Orthonormal Legendre basis: X implements multiplication by cos(chi).
+[?2004l[?2004h>     from scipy.sparse import diags,eye
+[?2004l[?2004h>     nl=delta.shape[1]+D
+[?2004l[?2004h>     j=np.arange(1,nl);off=j/np.sqrt(4*j*j-1)
+[?2004l[?2004h>     X=diags([off,off],[-1,1],shape=(nl,nl),format='csr')
+[?2004l[?2004h>     p0=eye(nl,format='csr');p1=X
+[?2004l[?2004h>     ls=np.arange(delta.shape[1])
+[?2004l[?2004h>     even=ls%2==0
+[?2004l[?2004h>     dd=np.pad(delta,((0,0),(0,D)))
+[?2004l[?2004h>     Q=[];Qex=[]
+[?2004l[?2004h>     for s in range(1,D+1):
+[?2004l[?2004h>         if s==1:p=p1
+[?2004l[?2004h>         else:
+[?2004l[?2004h>             p=((2*s-1)*X@p1-(s-1)*p0)/s;p0,p1=p1,p
+[?2004l[?2004h>         co=p.tocoo();a,b=co.row,co.col
+[?2004l[?2004h>         use=(b>a)&(abs(co.data)>1e-14)
+[?2004l[?2004h>         a,b,v=a[use],b[use],co.data[use]
+[?2004l[?2004h>         w=2*v*np.sqrt((2*a+1)*(2*b+1))
+[?2004l[?2004h>         sd=np.sin(dd[:,a]-dd[:,b])**2
+[?2004l[?2004h>         q=sd@w
+[?2004l[?2004h>         if s%2==0:
+[?2004l[?2004h>             qe=sd@(w*(-1.)**a)
+[?2004l[?2004h>         else:
+[?2004l[?2004h>             qe=np.zeros(len(k))
+[?2004l[?2004h>         Q.append(q*2*np.pi/k**2);Qex.append(qe*2*np.pi/k**2)
+[?2004l[?2004h>     return np.array([Q,Qex]).transpose(0,2,1)
+[?2004l[?2004h> 
+[?2004l[?2004h> if __name__=='__main__' and sys.argv[1:]==['scattertest']:
+[?2004l[?2004h>     E=np.geomspace(.0001,20,250)
+[?2004l[?2004h>     t=time.time();d,k,*_=phases(E,0,1.5,1);q=transport_sections(d,k,12)
+[?2004l[?2004h>     print('time',time.time()-t)
+[?2004l[?2004h>     d1,k,*_=phases(E,0,1.5,1,step=.001,R=45);q1=transport_sections(d1,k,12)
+[?2004l[?2004h>     print('q err',np.max(abs(q-q1)/(q1[0,:,:].max(axis=1)[None,:,None]+1e-5)))
+[?2004l[?2004h>     print('main err',np.max(abs(q[0,:,:2]-q1[0,:,:2])/(q1[0,:,:2]+1e-8)))
+[?2004l[?2004h>     # Direct angular check for even-rank exchange.
+[?2004l[?2004h>     z,w=roots_legendre(200);ls=np.arange(d.shape[1]);leg=np.array([np.polynomial.legendre.legval(z,[0]*l+[1]) for l in ls])
+[?2004l[?2004h>     f=((2*ls+1)[None,:]*np.exp(1j*d)*np.sin(d))@leg/k[:,None]
+[?2004l[?2004h>     ex=np.real(f*np.conj(f[:,::-1]))
+[?2004l[?2004h>     for s in [1,2,3,4]:
+[?2004l[?2004h>         ps=np.polynomial.legendre.legval(z,[0]*s+[1])
+[?2004l[?2004h>         qq=2*np.pi*(abs(f)**2)@(w*(1-ps));qe=2*np.pi*ex@(w*(1-ps))
+[?2004l[?2004h>         print(s,np.max(abs(qq-q[0,:,s-1])),np.max(abs(qe-q[1,:,s-1])))
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 /app/output/transport.py scattertest
+[?2004ltime 2.1018011569976807
+q err 0.0002686182764017645
+main err 0.0002528539096809035
+1 1.6839862837514374e-12 38.302782415134814
+2 2.7000623958883807e-13 2.1671553440683056e-13
+3 1.6697754290362354e-12 38.302782415134814
+4 3.232969447708456e-13 3.161915174132446e-13
+[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> import sys,numpy as np,time
+[?2004l[?2004h> sys.path.insert(0,'/app/output');import transport as tr
+[?2004l[?2004h> E=np.geomspace(.0001,20,250)
+[?2004l[?2004h> a,k,*_=tr.phases(E,0,1.5,1,step=.002,R=32);b,k,*_=tr.phases(E,0,1.5,1,step=.001,R=45)
+[?2004l[?2004h> qa=tr.transport_sections(a,k,4)[0];qb=tr.transport_sections(b,k,4)[0]
+[?2004l[?2004h> er=np.max(abs(qa-qb)/(qb+1e-12),axis=1)
+[?2004l[?2004h> for i in np.argsort(er)[-12:]: print(E[i],er[i],qa[i,1],qb[i,1])
+[?2004l[?2004h> for lo,hi in [(.01,.1),(.1,1),(1,10),(10,21)]:print(lo,hi,er[(E>lo)&(E<hi)].max())
+[?2004l[?2004h> for N in [7,9,11]:
+[?2004l[?2004h>  t=time.time();cv,_=tr.analytic_brackets(N,2);ch,_=tr.analytic_brackets(N,1)
+[?2004l[?2004h>  mv=np.zeros((2,cv.shape[0],cv.shape[1]));mv[0,0]=np.pi
+[?2004l[?2004h>  mh=np.zeros((2,ch.shape[0],ch.shape[1]));mh[0,0]=np.pi
+[?2004l[?2004h>  print('HS',N,tr.properties(cv,ch,mv,mh,np.array([.7,.3]),[1,9],1,1,0),time.time()-t,flush=True)
+[?2004l[?2004h> PY
+[?2004l0.00017146759164733233 0.00013692421521394133 25.763810349660947 25.760968635559216
+0.00016326487904394935 0.00014837803075184918 25.756178381318396 25.753000865726687
+0.00015545457000445417 0.00015999240747344818 25.748854953721818 25.745339267312673
+0.00014801789262199175 0.00017169770219690672 25.74183096741062 25.737976718284763
+0.00014093697300521756 0.00018352303133533645 25.735095436944803 25.730901536610965
+0.00013419479231879203 0.00019536858154319106 25.728639221416014 25.72410729635689
+0.00012777514587898118 0.0002072493301365112 25.72245302416612 25.717584176098725
+0.00012166260420605494 0.00021908018950145817 25.716526971987935 25.711324496235747
+0.00011584247593986925 0.00023079907436612015 25.710851423112405 25.705320301934268
+0.00011030077252950449 0.0002425610791680728 25.705417777855285 25.69955883143756
+0.00010502417461208842 0.00025411704240786524 25.700217174081708 25.69403763082411
+0.0001 0.0002655685619662079 25.69524090731078 25.688745407597143
+0.01 0.1 3.2823278173245835e-07
+0.1 1 1.6782307076316044e-08
+1 10 6.987343734959393e-09
+10 21 1.4365473508058372e-08
+HS 7 (np.float64(0.17913615065038369), np.float64(0.677831684410471)) 4.355737924575806
+HS 9 (np.float64(0.1791361737271285), np.float64(0.6778327561914907)) 6.4775471687316895
+HS 11 (np.float64(0.1791361765014284), np.float64(0.6778328817263852)) 8.682275772094727
+[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py'
+[?2004l[?2004h> s=open(p).read();s=s.replace('    delta+=2*gam*(1-A)**6/(5*k[:,None]*(R-A)**5)','''    # Variable-phase first-order tail integral, retaining centrifugal waves.
+[?2004l[?2004h>     # At this radius the potential is weak enough that the next correction
+[?2004l[?2004h>     # is negligible. Gauss quadrature uses t=R/r.
+[?2004l[?2004h>     tx,tw=roots_legendre(64)
+[?2004l[?2004h>     tx=(tx+1)/2;tw=tw/2
+[?2004l[?2004h>     cut=max(1,min(delta.shape[1],int(k.max()*R)+1))
+[?2004l[?2004h>     corr=np.zeros_like(delta)
+[?2004l[?2004h>     for tt,ww in zip(tx,tw):
+[?2004l[?2004h>         rr=R/tt;zz=k[:,None]*rr
+[?2004l[?2004h>         jl=zz*spherical_jn(ls[None,:cut],zz)
+[?2004l[?2004h>         yl=zz*spherical_yn(ls[None,:cut],zz)
+[?2004l[?2004h>         wave=jl*np.cos(delta[:,:cut])-yl*np.sin(delta[:,:cut])
+[?2004l[?2004h>         vv=((1-A)/(rr-A))**6
+[?2004l[?2004h>         corr[:,:cut]+=ww*R/tt**2*(-gam*4*vv*(vv-1)/k[:,None])*wave**2
+[?2004l[?2004h>     delta+=corr''')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004lx1=expit(np.log(ds[1]/ds[0])-gap/T);xp=np.array([1-x1,x1])
+    D=2*N+2
+    mom=integrate_moments(A,L,M,T,D,verbose=verbose)
+    cv,_=analytic_brackets(N,2);ch,_=analytic_brackets(N,1)
+    values=[]
+    for n in range(3,N+1):
+        vv=properties(cv[:2*n+3,:2*n+2,:n+1,:n+1],ch[:2*n+2,:2*n+1,:n+1,:n+1],mom[:,:2*n+3,:2*n+2],mom[:,:2*n+2,:2*n+1],xp,ds,T,M,gap)
+        values.append(vv)
+        if verbose:print('Sonine',n,vv,file=sys.stderr,flush=True)
+    return values[-1]
+
+if __name__=='__main__' and len(sys.argv)==6:
+    G=sys.argv[1];A,L,B,T=map(float,sys.argv[2:])
+    eta,lam=run(G,A,L,B,T,verbose=False)
+    print(json.dumps({'viscosity':float(eta),'thermal_conductivity':float(lam)}))
+PY
+python3 - <<'PY'
+i[?2004hroot@80c1e2a6cbf9:/app# cat >> /app/output/transport.py <<'PY'
+[?2004l[?2004h> 
+[?2004l[?2004h> def continuous_phases(result,R):
+[?2004l[?2004h>     delta,k,nodes,u,ud,jj,jd=result
+[?2004l[?2004h>     n=nodes.shape[1]
+[?2004l[?2004h>     kr=k[:,None]*R;ll=np.arange(n)[None,:]
+[?2004l[?2004h>     # Free-wave phase at R, continuous in r.
+[?2004l[?2004h>     z=kr*spherical_yn(ll,kr)
+[?2004l[?2004h>     phi=np.arctan2(jj,-z)
+[?2004l[?2004h>     free=kr-ll*np.pi/2
+[?2004l[?2004h>     phi+=np.pi*np.rint((free-phi)/np.pi)
+[?2004l[?2004h>     d=delta[:,:n]
+[?2004l[?2004h>     total=phi+d
+[?2004l[?2004h>     total=np.mod(total,np.pi)+nodes*np.pi
+[?2004l[?2004h>     return total-phi
+[?2004l[?2004h> 
+[?2004l[?2004h> 
+[?2004l[?2004h> def integrate_moments(A,L,M,T,D,accuracy=2e-8,verbose=False):
+[?2004l[?2004h>     # Integrate energy moments adaptively with embedded 8/16 point rules.
+[?2004l[?2004h>     pmax=D
+[?2004l[?2004h>     gx,gw=roots_legendre(16); hx,hw=roots_legendre(8)
+[?2004l[?2004h>     # Initial mesh uniform in sqrt(E), with ample thermal tail.
+[?2004l[?2004h>     xmax=max(65.,2*D+24.)
+[?2004l[?2004h>     ee=np.linspace(.000001,np.sqrt(T*xmax),240)**2
+[?2004l[?2004h>     t0=time.time()
+[?2004l[?2004h>     res=phases(ee,A,L,M,step=.0015,R=32.)
+[?2004l[?2004h>     un=continuous_phases(res,32.)
+[?2004l[?2004h>     # Locate every resonance crossing, including extremely narrow ones.
+[?2004l[?2004h>     pending=[(ee[i],ee[i+1],un[i],un[i+1]) for i in range(len(ee)-1) if np.max(un[i+1]-un[i])>.3]
+[?2004l[?2004h>     extra=[]
+[?2004l[?2004h>     for iteration in range(24):
+[?2004l[?2004h>         if not pending:break
+[?2004l[?2004h>         mids=np.array([(a+b)/2 for a,b,_,_ in pending])
+[?2004l[?2004h>         midp=continuous_phases(phases(mids,A,L,M,step=.0015,R=32.),32.)
+[?2004l[?2004h>         nxt=[]
+[?2004l[?2004h>         for (a,b,pa,pb),mid,pm in zip(pending,mids,midp):
+[?2004l[?2004h>             extra.append(mid)
+[?2004l[?2004h>             if np.max(pm-pa)>.3 and b-a>1e-11:nxt.append((a,mid,pa,pm))
+[?2004l[?2004h>             if np.max(pb-pm)>.3 and b-a>1e-11:nxt.append((mid,b,pm,pb))
+[?2004l[?2004h>         pending=nxt
+[?2004l[?2004h>     edges=np.unique(np.r_[0,ee,extra]); intervals=np.stack([edges[:-1],edges[1:]],axis=1)
+[?2004l[?2004h>     moments=np.zeros((2,pmax+1,D),dtype=np.longdouble)
+[?2004l[?2004h>     # Gauss quadrature batches; compare full moment vectors.
+[?2004l[?2004h>     def evalints(iv):
+[?2004l[?2004h>         center=iv.mean(axis=1);half=np.diff(iv,axis=1).ravel()/2
+[?2004l[?2004h>         en=np.concatenate([(center[:,None]+half[:,None]*gx).ravel(),(center[:,None]+half[:,None]*hx).ravel()])
+[?2004l[?2004h>         vals=[]
+[?2004l[?2004h>         for st in range(0,len(en),500):
+[?2004l[?2004h>             de,kk,*_=phases(en[st:st+500],A,L,M,step=.0015,R=32.)
+[?2004l[?2004h>             vals.append(transport_sections(de,kk,D))
+[?2004l[?2004h>         qq=np.concatenate(vals,axis=1)
+[?2004l[?2004h>         x=en/T
+[?2004l[?2004h>         lag=np.array([eval_genlaguerre(p,1,x)/np.sqrt(p+1) for p in range(pmax+1)])
+[?2004l[?2004h>         ww=x*np.exp(-x)/T
+[?2004l[?2004h>         fun=np.einsum('ael,pe,e->eapl',qq,lag,ww)
+[?2004l[?2004h>         n=len(iv)
+[?2004l[?2004h>         v16=np.einsum('neqpl,e,n->nqpl',fun[:16*n].reshape(n,16,2,pmax+1,D),gw,half)
+[?2004l[?2004h>         v8=np.einsum('neqpl,e,n->nqpl',fun[16*n:].reshape(n,8,2,pmax+1,D),hw,half)
+[?2004l[?2004h>         return v16,v8
+[?2004l[?2004h>     for iteration in range(12):
+[?2004l[?2004h>         v16,v8=evalints(intervals)
+[?2004l[?2004h>         err=np.max(abs(v16-v8),axis=(1,2,3))
+[?2004l[?2004h>         scale=max(1.,float(np.max(abs(v16).sum(axis=0))))
+[?2004l[?2004h>         ok=err<accuracy*scale*(np.diff(intervals,axis=1).ravel()/(T*xmax)+.00005)
+[?2004l[?2004h>         moments+=np.sum(v16[ok],axis=0,dtype=np.longdouble)
+[?2004l[?2004h>         if verbose:print('integration',iteration,len(intervals),int(np.sum(~ok)),err.max(),time.time()-t0,file=sys.stderr,flush=True)
+[?2004l[?2004h>         if np.all(ok):break
+[?2004l[?2004h>         iv=intervals[~ok];mid=iv.mean(axis=1)
+[?2004l[?2004h>         intervals=np.concatenate([np.stack([iv[:,0],mid],axis=1),np.stack([mid,iv[:,1]],axis=1)])
+[?2004l[?2004h>     else: moments+=np.sum(v16[~ok],axis=0,dtype=np.longdouble)
+[?2004l[?2004h>     return np.array(moments,dtype=float)
+[?2004l[?2004h> 
+[?2004l[?2004h> 
+[?2004l[?2004h> def run(G,A,L,B,T,verbose=False,N=11):
+[?2004l[?2004h>     M=1 if G=='H2' else 2
+[?2004l[?2004h>     ds=np.array([1.,9.]) if G=='H2' else np.array([6.,9.])
+[?2004l[?2004h>     gap=2*B/M
+[?2004l[?2004h>     x1=expit(np.log(ds[1]/ds[0])-gap/T);xp=np.array([1-x1,x1])
+[?2004l[?2004h>     D=2*N+2
+[?2004l[?2004h>     mom=integrate_moments(A,L,M,T,D,verbose=verbose)
+[?2004l[?2004h>     cv,_=analytic_brackets(N,2);ch,_=analytic_brackets(N,1)
+[?2004l[?2004h>     values=[]
+[?2004l[?2004h>     for n in range(3,N+1):
+[?2004l[?2004h>         vv=properties(cv[:2*n+3,:2*n+2,:n+1,:n+1],ch[:2*n+2,:2*n+1,:n+1,:n+1],mom[:,:2*n+3,:2*n+2],mom[:,:2*n+2,:2*n+1],xp,ds,T,M,gap)
+[?2004l[?2004h>         values.append(vv)
+[?2004l[?2004h>         if verbose:print('Sonine',n,vv,file=sys.stderr,flush=True)
+[?2004l[?2004h>     return values[-1]
+[?2004l[?2004h> 
+[?2004l[?2004h> if __name__=='__main__' and len(sys.argv)==6:
+[?2004l[?2004h>     G=sys.argv[1];A,L,B,T=map(float,sys.argv[2:])
+[?2004l[?2004h>     eta,lam=run(G,A,L,B,T,verbose=False)
+[?2004l[?2004h>     print(json.dumps({'viscosity':float(eta),'thermal_conductivity':float(lam)}))
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> import sys,time
+[?2004l[?2004h> sys.path.insert(0,'/app/output');import transport as tr
+[?2004l[?2004h> t=time.time();print(tr.run('H2',0,1.5,2,.4,verbose=True),time.time()-t)
+[?2004l[?2004h> PY
+[?2004l/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+Traceback (most recent call last):
+  File "<stdin>", line 3, in <module>
+  File "/app/output/transport.py", line 310, in run
+    mom=integrate_moments(A,L,M,T,D,verbose=verbose)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/output/transport.py", line 268, in integrate_moments
+    if np.max(pm-pa)>.3 and b-a>1e-11:nxt.append((a,mid,pa,pm))
+              ~~^~~
+ValueError: operands could not be broadcast together with shapes (19,) (25,) 
+[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read().replace('lmax=int(np.ceil(4*k.max()+12))','lmax=max(24,int(np.ceil(4*k.max()+12)))')
+[?2004l[?2004h> a=s.index('    # Variable-phase first-order tail integral');b=s.index('    return delta,k,nm',a)
+[?2004l[?2004h> s=s[:a]+'''    delta=np.nan_to_num(delta,nan=0.)
+[?2004l[?2004h>     delta+=2*gam*(1-A)**6/(5*k[:,None]*(R-A)**5)
+[?2004l[?2004h>     low=np.where(E<.015)[0]
+[?2004l[?2004h>     if len(low):
+[?2004l[?2004h>         tx,tw=roots_legendre(80);tx=(tx+1)/2;tw=tw/2
+[?2004l[?2004h>         cut=8
+[?2004l[?2004h>         orig=delta[low,:cut]-2*gam*(1-A)**6/(5*k[low,None]*(R-A)**5)
+[?2004l[?2004h>         corr=np.zeros_like(orig)
+[?2004l[?2004h>         for tt,ww in zip(tx,tw):
+[?2004l[?2004h>             rr=R/tt;zz=k[low,None]*rr
+[?2004l[?2004h>             jl=zz*spherical_jn(ls[None,:cut],zz)
+[?2004l[?2004h>             yl=zz*spherical_yn(ls[None,:cut],zz)
+[?2004l[?2004h>             wave=jl*np.cos(orig)-yl*np.sin(orig)
+[?2004l[?2004h>             vv=((1-A)/(rr-A))**6
+[?2004l[?2004h>             corr+=ww*R/tt**2*(-gam*4*vv*(vv-1)/k[low,None])*wave**2
+[?2004l[?2004h>         delta[low,:cut]=orig+corr
+[?2004l[?2004h> ''' +s[b:]
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> import sys,time
+[?2004l[?2004h> sys.path.insert(0,'/app/output');import transport as tr
+[?2004l[?2004h> t=time.time();print(tr.run('H2',0,1.5,2,.4,verbose=True),time.time()-t)
+[?2004l[?2004h> PY
+[?2004l/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+^CTraceback (most recent call last):
+  File "<stdin>", line 3, in <module>
+  File "/app/output/transport.py", line 311, in run
+    mom=integrate_moments(A,L,M,T,D,verbose=verbose)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/output/transport.py", line 292, in integrate_moments
+    v16,v8=evalints(intervals)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/app/output/transport.py", line 280, in evalints
+    de,kk,*_=phases(en[st:st+500],A,L,M,step=.0015,R=32.)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/output/transport.py", line 162, in phases
+    um,uc=uc,un;qm,qc=qc,qp
+                ^^
+KeyboardInterrupt
+
+[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read();s=s.replace('delta=np.arctan2(jd*u-jj*ud,yd*u-yy*ud)','with np.errstate(all="ignore"):\n        delta=np.arctan((jd*u-jj*ud)/(yd*u-yy*ud))')
+[?2004l[?2004h> s=s.replace('ee=np.linspace(.000001,np.sqrt(T*xmax),240)**2','ee=np.linspace(.00001,np.sqrt(T*xmax),180)**2')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> import sys,time,numpy as np
+[?2004l[?2004h> sys.path.insert(0,'/app/output');import transport as tr
+[?2004l[?2004h> E=np.geomspace(1e-10,.1,100);r=tr.phases(E,0,1.5,1);print('small phases',r[0][:5,:8]);q=tr.transport_sections(r[0],r[1],4);print('small Q',q[0,:5,:])
+[?2004l[?2004h> E=np.linspace(.00001,np.sqrt(26),180)**2;r=tr.phases(E,0,1.5,1);u=tr.continuous_phases(r,32)
+[?2004l[?2004h> print('jumps',np.sum(np.max(np.diff(u,axis=0),axis=1)>.3),np.max(np.diff(u,axis=0)))
+[?2004l[?2004h> for i in np.where(np.max(np.diff(u,axis=0),axis=1)>.3)[0]:print(E[i],E[i+1],np.argmax(u[i+1]-u[i]),np.max(u[i+1]-u[i]))
+[?2004l[?2004h> t=time.time();print(tr.run('H2',0,1.5,2,.4,verbose=True),time.time()-t)
+[?2004l[?2004h> PY
+[?2004lsmall phases [[-5.97479499e-05 -1.37257882e-15  1.65570049e-18  7.70990805e-20
+   9.92320904e-20  6.44842506e-20  2.26871609e-20  5.17872701e-21]
+ [-6.63403189e-05 -1.88085150e-15  2.74585651e-18  6.60614874e-20
+   7.50095016e-20  8.57040672e-20  4.44981033e-20  1.40014145e-20]
+ [-7.36600657e-05 -2.57922045e-15  4.47199628e-18  1.29575128e-19
+   2.83386282e-20  8.16002915e-20  7.00549076e-20  3.20171426e-20]
+ [-8.17874457e-05 -3.53726460e-15  7.16046821e-18  2.85169580e-19
+   7.28894402e-21  4.15248594e-20  7.88866171e-20  5.78498972e-20]
+ [-9.08115718e-05 -4.85279538e-15  1.14212103e-17  5.12832870e-19
+   4.58533056e-20  2.33345475e-21  4.86148255e-20  7.31511018e-20]]
+small Q [[ 5893079.20117659  8828522.6441155  13231687.80852387 16504507.15539748]
+ [ 3877267.4339908   5808596.23595614  8705589.43890414 10858889.4057119 ]
+ [ 2550995.05943643  3821682.06394456  5727712.57070676  7144441.96543543]
+ [ 1678394.88457114  2514422.94643345  3768465.0392269   4700579.34106226]
+ [ 1104281.42933498  1654332.528781    2479409.17795003  3092678.66006742]]
+/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+jumps 3 0.5181832991058215
+0.08115141068367591 0.09819258021234113 3 0.314865820765327
+0.09819258021234113 0.11685666400833324 3 0.5181832991058215
+0.11685666400833324 0.13714366207165213 3 0.473944671916108
+C-c
+python3 - <<'PY'
+p='/app/output/transport.py';s=open(p).read().replace('orig=delta[low,:cut]-2*gam*(1-A)**6/(5*k[low,None]*(R-A)**5)','delta[low,:]-=2*gam*(1-A)**6/(5*k[low,None]*(R-A)**5)\n        orig=delta[low,:cut].copy()');open(p,'w').write(s)
+PY
+python3 - <<'PY'
+import sys,time,numpy as np
+sys.path.insert(0,'/app/output');import transport as tr
+E=np.geomspace(1e-10,.1,100);r=tr.phases(E,0,1.5,1);q=tr.transport_sections(r[0],r[1],4);print('small Q',q[0,:5,:],flush=True)
+t=time.time();print(tr.run('H2',0,1.5,2,.4,verbose=True),time.time()-t)
+PY
+^CTraceback (most recent call last):
+  File "<stdin>", line 7, in <module>
+  File "/app/output/transport.py", line 312, in run
+    mom=integrate_moments(A,L,M,T,D,verbose=verbose)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/output/transport.py", line 293, in integrate_moments
+    v16,v8=evalints(intervals)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/app/output/transport.py", line 281, in evalints
+    de,kk,*_=phases(en[st:st+500],A,L,M,step=.0015,R=32.)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/output/transport.py", line 162, in phases
+    um,uc=uc,un;qm,qc=qc,qp
+                ^^
+KeyboardInterrupt
+
+[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read().replace('orig=delta[low,:cut]-2*gam*(1-A)**6/(5*k[low,None]*(R-A)**5)','delta[low,:]-=2*gam*(1-A)**6/(5*k[low,None]*(R-A)**5)\n        orig=delta[low,:cut].copy()');open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> import sys,time,numpy as np
+[?2004l[?2004h> sys.path.insert(0,'/app/output');import transport as tr
+[?2004l[?2004h> E=np.geomspace(1e-10,.1,100);r=tr.phases(E,0,1.5,1);q=tr.transport_sections(r[0],r[1],4);print('small Q',q[0,:5,:],flush=True)
+[?2004l[?2004h> t=time.time();print(tr.run('H2',0,1.5,2,.4,verbose=True),time.time()-t)
+[?2004l[?2004h> PY
+[?2004lsmall Q [[25.56693467 25.56693468 25.56693468 25.56693468]
+ [25.56693474 25.56693474 25.56693474 25.56693474]
+ [25.56693497 25.56693497 25.56693497 25.56693497]
+ [25.56693466 25.56693467 25.56693467 25.56693467]
+ [25.56693491 25.56693492 25.56693492 25.56693492]]
+/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+integration 0 183 87 6.782334443156124e-05 57.74586009979248
+integration 1 174 125 2.135981841988599e-05 86.27537703514099
+integration 2 250 127 1.1899997074599211e-05 122.46785068511963
+integration 3 254 126 5.2955810654481406e-06 151.34720921516418
+integration 4 252 88 2.259503350914016e-06 179.73959374427795
+integration 5 176 137 1.3629844943380265e-06 199.35381889343262
+integration 6 274 137 5.521811661211851e-07 229.79697632789612
+integration 7 274 156 1.8126143777000975e-07 259.0201723575592
+integration 8 312 63 1.6275789909304256e-07 290.69705057144165
+integration 9 126 4 5.1664897350329336e-08 303.50736808776855
+integration 10 8 1 3.58424599136882e-12 304.5178294181824
+integration 11 2 0 2.8525312401874933e-13 305.00108313560486
+Sonine 3 (np.float64(0.04696993272788201), np.float64(0.17883245294216663))
+Sonine 4 (np.float64(0.046969945108991815), np.float64(0.17883324546463622))
+Sonine 5 (np.float64(0.046969950679149636), np.float64(0.1788333584582788))
+Sonine 6 (np.float64(0.04696995145401623), np.float64(0.17883343665325663))
+Sonine 7 (np.float64(0.04696995149525518), np.float64(0.1788334519406999))
+Sonine 8 (np.float64(0.04696995149541146), np.float64(0.17883345338761816))
+Sonine 9 (np.float64(0.04696995149775738), np.float64(0.17883345341099322))
+Sonine 10 (np.float64(0.04696995149888244), np.float64(0.1788334534277049))
+Sonine 11 (np.float64(0.04696995149908302), np.float64(0.1788334534455016))
+(np.float64(0.04696995149908302), np.float64(0.1788334534455016)) 313.93234753608704
+[?2004hroot@80c1e2a6cbf9:/app# cp /app/output/transport.py /app/transport_reference.py
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read().replace('accuracy=2e-8','accuracy=1e-6');open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> import sys,time
+[?2004l[?2004h> sys.path.insert(0,'/app/output');import transport as tr
+[?2004l[?2004h> t=time.time();print('FASTER',tr.run('H2',0,1.5,2,.4,verbose=True,N=9),time.time()-t,flush=True)
+[?2004l[?2004h> t=time.time();print('CORNER',tr.run('D2',0,.8,1,.6,verbose=True,N=9),time.time()-t,flush=True)
+[?2004l[?2004h> PY
+[?2004l/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+integration 0 183 56 2.635520162774796e-05 45.44145727157593
+integration 1 112 44 1.2784163073986665e-06 61.24221396446228
+integration 2 88 32 5.0041348331753e-07 73.42969417572021
+integration 3 64 5 5.809064672485098e-07 81.71353650093079
+integration 4 10 0 9.90891396712712e-14 82.91880440711975
+Sonine 3 (np.float64(0.046969931929624266), np.float64(0.17883244975099694))
+Sonine 4 (np.float64(0.046969944310672175), np.float64(0.178833242275903))
+Sonine 5 (np.float64(0.04696994988082258), np.float64(0.1788333552688729))
+Sonine 6 (np.float64(0.0469699506556906), np.float64(0.17883343346371733))
+Sonine 7 (np.float64(0.04696995069692983), np.float64(0.17883344875117865))
+Sonine 8 (np.float64(0.04696995069708612), np.float64(0.17883345019810373))
+Sonine 9 (np.float64(0.04696995069943203), np.float64(0.1788334502214792))
+FASTER (np.float64(0.04696995069943203), np.float64(0.1788334502214792)) 88.86803603172302
+integration 0 342 126 4.603543740150373e-05 169.34944772720337
+integration 1 252 217 2.466905661274721e-05 236.40719366073608
+integration 2 434 328 1.1879545550083637e-05 337.89494490623474
+integration 3 656 316 7.098690681793529e-06 455.70146465301514
+integration 4 632 324 2.1879213826410393e-06 563.4426245689392
+integration 5 648 364 1.3081812465700476e-06 670.136682510376
+^CTraceback (most recent call last):
+  File "<stdin>", line 4, in <module>
+  File "/app/output/transport.py", line 313, in run
+    mom=integrate_moments(A,L,M,T,D,verbose=verbose)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/output/transport.py", line 294, in integrate_moments
+    v16,v8=evalints(intervals)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/app/output/transport.py", line 283, in evalints
+    vals.append(transport_sections(de,kk,D))
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/output/transport.py", line 211, in transport_sections
+    sd=np.sin(dd[:,a]-dd[:,b])**2
+       ^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+
+[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read();s=s.replace('    delta+=2*gam*(1-A)**6/(5*k[:,None]*(R-A)**5)\n','');s=s.replace('        delta[low,:]-=2*gam*(1-A)**6/(5*k[low,None]*(R-A)**5)\n','')
+[?2004l[?2004h> s=s.replace('        ok=err<accuracy*scale*(np.diff(intervals,axis=1).ravel()/(T*xmax)+.00005)','''        budget=accuracy*scale
+[?2004l[?2004h>         order=np.argsort(err)
+[?2004l[?2004h>         cumulative=np.cumsum(err[order])
+[?2004l[?2004h>         ok=np.zeros(len(err),dtype=bool)
+[?2004l[?2004h>         ok[order[cumulative<budget*.25]]=True''')
+[?2004l[?2004h> s=s.replace('    mom=integrate_moments(A,L,M,T,D,verbose=verbose)','    mom=integrate_moments(A,L,M,T,D,verbose=verbose)\n    if verbose: np.save("/app/last_moments.npy",mom)')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> import sys,time,numpy as np
+[?2004l[?2004h> sys.path.insert(0,'/app/output');import transport as tr
+[?2004l[?2004h> E=np.geomspace(.0001,30,220)
+[?2004l[?2004h> t=time.time();d,k,*_=tr.phases(E,0,.8,2,step=.0015,R=32);q=tr.transport_sections(d,k,6)
+[?2004l[?2004h> d,k,*_=tr.phases(E,0,.8,2,step=.00075,R=48);q1=tr.transport_sections(d,k,6)
+[?2004l[?2004h> e=np.max(abs(q[0]-q1[0])/(q1[0]+1e-9),axis=1)
+[?2004l[?2004h> for lo,hi in [(.0001,.01),(.01,.1),(.1,1),(1,10),(10,31)]: print('radial',lo,hi,e[(E>=lo)&(E<hi)].max(),flush=True)
+[?2004l[?2004h> t=time.time();print('CORNER',tr.run('D2',0,.8,1,.6,verbose=True,N=11),time.time()-t,flush=True)
+[?2004l[?2004h> PY
+[?2004l/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+radial 0.0001 0.01 2.5635616225281117e-06
+radial 0.01 0.1 1.0766062443454893e-06
+radial 0.1 1 8.795711542990253e-09
+radial 1 10 2.4846253025226156e-07
+radial 10 31 1.4938210541306304e-06
+integration 0 345 134 8.762682437479796e-05 249.95481824874878
+integration 1 268 192 7.403466227606792e-05 323.48305654525757
+integration 2 384 265 3.064444615583084e-05 416.69687509536743
+integration 3 530 192 2.842809083854203e-05 533.9011714458466
+integration 4 384 208 9.285621496376434e-06 602.7934277057648
+integration 5 416 211 2.8016603206872104e-06 673.7975852489471
+integration 6 422 162 6.687482701338981e-07 746.825413942337
+integration 7 324 132 1.5423696778267548e-07 798.7569720745087
+integration 8 264 0 2.148753180594709e-15 840.3099646568298
+Sonine 3 (np.float64(0.09268394279352912), np.float64(0.20337753917207874))
+Sonine 4 (np.float64(0.09268428948456495), np.float64(0.20338450210130368))
+Sonine 5 (np.float64(0.0926843467943855), np.float64(0.20338686807591233))
+Sonine 6 (np.float64(0.0926843565338107), np.float64(0.20338733290900252))
+Sonine 7 (np.float64(0.09268435876829717), np.float64(0.20338741811368735))
+Sonine 8 (np.float64(0.09268435944139625), np.float64(0.2033874373167755))
+Sonine 9 (np.float64(0.09268435966142656), np.float64(0.203387442901332))
+Sonine 10 (np.float64(0.09268435972945016), np.float64(0.20338744471651252))
+Sonine 11 (np.float64(0.09268435974817386), np.float64(0.20338744528419278))
+CORNER (np.float64(0.09268435974817386), np.float64(0.20338744528419278)) 849.1448173522949
+[?2004hroot@80c1e2a6cbf9:/app# cp /app/last_moments.npy /app/corner_moments.npy
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# cp /app/output/transport.py /app/transport_slow.py
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read().replace('    for iteration in range(12):\n        v16,v8','    fixedscale=0.\n    for iteration in range(12):\n        v16,v8').replace('        budget=accuracy*scale','        fixedscale=max(fixedscale,scale)\n        budget=accuracy*fixedscale')
+[?2004l[?2004h> s=s.replace("        if verbose:print('integration',iteration,len(intervals),int(np.sum(~ok)),err.max(),time.time()-t0,file=sys.stderr,flush=True)","        if verbose:\n            print('integration',iteration,len(intervals),int(np.sum(~ok)),err.max(),time.time()-t0,file=sys.stderr,flush=True)\n            for ind in np.argsort(err)[-4:]:print('worst',intervals[ind],err[ind],file=sys.stderr,flush=True)")
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> import sys,numpy as np,time
+[?2004l[?2004h> sys.path.insert(0,'/app/output');import transport as tr
+[?2004l[?2004h> E=np.geomspace(.0001,3,100)
+[?2004l[?2004h> a,k,*_=tr.phases(E,0,.8,2,step=.0015);qa=tr.transport_sections(a,k,20)
+[?2004l[?2004h> b,k,*_=tr.phases(np.r_[E,39],0,.8,2,step=.0015);qb=tr.transport_sections(b,k,20)[:,:100]
+[?2004l[?2004h> print('batch difference',np.max(abs(qa-qb)),flush=True)
+[?2004l[?2004h> for i in np.argsort(np.max(abs(qa-qb),axis=(0,2)))[-8:]:print(E[i],np.max(abs(qa[:,i]-qb[:,i])),flush=True)
+[?2004l[?2004h> t=time.time();print('CORNER',tr.run('D2',0,.8,1,.6,verbose=True,N=9),time.time()-t,flush=True)
+[?2004l[?2004h> PY
+[?2004l/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+batch difference 0.000773388924482532
+1.4472952127949361 8.67736208256531e-05
+1.606129550657408 0.00011860602332447456
+1.7823952644141563 0.00016211464009430188
+1.978005371550288 0.00022158277792350134
+2.195082834877132 0.0003028652990195724
+2.4359836031161786 0.00041396527592141297
+2.7033221800866656 0.0005658221469815317
+3.0 0.000773388924482532
+^CTraceback (most recent call last):
+  File "<stdin>", line 8, in <module>
+  File "/app/output/transport.py", line 319, in run
+    mom=integrate_moments(A,L,M,T,D,verbose=verbose)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/output/transport.py", line 293, in integrate_moments
+    v16,v8=evalints(intervals)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/app/output/transport.py", line 280, in evalints
+    de,kk,*_=phases(en[st:st+500],A,L,M,step=.0015,R=32.)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/output/transport.py", line 162, in phases
+    um,uc=uc,un;qm,qc=qc,qp
+                ^^
+KeyboardInterrupt
+
+[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read().replace('use=(b>a)&(abs(co.data)>1e-14)','use=(b>a)&(b<delta.shape[1])&(abs(co.data)>1e-14)');open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> import sys,numpy as np,time
+[?2004l[?2004h> sys.path.insert(0,'/app/output');import transport as tr
+[?2004l[?2004h> E=np.geomspace(.0001,3,100)
+[?2004l[?2004h> a,k,*_=tr.phases(E,0,.8,2,step=.0015);qa=tr.transport_sections(a,k,20)
+[?2004l[?2004h> b,k,*_=tr.phases(np.r_[E,39],0,.8,2,step=.0015);qb=tr.transport_sections(b,k,20)[:,:100]
+[?2004l[?2004h> print('batch difference',np.max(abs(qa-qb)),np.max(abs(qa-qb)/(qb[0][None,:,:]+1e-5)),flush=True)
+[?2004l[?2004h> print('tail phase',a[-1,-8:],b[99,a.shape[1]-8:a.shape[1]],flush=True)
+[?2004l[?2004h> t=time.time();print('CORNER',tr.run('D2',0,.8,1,.6,verbose=True,N=9),time.time()-t,flush=True)
+[?2004l[?2004h> PY
+[?2004l/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+batch difference 0.0006644291642832201 4.4624312058555976e-05
+tail phase [0.00521496 0.00490993 0.00462608 0.00436169 0.00411524 0.00388531
+ 0.00367063 0.00347004] [0.00521496 0.00490993 0.00462608 0.00436169 0.00411524 0.00388531
+ 0.00367063 0.00347004]
+^CTraceback (most recent call last):
+  File "<stdin>", line 8, in <module>
+  File "/app/output/transport.py", line 319, in run
+    mom=integrate_moments(A,L,M,T,D,verbose=verbose)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/output/transport.py", line 293, in integrate_moments
+    v16,v8=evalints(intervals)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/app/output/transport.py", line 280, in evalints
+    de,kk,*_=phases(en[st:st+500],A,L,M,step=.0015,R=32.)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/output/transport.py", line 168, in phases
+    jd=k[:,None]*(spherical_jn(ls[None,:],kr)+kr*spherical_jn(ls[None,:],kr,True))
+                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/scipy/special/_spherical_bessel.py", line 31, in wrapper
+    return xpx.apply_where(z.real >= 0, (n, z),
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/scipy/_external/array_api_extra/_lib/_funcs.py", line 162, in apply_where
+    return _apply_where(cond, f1, f2, fill_value, *args_, kwkeys=kwkeys, xp=xp)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/scipy/_external/array_api_extra/_lib/_funcs.py", line 188, in _apply_where
+    temp1 = f1(
+            ^^^
+  File "/usr/local/lib/python3.12/site-packages/scipy/special/_spherical_bessel.py", line 32, in <lambda>
+    lambda n, z: fun(n, z, derivative),
+                 ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/scipy/special/_spherical_bessel.py", line 124, in spherical_jn
+    return _spherical_jn_d(n, z)
+           ^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+
+[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read().replace('lmax=max(24,int(np.ceil(4*k.max()+12)))','lmax=max(24,int(np.ceil(5*k.max()+24)))')
+[?2004l[?2004h> s=s.replace('    return delta,k,nm,u[:,:nm.shape[1]],ud[:,:nm.shape[1]],jj[:,:nm.shape[1]],jd[:,:nm.shape[1]]','''    # Smooth first-Born continuation in the weak centrifugal tail.
+[?2004l[?2004h>     nt=max(lmax+40,int(np.ceil(14*k.max()+50)))
+[?2004l[?2004h>     tail_l=np.arange(12,nt+1)
+[?2004l[?2004h>     born=np.zeros((len(E),len(tail_l)))
+[?2004l[?2004h>     for power,sign,amp,jmax in [(6,1.,(1-A)**6,10),(12,-1.,(1-A)**12,8)]:
+[?2004l[?2004h>         for j in range(jmax+1):
+[?2004l[?2004h>             ss=power+j
+[?2004l[?2004h>             c=math.comb(power+j-1,j)*A**j
+[?2004l[?2004h>             if c==0:continue
+[?2004l[?2004h>             logi=np.log(np.pi)+gammaln(ss-1)-ss*np.log(2.)-2*gammaln(ss/2)+gammaln(tail_l+(3-ss)/2)-gammaln(tail_l+(ss+1)/2)
+[?2004l[?2004h>             born+=sign*4*gam*amp*c*k[:,None]**(ss-2)*np.exp(logi)[None,:]
+[?2004l[?2004h>     extended=np.zeros((len(E),nt+1));extended[:,:lmax+1]=delta
+[?2004l[?2004h>     extended[:,12:]=born
+[?2004l[?2004h>     weight=np.clip((tail_l[None,:]-(5*k[:,None]+12))/10,0,1)
+[?2004l[?2004h>     weight=weight*weight*(3-2*weight)
+[?2004l[?2004h>     nuse=lmax-11
+[?2004l[?2004h>     extended[:,12:lmax+1]=(1-weight[:,:nuse])*delta[:,12:]+weight[:,:nuse]*born[:,:nuse]
+[?2004l[?2004h>     delta=extended
+[?2004l[?2004h>     return delta,k,nm,u[:,:nm.shape[1]],ud[:,:nm.shape[1]],jj[:,:nm.shape[1]],jd[:,:nm.shape[1]]''')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> import sys,numpy as np,time
+[?2004l[?2004h> sys.path.insert(0,'/app/output');import transport as tr
+[?2004l[?2004h> E=np.geomspace(.0001,3,100)
+[?2004l[?2004h> a,k,*_=tr.phases(E,0,.8,2,step=.0015);qa=tr.transport_sections(a,k,20)
+[?2004l[?2004h> b,k,*_=tr.phases(np.r_[E,39],0,.8,2,step=.0015);qb=tr.transport_sections(b,k,20)[:,:100]
+[?2004l[?2004h> print('batch difference',np.max(abs(qa-qb)),np.max(abs(qa-qb)/(qb[0][None,:,:]+1e-5)),flush=True)
+[?2004l[?2004h> t=time.time();print('CORNER',tr.run('D2',0,.8,1,.6,verbose=True,N=9),time.time()-t,flush=True)
+[?2004l[?2004h> PY
+[?2004l/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+/app/output/transport.py:169: RuntimeWarning: overflow encountered in multiply
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+batch difference 8.092140291182659e-10 5.4348335720887264e-11
+integration 0 342 0 6.4412540991092e-10 310.99331521987915
+worst [0.03043315 0.0438229 ] 1.898766369828886e-10
+worst [0.01495099 0.01508413] 2.9394478886536624e-10
+worst [0.01947778 0.03043315] 3.936020953609898e-10
+worst [1.00000000e-10 1.21788444e-03] 6.4412540991092e-10
+Sonine 3 (np.float64(0.09268432011457166), np.float64(0.2033783399468499))
+Sonine 4 (np.float64(0.09268466680854312), np.float64(0.20338530274412592))
+Sonine 5 (np.float64(0.09268472411874189), np.float64(0.20338766873690625))
+Sonine 6 (np.float64(0.0926847338579502), np.float64(0.20338813357351807))
+Sonine 7 (np.float64(0.09268473609233435), np.float64(0.20338821877657004))
+Sonine 8 (np.float64(0.09268473676540685), np.float64(0.20338823797877723))
+Sonine 9 (np.float64(0.09268473698543281), np.float64(0.20338824356308996))
+CORNER (np.float64(0.09268473698543281), np.float64(0.20338824356308996)) 317.22244334220886
+[?2004hroot@80c1e2a6cbf9:/app# cp /app/last_moments.npy /app/corner_corrected.npy
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> import sys,time,numpy as np
+[?2004l[?2004h> sys.path.insert(0,'/app/output');import transport as tr
+[?2004l[?2004h> source=open('/app/output/transport.py').read()
+[?2004l[?2004h> alt=source.replace('5*k.max()+24','7*k.max()+34').replace('5*k[:,None]+12','7*k[:,None]+22')
+[?2004l[?2004h> ns={'__name__':'alternate'};exec(compile(alt,'alternate','exec'),ns)
+[?2004l[?2004h> for A,L,M in [(0,.8,2),(.5,.8,2),(0,2.8,1),(.5,2.8,1)]:
+[?2004l[?2004h>  E=np.geomspace(.00005,24,150)
+[?2004l[?2004h>  a,k,*_=tr.phases(E,A,L,M);qa=tr.transport_sections(a,k,20)
+[?2004l[?2004h>  b,k,*_=ns['phases'](E,A,L,M);qb=tr.transport_sections(b,k,20)
+[?2004l[?2004h>  print('born',A,L,M,np.max(abs(qa-qb)/(qb[0][None,:,:]+1e-7)),flush=True)
+[?2004l[?2004h>  b,k,*_=tr.phases(E,A,L,M,step=.00075,R=48);qb=tr.transport_sections(b,k,20)
+[?2004l[?2004h>  er=np.max(abs(qa-qb)/(qb[0][None,:,:]+1e-7),axis=(0,2))
+[?2004l[?2004h>  print('radial',A,L,M,np.max(er),E[np.argmax(er)],flush=True)
+[?2004l[?2004h> PY
+[?2004l/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+alternate:169: RuntimeWarning: invalid value encountered in add
+alternate:169: RuntimeWarning: overflow encountered in multiply
+born 0 0.8 2 1.9689693597854444e-06
+/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+radial 0 0.8 2 2.152013135478497e-05 0.000637844688147608
+born 0.5 0.8 2 4.80886365819824e-07
+radial 0.5 0.8 2 1.0979373532779365e-05 0.0006963764551565815
+born 0 2.8 1 5.558354226485047e-07
+radial 0 2.8 1 8.621174926780594e-07 0.013779539272273489
+born 0.5 2.8 1 8.295311366984557e-09
+radial 0.5 2.8 1 2.280400980390614e-05 5e-05
+[?2004hroot@80c1e2a6cbf9:/app# cp /app/output/transport.py /app/transport_before_opt.py
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read();a=s.index('def transport_sections(');b=s.index("if __name__=='__main__' and sys.argv[1:]==['scattertest']",a)
+[?2004l[?2004h> s=s[:a]+'''_angular_cache={}
+[?2004l[?2004h> def transport_sections(delta,k,D):
+[?2004l[?2004h>     from scipy.sparse import diags,eye
+[?2004l[?2004h>     nl=delta.shape[1]
+[?2004l[?2004h>     key=(nl,D)
+[?2004l[?2004h>     if key not in _angular_cache:
+[?2004l[?2004h>         j=np.arange(1,nl);off=j/np.sqrt(4*j*j-1)
+[?2004l[?2004h>         X=diags([off,off],[-1,1],shape=(nl,nl),format='csr')
+[?2004l[?2004h>         p0=eye(nl,format='csr');p1=X
+[?2004l[?2004h>         weights=np.zeros((D,D,nl))
+[?2004l[?2004h>         for s in range(1,D+1):
+[?2004l[?2004h>             if s==1:p=p1
+[?2004l[?2004h>             else:
+[?2004l[?2004h>                 p=((2*s-1)*X@p1-(s-1)*p0)/s;p0,p1=p1,p
+[?2004l[?2004h>             co=p.tocoo();a,b=co.row,co.col
+[?2004l[?2004h>             use=(b>a)&(abs(co.data)>1e-14)
+[?2004l[?2004h>             a,b,v=a[use],b[use],co.data[use]
+[?2004l[?2004h>             weights[b-a-1,s-1,a]=2*v*np.sqrt((2*a+1)*(2*b+1))
+[?2004l[?2004h>         _angular_cache[key]=weights
+[?2004l[?2004h>     weights=_angular_cache[key]
+[?2004l[?2004h>     Q=np.zeros((2,len(k),D))
+[?2004l[?2004h>     for d in range(1,D+1):
+[?2004l[?2004h>         sd=np.sin(delta[:,:nl-d]-delta[:,d:])**2
+[?2004l[?2004h>         w=weights[d-1,:,:nl-d]
+[?2004l[?2004h>         Q[0]+=sd@w.T
+[?2004l[?2004h>         if d%2==0:
+[?2004l[?2004h>             ex=sd@(w*(-1.)**np.arange(nl-d)[None,:]).T
+[?2004l[?2004h>             Q[1,:,1::2]+=ex[:,1::2]
+[?2004l[?2004h>     Q*=2*np.pi/k[None,:,None]**2
+[?2004l[?2004h>     return Q
+[?2004l[?2004h> 
+[?2004l[?2004h> ''' +s[b:]
+[?2004l[?2004h> s=s.replace('def run(G,A,L,B,T,verbose=False,N=11):','def run(G,A,L,B,T,verbose=False,N=11):')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> import sys,numpy as np,time
+[?2004l[?2004h> sys.path.insert(0,'/app/output');import transport as tr
+[?2004l[?2004h> ns={'__name__':'old'};exec(compile(open('/app/transport_before_opt.py').read(),'old','exec'),ns)
+[?2004l[?2004h> E=np.linspace(.01,20,500);d,k,*_=tr.phases(E,0,.8,2)
+[?2004l[?2004h> t=time.time();q=tr.transport_sections(d,k,24);print('new',time.time()-t)
+[?2004l[?2004h> t=time.time();q1=ns['transport_sections'](d,k,24);print('old',time.time()-t,np.max(abs(q-q1)),flush=True)
+[?2004l[?2004h> for args in [('H2',.5,2.8,1,.2),('H2',0,2.8,1,.2),('D2',.5,2.8,1,.6),('D2',.5,.8,3,.2)]:
+[?2004l[?2004h>  t=time.time();print('CASE',args,tr.run(*args,verbose=True,N=11),time.time()-t,flush=True)
+[?2004l[?2004h>  np.save('/app/mom_'+str(args[0])+str(args[1])+str(args[2])+str(args[4])+'.npy',np.load('/app/last_moments.npy'))
+[?2004l[?2004h> PY
+[?2004lnew 4.832535266876221
+old 11.82926321029663 2.5925928071046656e-12
+/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+integration 0 180 0 9.854245891505187e-11 34.616761922836304
+worst [0.04494642 0.0543847 ] 4.675637654827369e-11
+worst [0.08809261 0.10112627] 6.647160599726476e-11
+worst [0.02202464 0.02876639] 8.914757126943229e-11
+worst [0.01123767 0.01618173] 9.854245891505187e-11
+Sonine 3 (np.float64(0.03595959142206204), np.float64(0.13794421919058558))
+Sonine 4 (np.float64(0.035959752539380024), np.float64(0.13795911343147108))
+Sonine 5 (np.float64(0.035959765049346615), np.float64(0.1379613633851581))
+Sonine 6 (np.float64(0.035959768216213675), np.float64(0.13796155997695533))
+Sonine 7 (np.float64(0.035959769834764684), np.float64(0.13796160511766764))
+Sonine 8 (np.float64(0.03595977045344165), np.float64(0.13796162961523745))
+Sonine 9 (np.float64(0.03595977062465155), np.float64(0.13796164045666262))
+Sonine 10 (np.float64(0.0359597706697349), np.float64(0.1379616438549806))
+Sonine 11 (np.float64(0.035959770684996666), np.float64(0.1379616447906323))
+CASE ('H2', 0.5, 2.8, 1, 0.2) (np.float64(0.035959770684996666), np.float64(0.1379616447906323)) 43.3581976890564
+integration 0 181 0 1.5806179365362993e-08 34.67193555831909
+worst [0.01618173 0.02202464] 3.6640357414796654e-11
+worst [0.11505877 0.12989011] 4.493150296269732e-11
+worst [0.00404607 0.00719244] 8.227685199813095e-11
+worst [0.01123767 0.01618173] 1.5806179365362993e-08
+Sonine 3 (np.float64(0.03580786441942514), np.float64(0.13754206232636304))
+Sonine 4 (np.float64(0.035821877652676255), np.float64(0.1380258432252044))
+Sonine 5 (np.float64(0.035827472549374906), np.float64(0.13818922275466056))
+Sonine 6 (np.float64(0.035829838155925574), np.float64(0.13825437337669283))
+Sonine 7 (np.float64(0.03583069948815835), np.float64(0.138281895128443))
+Sonine 8 (np.float64(0.03583095173794681), np.float64(0.13829168531318173))
+Sonine 9 (np.float64(0.035831007019071166), np.float64(0.13829426226144265))
+Sonine 10 (np.float64(0.035831013321029066), np.float64(0.13829467701194592))
+Sonine 11 (np.float64(0.035831013367108346), np.float64(0.13829468756027918))
+CASE ('H2', 0, 2.8, 1, 0.2) (np.float64(0.035831013367108346), np.float64(0.13829468756027918)) 43.4945650100708
+integration 0 180 0 6.30730407139013e-12 65.46561455726624
+worst [0.10921635 0.13483419] 4.823780264118227e-12
+worst [0.04854207 0.06607029] 5.506655895159973e-12
+worst [0.02157523 0.03371038] 5.557995903793245e-12
+worst [0.01213662 0.02157523] 6.30730407139013e-12
+Sonine 3 (np.float64(0.17734402452762202), np.float64(0.39131501128608026))
+Sonine 4 (np.float64(0.1773457073811841), np.float64(0.39137138969429847))
+Sonine 5 (np.float64(0.1773460039776491), np.float64(0.3913808479141106))
+Sonine 6 (np.float64(0.17734606399935288), np.float64(0.3913827029856207))
+Sonine 7 (np.float64(0.1773460774887869), np.float64(0.3913831067523496))
+Sonine 8 (np.float64(0.1773460808037746), np.float64(0.3913832017942411))
+Sonine 9 (np.float64(0.17734608169109844), np.float64(0.39138322578950724))
+Sonine 10 (np.float64(0.17734608195036644), np.float64(0.39138323231256467))
+Sonine 11 (np.float64(0.17734608203329152), np.float64(0.3913832342413731))
+CASE ('D2', 0.5, 2.8, 1, 0.6) (np.float64(0.17734608203329152), np.float64(0.3913832342413731)) 73.8870038986206
+integration 0 255 0 1.4669708142678317e-08 159.90109634399414
+worst [0.03139284 0.03145253] 1.0302638015174774e-11
+worst [0.03163161 0.03258669] 3.732966193104037e-11
+worst [0.01123767 0.01618173] 8.211069671415494e-11
+worst [0.10112627 0.11505877] 1.4669708142678317e-08
+Sonine 3 (np.float64(0.04845924811430177), np.float64(0.0913237158841084))
+Sonine 4 (np.float64(0.0484616248846453), np.float64(0.09137916477385619))
+Sonine 5 (np.float64(0.048462209466143435), np.float64(0.09139244195355384))
+Sonine 6 (np.float64(0.04846237097296704), np.float64(0.09139600948838701))
+Sonine 7 (np.float64(0.048462419341996514), np.float64(0.09139706684588089))
+Sonine 8 (np.float64(0.04846243476504202), np.float64(0.0913974030635919))
+Sonine 9 (np.float64(0.04846243995751855), np.float64(0.09139751599736398))
+Sonine 10 (np.float64(0.04846244179315713), np.float64(0.09139755578879605))
+Sonine 11 (np.float64(0.04846244247099293), np.float64(0.09139757043067957))
+CASE ('D2', 0.5, 0.8, 3, 0.2) (np.float64(0.04846244247099293), np.float64(0.09139757043067957)) 168.65931344032288
+[?2004hroot@80c1e2a6cbf9:/app# cat > /app/check_high.py <<'PY'
+[?2004l[?2004h> import sys,time,numpy as np
+[?2004l[?2004h> sys.path.insert(0,'/app/output');import transport as tr
+[?2004l[?2004h> src=open('/app/output/transport.py').read()
+[?2004l[?2004h> for rho in [.48,.52]:
+[?2004l[?2004h>  ns={'__name__':'coeff'};exec(compile(src.replace('np.longdouble(.5)','np.longdouble('+str(rho)+')'),'coeff','exec'),ns)
+[?2004l[?2004h>  for rank in [1,2]:
+[?2004l[?2004h>   t=time.time();c,n=ns['analytic_brackets'](18,rank,K=144)
+[?2004l[?2004h>   np.save('/app/coeff'+str(rho)+'_'+str(rank)+'.npy',c)
+[?2004l[?2004h>   print('coeff',rho,rank,time.time()-t,np.max(abs(c)),flush=True)
+[?2004l[?2004h> for rank in [1,2]:
+[?2004l[?2004h>  a=np.load('/app/coeff0.48_'+str(rank)+'.npy');b=np.load('/app/coeff0.52_'+str(rank)+'.npy')
+[?2004l[?2004h>  print('agreement',rank,np.max(abs(a-b)),np.unravel_index(np.argmax(abs(a-b)),a.shape),flush=True)
+[?2004l[?2004h>  print('lastrow',np.max(abs(a[:,:,-1,:]-b[:,:,-1,:])),flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 /app/check_high.py
+[?2004lcoeff 0.48 1 23.911040544509888 866620799.326619
+coeff 0.48 2 24.96986722946167 764560038.4804246
+coeff 0.52 1 24.536630153656006 866620799.326619
+coeff 0.52 2 25.8644380569458 764560038.4804246
+agreement 1 5.960464477539063e-08 (np.int64(16), np.int64(0), np.int64(18), np.int64(18))
+lastrow 5.960464477539063e-08
+agreement 2 1.4901161193847656e-08 (np.int64(19), np.int64(0), np.int64(16), np.int64(17))
+lastrow 1.4901161193847656e-08
+[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read();s=s.replace("    base=np.einsum('plij,pl->lij',coeff,moments[0],optimize=True)","    base=np.array(np.einsum('plij,pl->lij',coeff.astype(np.longdouble),moments[0].astype(np.longdouble),optimize=False),dtype=float)").replace("    exch=np.einsum('plij,pl->lij',coeff,moments[1],optimize=True)","    exch=np.array(np.einsum('plij,pl->lij',coeff.astype(np.longdouble),moments[1].astype(np.longdouble),optimize=False),dtype=float)")
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> import sys,time,numpy as np
+[?2004l[?2004h> sys.path.insert(0,'/app/output');import transport as tr
+[?2004l[?2004h> N=18;T=.2;B=1;xp=np.array([1-9*np.exp(-2*B/T)/(1+9*np.exp(-2*B/T)),9*np.exp(-2*B/T)/(1+9*np.exp(-2*B/T))]);ds=[1,9]
+[?2004l[?2004h> t=time.time();mom=tr.integrate_moments(0,2.8,1,T,38,accuracy=2e-8,verbose=True);np.save('/app/hard_h2_moments.npy',mom)
+[?2004l[?2004h> cv=np.load('/app/coeff0.52_2.npy');ch=np.load('/app/coeff0.52_1.npy')
+[?2004l[?2004h> for n in range(6,N+1):
+[?2004l[?2004h>  try:
+[?2004l[?2004h>   v=tr.properties(cv[:2*n+3,:2*n+2,:n+1,:n+1],ch[:2*n+2,:2*n+1,:n+1,:n+1],mom[:,:2*n+3,:2*n+2],mom[:,:2*n+2,:2*n+1],xp,ds,T,1,2*B)
+[?2004l[?2004h>   print(n,v,time.time()-t,flush=True)
+[?2004l[?2004h>  except Exception as e: print(n,e,flush=True)
+[?2004l[?2004h> PY
+[?2004l/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+integration 0 182 0 1.4085888344617103e-08 38.22453045845032
+worst [0.01560743 0.02247411] 4.8490433890435725e-11
+worst [0.05056449 0.06242474] 5.097833266631824e-11
+worst [0.00561928 0.00998916] 5.2543525086434784e-11
+worst [0.00998916 0.01560743] 1.4085888344617103e-08
+6 (np.float64(0.03582983815599403), np.float64(0.13825437337697002)) 38.231828689575195
+7 (np.float64(0.0358306994882268), np.float64(0.13828189512871994)) 38.23300218582153
+8 (np.float64(0.035830951738015246), np.float64(0.1382916853134585)) 38.23435020446777
+9 (np.float64(0.035831007019139605), np.float64(0.13829426226171918)) 38.236072063446045
+10 (np.float64(0.0358310133210975), np.float64(0.13829467701222237)) 38.238218545913696
+11 (np.float64(0.035831013367176784), np.float64(0.13829468756055563)) 38.241032123565674
+12 (np.float64(0.035831015899517385), np.float64(0.13829471826663653)) 38.24513483047485
+13 (np.float64(0.03583102044329724), np.float64(0.1382948075825797)) 38.24989128112793
+14 (np.float64(0.03583102515211714), np.float64(0.13829491783720005)) 38.25578737258911
+15 (np.float64(0.03583102891530448), np.float64(0.13829501589160004)) 38.42389369010925
+16 (np.float64(0.0358310314696174), np.float64(0.13829508753299938)) 38.44642901420593
+17 (np.float64(0.03583103300526728), np.float64(0.13829513287606365)) 38.50738191604614
+18 (np.float64(0.03583103383579528), np.float64(0.1382951583548725)) 38.66630172729492
+[?2004hroot@80c1e2a6cbf9:/app# cat > /app/more_tests.py <<'PY'
+[?2004l[?2004h> import sys,time,numpy as np
+[?2004l[?2004h> sys.path.insert(0,'/app/output');import transport as tr
+[?2004l[?2004h> src=open('/app/output/transport.py').read();ns={'__name__':'coeff'};exec(compile(src.replace('np.longdouble(.5)','np.longdouble(.52)'),'coeff','exec'),ns)
+[?2004l[?2004h> for rank in [1,2]:
+[?2004l[?2004h>  t=time.time();c,_=ns['analytic_brackets'](22,rank,K=168);np.save('/app/coeff22_'+str(rank)+'.npy',c);print('coeff22',rank,time.time()-t,flush=True)
+[?2004l[?2004h> cv=np.load('/app/coeff22_2.npy');ch=np.load('/app/coeff22_1.npy')
+[?2004l[?2004h> def brackets(n,r):
+[?2004l[?2004h>  c=cv if r==2 else ch
+[?2004l[?2004h>  return c[:2*n+r+1,:2*n+r,:n+1,:n+1],None
+[?2004l[?2004h> tr.analytic_brackets=brackets
+[?2004l[?2004h> cases=[('H2',0,2.8,1,.2),('H2',0,2.4,1,.2),('H2',.12,2.8,1,.2),('H2',.25,2.4,1,.2),('H2',0,2,1,.2),('H2',.1,1.8,1,.25),('D2',0,2.8,1,.2),('D2',.25,2.8,1,.2),('D2',0,.8,1,.6)]
+[?2004l[?2004h> for args in cases:
+[?2004l[?2004h>  t=time.time();print('START',args,flush=True)
+[?2004l[?2004h>  result=tr.run(*args,verbose=True,N=18 if args[2]>1.8 else 14)
+[?2004l[?2004h>  print('DONE',args,result,time.time()-t,flush=True)
+[?2004l[?2004h>  np.save('/app/m_'+str(len(str(args)))+str(args)+'.npy',np.load('/app/last_moments.npy'))
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# OPENBLAS_NUM_THREADS=2 python3 /app/more_tests.py > /app/more_tests.log 2>&1 &
+[?2004l[1] 2412
+[?2004hroot@80c1e2a6cbf9:/app# tail -30 /app/more_tests.log; ps -o pid,etime,%cpu,rss,args -p 2412; wc -c /app/output/transport.py
+[?2004lbash: ps: command not found
+15446 /app/output/transport.py
+[?2004hroot@80c1e2a6cbf9:/app# sleep 30; tail -35 /app/more_tests.log
+[?2004lcoeff22 1 46.66436290740967
+[?2004hroot@80c1e2a6cbf9:/app# cat > /app/fine_tests.py <<'PY'
+[?2004l[?2004h> import sys,time,numpy as np
+[?2004l[?2004h> sys.path.insert(0,'/app/output');import transport as tr
+[?2004l[?2004h> src=open('/app/output/transport.py').read();alt=src.replace('5*k.max()+24','7*k.max()+34').replace('5*k[:,None]+12','7*k[:,None]+22');ns={'__name__':'fine'};exec(compile(alt,'fine','exec'),ns)
+[?2004l[?2004h> def finephase(E,A,L,M,step=.0015,R=32.,**kw):return ns['phases'](E,A,L,M,step=.0008,R=40.,**kw)
+[?2004l[?2004h> tr.phases=finephase
+[?2004l[?2004h> cv=np.load('/app/coeff0.52_2.npy');ch=np.load('/app/coeff0.52_1.npy')
+[?2004l[?2004h> def brackets(n,r):
+[?2004l[?2004h>  c=cv if r==2 else ch
+[?2004l[?2004h>  return c[:2*n+r+1,:2*n+r,:n+1,:n+1],None
+[?2004l[?2004h> tr.analytic_brackets=brackets
+[?2004l[?2004h> # Continuous-phase scan must use the actual matching radius.
+[?2004l[?2004h> old=tr.continuous_phases
+[?2004l[?2004h> tr.continuous_phases=lambda result,R:old(result,40.)
+[?2004l[?2004h> for args in [('H2',0,2.8,1,.2),('D2',.5,.8,3,.2)]:
+[?2004l[?2004h>  t=time.time();print('FINE',args,tr.run(*args,N=14,verbose=True),time.time()-t,flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 /app/fine_tests.py > /app/fine_tests.log 2>&1 &
+[?2004l[2] 2477
+[?2004hroot@80c1e2a6cbf9:/app# tail -30 /app/more_tests.log
+[?2004lcoeff22 1 46.66436290740967
+coeff22 2 49.82821249961853
+START ('H2', 0, 2.8, 1, 0.2)
+/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+[?2004hroot@80c1e2a6cbf9:/app# sleep 30; tail -35 /app/more_tests.log; tail -25 /app/fine_tests.log
+[?2004lcoeff22 1 46.66436290740967
+coeff22 2 49.82821249961853
+START ('H2', 0, 2.8, 1, 0.2)
+/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+/app/output/transport.py:169: RuntimeWarning: invalid value encountered in add
+  yd=k[:,None]*(spherical_yn(ls[None,:],kr)+kr*spherical_yn(ls[None,:],kr,True))
+integration 0 182 0 1.4085888344617103e-08 37.59856557846069
+worst [0.01560743 0.02247411] 4.8490433890435725e-11
+worst [0.05056449 0.06242474] 5.097833266631824e-11
+worst [0.00561928 0.00998916] 5.2543525086434784e-11
+worst [0.00998916 0.01560743] 1.4085888344617103e-08
+Sonine 3 (np.float64(0.035807864419494156), np.float64(0.13754206232665334))
+Sonine 4 (np.float64(0.03582187765274536), np.float64(0.13802584322549846))
+Sonine 5 (np.float64(0.03582747254944403), np.float64(0.13818922275495596))
+Sonine 6 (np.float64(0.03582983815599467), np.float64(0.13825437337698834))
+Sonine 7 (np.float64(0.03583069948822744), np.float64(0.13828189512873834))
+Sonine 8 (np.float64(0.035830951738015884), np.float64(0.13829168531347696))
+Sonine 9 (np.float64(0.03583100701914024), np.float64(0.13829426226173774))
+Sonine 10 (np.float64(0.035831013321098136), np.float64(0.13829467701224094))
+Sonine 11 (np.float64(0.03583101336717742), np.float64(0.13829468756057423))
+Sonine 12 (np.float64(0.03583101589951803), np.float64(0.1382947182666551))
+Sonine 13 (np.float64(0.03583102044329787), np.float64(0.13829480758259827))
+Sonine 14 (np.float64(0.035831025152117765), np.float64(0.1382949178372187))
+Sonine 15 (np.float64(0.035831028915305096), np.float64(0.1382950158916183))
+Sonine 16 (np.float64(0.035831031469618115), np.float64(0.1382950875330174))
+Sonine 17 (np.float64(0.0358310330052681), np.float64(0.13829513287608045))
+Sonine 18 (np.float64(0.035831033835796056), np.float64(0.13829515835489306))
+DONE ('H2', 0, 2.8, 1, 0.2) (np.float64(0.035831033835796056), np.float64(0.13829515835489306)) 37.67496299743652
+START ('H2', 0, 2.4, 1, 0.2)
+fine:169: RuntimeWarning: invalid value encountered in add
+[?2004hroot@80c1e2a6cbf9:/app# sleep 30; tail -35 /app/more_tests.log; tail -25 /app/fine_tests.log
+[?2004lSonine 9 (np.float64(0.03583100701914024), np.float64(0.13829426226173774))
+Sonine 10 (np.float64(0.035831013321098136), np.float64(0.13829467701224094))
+Sonine 11 (np.float64(0.03583101336717742), np.float64(0.13829468756057423))
+Sonine 12 (np.float64(0.03583101589951803), np.float64(0.1382947182666551))
+Sonine 13 (np.float64(0.03583102044329787), np.float64(0.13829480758259827))
+Sonine 14 (np.float64(0.035831025152117765), np.float64(0.1382949178372187))
+Sonine 15 (np.float64(0.035831028915305096), np.float64(0.1382950158916183))
+Sonine 16 (np.float64(0.035831031469618115), np.float64(0.1382950875330174))
+Sonine 17 (np.float64(0.0358310330052681), np.float64(0.13829513287608045))
+Sonine 18 (np.float64(0.035831033835796056), np.float64(0.13829515835489306))
+DONE ('H2', 0, 2.8, 1, 0.2) (np.float64(0.035831033835796056), np.float64(0.13829515835489306)) 37.67496299743652
+START ('H2', 0, 2.4, 1, 0.2)
+integration 0 180 0 6.639053085066848e-09 41.59332990646362
+worst [0.03995263 0.05056449] 3.366162903972736e-11
+worst [0.07553339 0.08989043] 3.397637726720859e-11
+worst [0.0006247  0.00249779] 4.095895844713482e-11
+worst [0.00998916 0.01560743] 6.639053085066848e-09
+Sonine 3 (np.float64(0.03004496039754747), np.float64(0.11472721470523978))
+Sonine 4 (np.float64(0.03004641125463872), np.float64(0.114817943630128))
+Sonine 5 (np.float64(0.030046540124901478), np.float64(0.11484039367031014))
+Sonine 6 (np.float64(0.03004657945920334), np.float64(0.11484271811802597))
+Sonine 7 (np.float64(0.03004661429084402), np.float64(0.11484318751620788))
+Sonine 8 (np.float64(0.03004663367100167), np.float64(0.11484356952886692))
+Sonine 9 (np.float64(0.030046638813985532), np.float64(0.11484382262622937))
+Sonine 10 (np.float64(0.03004663930007331), np.float64(0.11484390181629395))
+Sonine 11 (np.float64(0.03004663930110882), np.float64(0.11484390929343578))
+Sonine 12 (np.float64(0.03004663934917973), np.float64(0.11484390962560406))
+Sonine 13 (np.float64(0.030046639391790864), np.float64(0.11484391200933652))
+Sonine 14 (np.float64(0.030046639421830553), np.float64(0.11484391401467847))
+Sonine 15 (np.float64(0.030046639448012495), np.float64(0.1148439151616193))
+Sonine 16 (np.float64(0.030046639472880905), np.float64(0.1148439158597438))
+Sonine 17 (np.float64(0.03004663949371411), np.float64(0.11484391636926085))
+Sonine 18 (np.float64(0.030046639507780137), np.float64(0.11484391675912321))
+DONE ('H2', 0, 2.4, 1, 0.2) (np.float64(0.030046639507780137), np.float64(0.11484391675912321)) 41.65130805969238
+START ('H2', 0.12, 2.8, 1, 0.2)
+fine:169: RuntimeWarning: invalid value encountered in add
+fine:169: RuntimeWarning: invalid value encountered in add
+[?2004hroot@80c1e2a6cbf9:/app# sleep 60; tail -35 /app/more_tests.log; tail -30 /app/fine_tests.log
+[?2004lSonine 9 (np.float64(0.04142137185204329), np.float64(0.1606070319452081))
+Sonine 10 (np.float64(0.04142180171073077), np.float64(0.16061935980937925))
+Sonine 11 (np.float64(0.04142203652370307), np.float64(0.16062619475664008))
+Sonine 12 (np.float64(0.04142216405144193), np.float64(0.16063000133096147))
+Sonine 13 (np.float64(0.04142223270786618), np.float64(0.1606321069146634))
+Sonine 14 (np.float64(0.04142226942743153), np.float64(0.16063325710307547))
+Sonine 15 (np.float64(0.04142228898071081), np.float64(0.16063387816080885))
+Sonine 16 (np.float64(0.04142229934151217), np.float64(0.16063421066464464))
+Sonine 17 (np.float64(0.04142230478685435), np.float64(0.1606343873568794))
+Sonine 18 (np.float64(0.04142230761360556), np.float64(0.16063448033913988))
+DONE ('H2', 0.12, 2.8, 1, 0.2) (np.float64(0.04142230761360556), np.float64(0.16063448033913988)) 36.823532819747925
+START ('H2', 0.25, 2.4, 1, 0.2)
+integration 0 180 0 1.0600467309496153e-09 41.27502131462097
+worst [0.20224897 0.22534477] 1.3104711760192345e-11
+worst [0.18040156 0.20224897] 1.438810182108341e-11
+worst [0.10549587 0.1223497 ] 1.9113793880976004e-11
+worst [0.00998916 0.01560743] 1.0600467309496153e-09
+Sonine 3 (np.float64(0.0469737741608395), np.float64(0.17975909532306478))
+Sonine 4 (np.float64(0.04698031012259734), np.float64(0.17996215146236622))
+Sonine 5 (np.float64(0.04698213557998146), np.float64(0.18005105263317853))
+Sonine 6 (np.float64(0.04698289327247317), np.float64(0.1800791022720493))
+Sonine 7 (np.float64(0.04698334929653834), np.float64(0.1800908420587982))
+Sonine 8 (np.float64(0.046983632554028446), np.float64(0.18009797384691478))
+Sonine 9 (np.float64(0.04698379178562204), np.float64(0.18010266308428974))
+Sonine 10 (np.float64(0.04698387560038298), np.float64(0.18010549205419668))
+Sonine 11 (np.float64(0.046983920171153944), np.float64(0.18010706472228696))
+Sonine 12 (np.float64(0.04698394530090457), np.float64(0.18010792475481477))
+Sonine 13 (np.float64(0.04698396028996811), np.float64(0.1801084143858145))
+Sonine 14 (np.float64(0.0469839694585221), np.float64(0.18010870896083656))
+Sonine 15 (np.float64(0.04698397505314623), np.float64(0.18010889242358755))
+Sonine 16 (np.float64(0.04698397842569028), np.float64(0.18010900740017982))
+Sonine 17 (np.float64(0.04698398044559048), np.float64(0.1801090787395384))
+Sonine 18 (np.float64(0.04698398166237541), np.float64(0.18010912253358335))
+DONE ('H2', 0.25, 2.4, 1, 0.2) (np.float64(0.04698398166237541), np.float64(0.18010912253358335)) 41.35310769081116
+START ('H2', 0, 2, 1, 0.2)
+fine:169: RuntimeWarning: invalid value encountered in add
+fine:169: RuntimeWarning: invalid value encountered in add
+integration 0 182 0 3.025037442760947e-10 120.81299710273743
+worst [0.00052478 0.00209822] 1.8259596612502094e-10
+worst [0.0047203  0.00839104] 2.1486640244816613e-10
+worst [0.00839104 0.01311043] 2.463723114409788e-10
+worst [0.01311043 0.01887847] 3.025037442760947e-10
+Sonine 3 (np.float64(0.03580786442450357), np.float64(0.13754206234661917))
+Sonine 4 (np.float64(0.03582187765779433), np.float64(0.1380258432463309))
+Sonine 5 (np.float64(0.03582747255451528), np.float64(0.13818922277628173))
+Sonine 6 (np.float64(0.03582983816107849), np.float64(0.13825437339860214))
+Sonine 7 (np.float64(0.03583069949331754), np.float64(0.13828189515051678))
+Sonine 8 (np.float64(0.03583095174310868), np.float64(0.13829168533533703))
+Sonine 9 (np.float64(0.03583100702423397), np.float64(0.13829426228363045))
+Sonine 10 (np.float64(0.03583101332619209), np.float64(0.13829467703414333))
+Sonine 11 (np.float64(0.03583101337227135), np.float64(0.1382946875824777))
+Sonine 12 (np.float64(0.0358310159046119), np.float64(0.13829471828855738))
+Sonine 13 (np.float64(0.03583102044839171), np.float64(0.13829480760449944))
+Sonine 14 (np.float64(0.03583102515721159), np.float64(0.1382949178591192))
+FINE ('H2', 0, 2.8, 1, 0.2) (np.float64(0.03583102515721159), np.float64(0.1382949178591192)) 120.84389925003052
+[?2004hroot@80c1e2a6cbf9:/app# tail -25 /app/more_tests.log; tail -12 /app/fine_tests.log; ls -lh /app/coeff22_*.npy
+[?2004lDONE ('H2', 0.25, 2.4, 1, 0.2) (np.float64(0.04698398166237541), np.float64(0.18010912253358335)) 41.35310769081116
+START ('H2', 0, 2, 1, 0.2)
+integration 0 187 0 2.9410651469774507e-08 48.07150220870972
+worst [0.01560743 0.02247411] 3.0151603436223695e-11
+worst [0.03058917 0.03995263] 4.433647893264947e-11
+worst [0.30212256 0.33021194] 4.461409019995699e-11
+worst [0.00998916 0.01560743] 2.9410651469774507e-08
+Sonine 3 (np.float64(0.025087592406204198), np.float64(0.09610814860131844))
+Sonine 4 (np.float64(0.02508829424767572), np.float64(0.09610821713477749))
+Sonine 5 (np.float64(0.02508842176777751), np.float64(0.09611549319512176))
+Sonine 6 (np.float64(0.025088421775771353), np.float64(0.09611766762710568))
+Sonine 7 (np.float64(0.02508843147578817), np.float64(0.09611770372541288))
+Sonine 8 (np.float64(0.025088435604745194), np.float64(0.09611779366304275))
+Sonine 9 (np.float64(0.025088435784135943), np.float64(0.09611786475265681))
+Sonine 10 (np.float64(0.025088435956282146), np.float64(0.09611787376288561))
+Sonine 11 (np.float64(0.025088436235941407), np.float64(0.09611787435670188))
+Sonine 12 (np.float64(0.025088436338394627), np.float64(0.09611787804626226))
+Sonine 13 (np.float64(0.025088436346461216), np.float64(0.09611788029931072))
+Sonine 14 (np.float64(0.025088436348329052), np.float64(0.09611788073861632))
+Sonine 15 (np.float64(0.0250884363545805), np.float64(0.09611788073955142))
+Sonine 16 (np.float64(0.025088436358216004), np.float64(0.09611788080067736))
+Sonine 17 (np.float64(0.025088436358931047), np.float64(0.09611788087001015))
+Sonine 18 (np.float64(0.025088436358931314), np.float64(0.0961178808964937))
+DONE ('H2', 0, 2, 1, 0.2) (np.float64(0.025088436358931314), np.float64(0.0961178808964937)) 48.13692378997803
+START ('H2', 0.1, 1.8, 1, 0.25)
+Sonine 4 (np.float64(0.03582187765779433), np.float64(0.1380258432463309))
+Sonine 5 (np.float64(0.03582747255451528), np.float64(0.13818922277628173))
+Sonine 6 (np.float64(0.03582983816107849), np.float64(0.13825437339860214))
+Sonine 7 (np.float64(0.03583069949331754), np.float64(0.13828189515051678))
+Sonine 8 (np.float64(0.03583095174310868), np.float64(0.13829168533533703))
+Sonine 9 (np.float64(0.03583100702423397), np.float64(0.13829426228363045))
+Sonine 10 (np.float64(0.03583101332619209), np.float64(0.13829467703414333))
+Sonine 11 (np.float64(0.03583101337227135), np.float64(0.1382946875824777))
+Sonine 12 (np.float64(0.0358310159046119), np.float64(0.13829471828855738))
+Sonine 13 (np.float64(0.03583102044839171), np.float64(0.13829480760449944))
+Sonine 14 (np.float64(0.03583102515721159), np.float64(0.1382949178591192))
+FINE ('H2', 0, 2.8, 1, 0.2) (np.float64(0.03583102515721159), np.float64(0.1382949178591192)) 120.84389925003052
+-rw-r--r-- 1 root root 8.4M Nov  5 19:39 /app/coeff22_1.npy
+-rw-r--r-- 1 root root 8.8M Nov  5 19:39 /app/coeff22_2.npy
+[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read();s=s.replace('        w=weights[d-1,:,:nl-d]\n        Q[0]+=sd@w.T','        w=weights[d-1,d-1::2,:nl-d]\n        Q[0,:,d-1::2]+=sd@w.T').replace('            Q[1,:,1::2]+=ex[:,1::2]','            Q[1,:,d-1::2]+=ex')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# cat > /app/mesh_tests.py <<'PY'
+[?2004l[?2004h> import sys,time,numpy as np
+[?2004l[?2004h> sys.path.insert(0,'/app/output');import transport as tr
+[?2004l[?2004h> src=open('/app/output/transport.py').read().replace('xmax),180)','xmax),120)');ns={'__name__':'smallmesh'};exec(compile(src,'smallmesh','exec'),ns)
+[?2004l[?2004h> cv=np.load('/app/coeff22_2.npy');ch=np.load('/app/coeff22_1.npy')
+[?2004l[?2004h> def brackets(n,r):
+[?2004l[?2004h>  c=cv if r==2 else ch
+[?2004l[?2004h>  return c[:2*n+r+1,:2*n+r,:n+1,:n+1],None
+[?2004l[?2004h> ns['analytic_brackets']=brackets
+[?2004l[?2004h> for args in [('H2',.12,2.8,1,.2),('H2',.25,2.4,1,.2),('D2',0,.8,1,.6)]:
+[?2004l[?2004h>  t=time.time();print('START',args,flush=True);print('SMALLMESH',args,ns['run'](*args,N=22,verbose=True),time.time()-t,flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 /app/mesh_tests.py > /app/mesh_tests.log 2>&1 &
+[?2004l[3] 2646
+[?2004hroot@80c1e2a6cbf9:/app# tail -20 /app/more_tests.log; tail -15 /app/fine_tests.log
+[?2004lworst [0.30212256 0.33021194] 4.461409019995699e-11
+worst [0.00998916 0.01560743] 2.9410651469774507e-08
+Sonine 3 (np.float64(0.025087592406204198), np.float64(0.09610814860131844))
+Sonine 4 (np.float64(0.02508829424767572), np.float64(0.09610821713477749))
+Sonine 5 (np.float64(0.02508842176777751), np.float64(0.09611549319512176))
+Sonine 6 (np.float64(0.025088421775771353), np.float64(0.09611766762710568))
+Sonine 7 (np.float64(0.02508843147578817), np.float64(0.09611770372541288))
+Sonine 8 (np.float64(0.025088435604745194), np.float64(0.09611779366304275))
+Sonine 9 (np.float64(0.025088435784135943), np.float64(0.09611786475265681))
+Sonine 10 (np.float64(0.025088435956282146), np.float64(0.09611787376288561))
+Sonine 11 (np.float64(0.025088436235941407), np.float64(0.09611787435670188))
+Sonine 12 (np.float64(0.025088436338394627), np.float64(0.09611787804626226))
+Sonine 13 (np.float64(0.025088436346461216), np.float64(0.09611788029931072))
+Sonine 14 (np.float64(0.025088436348329052), np.float64(0.09611788073861632))
+Sonine 15 (np.float64(0.0250884363545805), np.float64(0.09611788073955142))
+Sonine 16 (np.float64(0.025088436358216004), np.float64(0.09611788080067736))
+Sonine 17 (np.float64(0.025088436358931047), np.float64(0.09611788087001015))
+Sonine 18 (np.float64(0.025088436358931314), np.float64(0.0961178808964937))
+DONE ('H2', 0, 2, 1, 0.2) (np.float64(0.025088436358931314), np.float64(0.0961178808964937)) 48.13692378997803
+START ('H2', 0.1, 1.8, 1, 0.25)
+worst [0.00839104 0.01311043] 2.463723114409788e-10
+worst [0.01311043 0.01887847] 3.025037442760947e-10
+Sonine 3 (np.float64(0.03580786442450357), np.float64(0.13754206234661917))
+Sonine 4 (np.float64(0.03582187765779433), np.float64(0.1380258432463309))
+Sonine 5 (np.float64(0.03582747255451528), np.float64(0.13818922277628173))
+Sonine 6 (np.float64(0.03582983816107849), np.float64(0.13825437339860214))
+Sonine 7 (np.float64(0.03583069949331754), np.float64(0.13828189515051678))
+Sonine 8 (np.float64(0.03583095174310868), np.float64(0.13829168533533703))
+Sonine 9 (np.float64(0.03583100702423397), np.float64(0.13829426228363045))
+Sonine 10 (np.float64(0.03583101332619209), np.float64(0.13829467703414333))
+Sonine 11 (np.float64(0.03583101337227135), np.float64(0.1382946875824777))
+Sonine 12 (np.float64(0.0358310159046119), np.float64(0.13829471828855738))
+Sonine 13 (np.float64(0.03583102044839171), np.float64(0.13829480760449944))
+Sonine 14 (np.float64(0.03583102515721159), np.float64(0.1382949178591192))
+FINE ('H2', 0, 2.8, 1, 0.2) (np.float64(0.03583102515721159), np.float64(0.1382949178591192)) 120.84389925003052
+[?2004hroot@80c1e2a6cbf9:/app# sleep 60; tail -30 /app/mesh_tests.log; tail -30 /app/more_tests.log; tail -20 /app/fine_tests.log
+[?2004lSTART ('H2', 0.12, 2.8, 1, 0.2)
+smallmesh:169: RuntimeWarning: invalid value encountered in add
+smallmesh:169: RuntimeWarning: invalid value encountered in add
+integration 0 120 0 3.1789136462068157e-09 43.11121988296509
+worst [0.08028215 0.10485739] 3.152808569772958e-11
+worst [0.10485739 0.13270923] 3.784336732870486e-11
+worst [0.0065548  0.01474709] 4.467477776604056e-11
+worst [0.01474709 0.02621597] 3.1789136462068157e-09
+Sonine 3 (np.float64(0.041381324969705244), np.float64(0.15949491672163899))
+Sonine 4 (np.float64(0.04140159741189844), np.float64(0.16010230135610806))
+Sonine 5 (np.float64(0.04141115553876825), np.float64(0.1603489325140323))
+Sonine 6 (np.float64(0.041416321469135646), np.float64(0.16047273862320863))
+Sonine 7 (np.float64(0.04141910442555874), np.float64(0.1605439434698984))
+Sonine 8 (np.float64(0.041420581171127194), np.float64(0.16058458132179423))
+Sonine 9 (np.float64(0.04142137185203365), np.float64(0.16060703194513504))
+Sonine 10 (np.float64(0.04142180171072109), np.float64(0.1606193598093057))
+Sonine 11 (np.float64(0.04142203652369339), np.float64(0.16062619475656614))
+Sonine 12 (np.float64(0.04142216405143226), np.float64(0.16063000133088728))
+Sonine 13 (np.float64(0.04142223270785649), np.float64(0.1606321069145892))
+Sonine 14 (np.float64(0.041422269427421846), np.float64(0.1606332571030011))
+Sonine 15 (np.float64(0.04142228898070112), np.float64(0.16063387816073457))
+Sonine 16 (np.float64(0.04142229934150246), np.float64(0.16063421066457037))
+Sonine 17 (np.float64(0.04142230478684465), np.float64(0.16063438735680502))
+Sonine 18 (np.float64(0.04142230761359588), np.float64(0.16063448033906552))
+Sonine 19 (np.float64(0.04142230905725787), np.float64(0.16063452857269114))
+Sonine 20 (np.float64(0.04142230978001105), np.float64(0.1606345531062812))
+Sonine 21 (np.float64(0.04142231013320563), np.float64(0.16063456527732253))
+Sonine 22 (np.float64(0.04142231030059392), np.float64(0.16063457113155952))
+SMALLMESH ('H2', 0.12, 2.8, 1, 0.2) (np.float64(0.04142231030059392), np.float64(0.16063457113155952)) 43.41751718521118
+START ('H2', 0.25, 2.4, 1, 0.2)
+Sonine 10 (np.float64(0.025088435956282146), np.float64(0.09611787376288561))
+Sonine 11 (np.float64(0.025088436235941407), np.float64(0.09611787435670188))
+Sonine 12 (np.float64(0.025088436338394627), np.float64(0.09611787804626226))
+Sonine 13 (np.float64(0.025088436346461216), np.float64(0.09611788029931072))
+Sonine 14 (np.float64(0.025088436348329052), np.float64(0.09611788073861632))
+Sonine 15 (np.float64(0.0250884363545805), np.float64(0.09611788073955142))
+Sonine 16 (np.float64(0.025088436358216004), np.float64(0.09611788080067736))
+Sonine 17 (np.float64(0.025088436358931047), np.float64(0.09611788087001015))
+Sonine 18 (np.float64(0.025088436358931314), np.float64(0.0961178808964937))
+DONE ('H2', 0, 2, 1, 0.2) (np.float64(0.025088436358931314), np.float64(0.0961178808964937)) 48.13692378997803
+START ('H2', 0.1, 1.8, 1, 0.25)
+integration 0 192 0 9.055661998047526e-09 71.12618327140808
+worst [0.01638775 0.02359774] 2.0017876245503885e-11
+worst [0.02359774 0.03211855] 2.0094981234564102e-11
+worst [0.0059002  0.01048857] 2.0485224627719845e-11
+worst [0.01048857 0.01638775] 9.055661998047526e-09
+Sonine 3 (np.float64(0.036748662288841515), np.float64(0.14671655267363715))
+Sonine 4 (np.float64(0.036748776315579636), np.float64(0.1467448581238124))
+Sonine 5 (np.float64(0.03674879211135451), np.float64(0.1467469565083168))
+Sonine 6 (np.float64(0.03674883171538439), np.float64(0.14674701414445868))
+Sonine 7 (np.float64(0.03674884857486187), np.float64(0.14674744891507663))
+Sonine 8 (np.float64(0.03674885092316767), np.float64(0.14674770260944744))
+Sonine 9 (np.float64(0.036748850924432024), np.float64(0.1467477542231015))
+Sonine 10 (np.float64(0.03674885128978807), np.float64(0.14674775506516102))
+Sonine 11 (np.float64(0.03674885164309258), np.float64(0.1467477585690551))
+Sonine 12 (np.float64(0.03674885178422212), np.float64(0.14674776381529145))
+Sonine 13 (np.float64(0.036748851808478825), np.float64(0.1467477665608651))
+Sonine 14 (np.float64(0.03674885180858606), np.float64(0.14674776725764524))
+DONE ('H2', 0.1, 1.8, 1, 0.25) (np.float64(0.03674885180858606), np.float64(0.14674776725764524)) 71.19616389274597
+START ('D2', 0, 2.8, 1, 0.2)
+fine:169: RuntimeWarning: invalid value encountered in add
+fine:169: RuntimeWarning: invalid value encountered in add
+integration 0 182 0 3.025037442760947e-10 120.81299710273743
+worst [0.00052478 0.00209822] 1.8259596612502094e-10
+worst [0.0047203  0.00839104] 2.1486640244816613e-10
+worst [0.00839104 0.01311043] 2.463723114409788e-10
+worst [0.01311043 0.01887847] 3.025037442760947e-10
+Sonine 3 (np.float64(0.03580786442450357), np.float64(0.13754206234661917))
+Sonine 4 (np.float64(0.03582187765779433), np.float64(0.1380258432463309))
+Sonine 5 (np.float64(0.03582747255451528), np.float64(0.13818922277628173))
+Sonine 6 (np.float64(0.03582983816107849), np.float64(0.13825437339860214))
+Sonine 7 (np.float64(0.03583069949331754), np.float64(0.13828189515051678))
+Sonine 8 (np.float64(0.03583095174310868), np.float64(0.13829168533533703))
+Sonine 9 (np.float64(0.03583100702423397), np.float64(0.13829426228363045))
+Sonine 10 (np.float64(0.03583101332619209), np.float64(0.13829467703414333))
+Sonine 11 (np.float64(0.03583101337227135), np.float64(0.1382946875824777))
+Sonine 12 (np.float64(0.0358310159046119), np.float64(0.13829471828855738))
+Sonine 13 (np.float64(0.03583102044839171), np.float64(0.13829480760449944))
+Sonine 14 (np.float64(0.03583102515721159), np.float64(0.1382949178591192))
+FINE ('H2', 0, 2.8, 1, 0.2) (np.float64(0.03583102515721159), np.float64(0.1382949178591192)) 120.84389925003052
+[?2004hroot@80c1e2a6cbf9:/app# sleep 60; tail -30 /app/mesh_tests.log; tail -25 /app/more_tests.log; tail -18 /app/fine_tests.log
+[?2004lSonine 22 (np.float64(0.04142231030059392), np.float64(0.16063457113155952))
+SMALLMESH ('H2', 0.12, 2.8, 1, 0.2) (np.float64(0.04142231030059392), np.float64(0.16063457113155952)) 43.41751718521118
+START ('H2', 0.25, 2.4, 1, 0.2)
+integration 0 120 0 1.1595959054089278e-09 47.26614165306091
+worst [0.13270923 0.16383765] 2.0215856766370166e-11
+worst [1.00000000e-10 1.63910519e-03] 2.0380460340196915e-11
+worst [0.0065548  0.01474709] 2.76807882171326e-11
+worst [0.01474709 0.02621597] 1.1595959054089278e-09
+Sonine 3 (np.float64(0.04697377416084582), np.float64(0.17975909532309223))
+Sonine 4 (np.float64(0.04698031012260372), np.float64(0.17996215146239608))
+Sonine 5 (np.float64(0.04698213557998787), np.float64(0.18005105263320934))
+Sonine 6 (np.float64(0.046982893272479585), np.float64(0.18007910227208043))
+Sonine 7 (np.float64(0.046983349296544775), np.float64(0.18009084205882947))
+Sonine 8 (np.float64(0.04698363255403488), np.float64(0.18009797384694626))
+Sonine 9 (np.float64(0.046983791785628476), np.float64(0.18010266308432135))
+Sonine 10 (np.float64(0.04698387560038941), np.float64(0.18010549205422832))
+Sonine 11 (np.float64(0.046983920171160376), np.float64(0.18010706472231863))
+Sonine 12 (np.float64(0.04698394530091101), np.float64(0.18010792475484655))
+Sonine 13 (np.float64(0.046983960289974556), np.float64(0.1801084143858463))
+Sonine 14 (np.float64(0.04698396945852854), np.float64(0.18010870896086836))
+Sonine 15 (np.float64(0.04698397505315268), np.float64(0.1801088924236193))
+Sonine 16 (np.float64(0.04698397842569673), np.float64(0.18010900740021163))
+Sonine 17 (np.float64(0.04698398044559695), np.float64(0.1801090787395704))
+Sonine 18 (np.float64(0.046983981662381887), np.float64(0.18010912253361577))
+Sonine 19 (np.float64(0.046983982407268685), np.float64(0.18010914937639538))
+Sonine 20 (np.float64(0.046983982872325), np.float64(0.18010916598629265))
+Sonine 21 (np.float64(0.046983983167499514), np.float64(0.18010917643462268))
+Sonine 22 (np.float64(0.04698398335671789), np.float64(0.1801091831196335))
+SMALLMESH ('H2', 0.25, 2.4, 1, 0.2) (np.float64(0.04698398335671789), np.float64(0.1801091831196335)) 47.576669454574585
+START ('D2', 0, 0.8, 1, 0.6)
+DONE ('H2', 0.1, 1.8, 1, 0.25) (np.float64(0.03674885180858606), np.float64(0.14674776725764524)) 71.19616389274597
+START ('D2', 0, 2.8, 1, 0.2)
+integration 0 188 0 3.312895169305108e-08 82.32716274261475
+worst [0.27528157 0.30212256] 3.599853748426085e-11
+worst [0.01560743 0.02247411] 3.891442723613636e-11
+worst [0.0006247  0.00249779] 4.5515299862408654e-11
+worst [0.00998916 0.01560743] 3.312895169305108e-08
+Sonine 3 (np.float64(0.036604329460396684), np.float64(0.07432364359527023))
+Sonine 4 (np.float64(0.036604360311361606), np.float64(0.07432420191217311))
+Sonine 5 (np.float64(0.03660437473206685), np.float64(0.07432434073044722))
+Sonine 6 (np.float64(0.03660437610522995), np.float64(0.07432444138398735))
+Sonine 7 (np.float64(0.0366043761063182), np.float64(0.07432445603661626))
+Sonine 8 (np.float64(0.03660437617701847), np.float64(0.07432445617002845))
+Sonine 9 (np.float64(0.03660437620832715), np.float64(0.07432445656197696))
+Sonine 10 (np.float64(0.03660437621233066), np.float64(0.074324456844561))
+Sonine 11 (np.float64(0.03660437621233694), np.float64(0.07432445690094809))
+Sonine 12 (np.float64(0.036604376212586165), np.float64(0.07432445690272375))
+Sonine 13 (np.float64(0.0366043762127802), np.float64(0.07432445690384318))
+Sonine 14 (np.float64(0.036604376212835694), np.float64(0.07432445690556674))
+Sonine 15 (np.float64(0.03660437621284154), np.float64(0.07432445690628343))
+Sonine 16 (np.float64(0.036604376212841565), np.float64(0.07432445690641445))
+Sonine 17 (np.float64(0.03660437621284234), np.float64(0.07432445690641884))
+Sonine 18 (np.float64(0.036604376212842994), np.float64(0.07432445690642199))
+DONE ('D2', 0, 2.8, 1, 0.2) (np.float64(0.036604376212842994), np.float64(0.07432445690642199)) 82.43865275382996
+START ('D2', 0.25, 2.8, 1, 0.2)
+integration 0 182 0 3.025037442760947e-10 120.81299710273743
+worst [0.00052478 0.00209822] 1.8259596612502094e-10
+worst [0.0047203  0.00839104] 2.1486640244816613e-10
+worst [0.00839104 0.01311043] 2.463723114409788e-10
+worst [0.01311043 0.01887847] 3.025037442760947e-10
+Sonine 3 (np.float64(0.03580786442450357), np.float64(0.13754206234661917))
+Sonine 4 (np.float64(0.03582187765779433), np.float64(0.1380258432463309))
+Sonine 5 (np.float64(0.03582747255451528), np.float64(0.13818922277628173))
+Sonine 6 (np.float64(0.03582983816107849), np.float64(0.13825437339860214))
+Sonine 7 (np.float64(0.03583069949331754), np.float64(0.13828189515051678))
+Sonine 8 (np.float64(0.03583095174310868), np.float64(0.13829168533533703))
+Sonine 9 (np.float64(0.03583100702423397), np.float64(0.13829426228363045))
+Sonine 10 (np.float64(0.03583101332619209), np.float64(0.13829467703414333))
+Sonine 11 (np.float64(0.03583101337227135), np.float64(0.1382946875824777))
+Sonine 12 (np.float64(0.0358310159046119), np.float64(0.13829471828855738))
+Sonine 13 (np.float64(0.03583102044839171), np.float64(0.13829480760449944))
+Sonine 14 (np.float64(0.03583102515721159), np.float64(0.1382949178591192))
+FINE ('H2', 0, 2.8, 1, 0.2) (np.float64(0.03583102515721159), np.float64(0.1382949178591192)) 120.84389925003052
+[?2004hroot@80c1e2a6cbf9:/app# cat > /app/build_final.py <<'PY'
+[?2004l[?2004h> import numpy as np,zlib,base64,io
+[?2004l[?2004h> s=open('/app/output/transport.py').read()
+[?2004l[?2004h> # Remove reference-only bracket generator, tests, and contour generator.
+[?2004l[?2004h> a=s.index('def bracket_polynomials(');b=s.index('def matrices(',a);s=s[:a]+s[b:]
+[?2004l[?2004h> a=s.index("if __name__=='__main__' and sys.argv[1:] == ['test']:");b=s.index('def phases(',a);s=s[:a]+s[b:]
+[?2004l[?2004h> a=s.index("if __name__=='__main__' and sys.argv[1:]==['scattertest']:");b=s.index('def continuous_phases(',a);s=s[:a]+s[b:]
+[?2004l[?2004h> s=s.replace('xmax),180)','xmax),120)').replace('def run(G,A,L,B,T,verbose=False,N=11):','def run(G,A,L,B,T,verbose=False,N=22):')
+[?2004l[?2004h> s=s.replace('    if verbose: np.save("/app/last_moments.npy",mom)\n','')
+[?2004l[?2004h> # Values are universal Gaussian velocity collision-bracket polynomial
+[?2004l[?2004h> # coefficients, not any gas-property results.
+[?2004l[?2004h> a=s.index('def matrices(')
+[?2004l[?2004h> data=[]
+[?2004l[?2004h> for r in [1,2]:
+[?2004l[?2004h>  c=np.load('/app/coeff22_'+str(r)+'.npy')
+[?2004l[?2004h>  payload=base64.b85encode(zlib.compress(c.astype('<f8').tobytes(),9)).decode()
+[?2004l[?2004h>  data.append((r,c.shape,payload))
+[?2004l[?2004h> insert='import base64, zlib\n_UNIVERSAL={}\n'
+[?2004l[?2004h> for r,shape,payload in data:
+[?2004l[?2004h>  insert+='_UNIVERSAL['+str(r)+']=('+repr(shape)+',\n'
+[?2004l[?2004h>  for st in range(0,len(payload),100):insert+='    '+repr(payload[st:st+100])+'\n'
+[?2004l[?2004h>  insert+=')\n'
+[?2004l[?2004h> insert+='''
+[?2004l[?2004h> def analytic_brackets(N,rank):
+[?2004l[?2004h>     shape,payload=_UNIVERSAL[rank]
+[?2004l[?2004h>     if isinstance(payload,str):
+[?2004l[?2004h>         c=np.frombuffer(zlib.decompress(base64.b85decode(payload)),dtype='<f8').reshape(shape)
+[?2004l[?2004h>         _UNIVERSAL[rank]=(shape,c)
+[?2004l[?2004h>     else:c=payload
+[?2004l[?2004h>     return c[:2*N+rank+1,:2*N+rank,:N+1,:N+1],None
+[?2004l[?2004h> 
+[?2004l[?2004h> '''
+[?2004l[?2004h> s=s[:a]+insert+s[a:]
+[?2004l[?2004h> s=s.replace('import sys, json, math, time','import sys, json, math, time\nimport warnings\nwarnings.filterwarnings("ignore",category=RuntimeWarning)')
+[?2004l[?2004h> header='''#!/usr/bin/env python3
+[?2004l[?2004h> """Quantum dilute-gas transport in the two-level equilibrium mixture.
+[?2004l[?2004h> 
+[?2004l[?2004h> Lengths, energies and masses below are in sigma, epsilon and H2 mass units.
+[?2004l[?2004h> The linearized collision operator is evaluated variationally in orthonormal
+[?2004l[?2004h> vector and traceless-tensor Sonine bases. Momentum is projected out of the
+[?2004l[?2004h> heat equation. The vector source includes the equilibrium rotational-energy
+[?2004l[?2004h> and composition gradients, hence includes the conversion/diffusion energy
+[?2004l[?2004h> flux, rather than the frozen-composition thermal conductivity.
+[?2004l[?2004h> 
+[?2004l[?2004h> The embedded arrays are universal polynomial collision brackets, computed
+[?2004l[?2004h> by exact Gaussian velocity integrals via their analytic generating function.
+[?2004l[?2004h> They contain no scattering data or transport values. Scattering and thermal
+[?2004l[?2004h> averages are recomputed for the supplied parameters.
+[?2004l[?2004h> """
+[?2004l[?2004h> '''
+[?2004l[?2004h> open('/app/output/transport.py','w').write(header+s)
+[?2004l[?2004h> print('Final size',len(header+s))
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# python3 /app/build_final.py
+[?2004lFinal size 3199871
+[?2004hroot@80c1e2a6cbf9:/app# python3 -m py_compile /app/output/transport.py
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# ls -lh /app/output/transport.py; tail -12 /app/mesh_tests.log; tail -12 /app/fine_tests.log
+[?2004l-rw-r--r-- 1 root root 3.1M Nov  5 19:47 /app/output/transport.py
+Sonine 13 (np.float64(0.046983960289974556), np.float64(0.1801084143858463))
+Sonine 14 (np.float64(0.04698396945852854), np.float64(0.18010870896086836))
+Sonine 15 (np.float64(0.04698397505315268), np.float64(0.1801088924236193))
+Sonine 16 (np.float64(0.04698397842569673), np.float64(0.18010900740021163))
+Sonine 17 (np.float64(0.04698398044559695), np.float64(0.1801090787395704))
+Sonine 18 (np.float64(0.046983981662381887), np.float64(0.18010912253361577))
+Sonine 19 (np.float64(0.046983982407268685), np.float64(0.18010914937639538))
+Sonine 20 (np.float64(0.046983982872325), np.float64(0.18010916598629265))
+Sonine 21 (np.float64(0.046983983167499514), np.float64(0.18010917643462268))
+Sonine 22 (np.float64(0.04698398335671789), np.float64(0.1801091831196335))
+SMALLMESH ('H2', 0.25, 2.4, 1, 0.2) (np.float64(0.04698398335671789), np.float64(0.1801091831196335)) 47.576669454574585
+START ('D2', 0, 0.8, 1, 0.6)
+Sonine 4 (np.float64(0.03582187765779433), np.float64(0.1380258432463309))
+Sonine 5 (np.float64(0.03582747255451528), np.float64(0.13818922277628173))
+Sonine 6 (np.float64(0.03582983816107849), np.float64(0.13825437339860214))
+Sonine 7 (np.float64(0.03583069949331754), np.float64(0.13828189515051678))
+Sonine 8 (np.float64(0.03583095174310868), np.float64(0.13829168533533703))
+Sonine 9 (np.float64(0.03583100702423397), np.float64(0.13829426228363045))
+Sonine 10 (np.float64(0.03583101332619209), np.float64(0.13829467703414333))
+Sonine 11 (np.float64(0.03583101337227135), np.float64(0.1382946875824777))
+Sonine 12 (np.float64(0.0358310159046119), np.float64(0.13829471828855738))
+Sonine 13 (np.float64(0.03583102044839171), np.float64(0.13829480760449944))
+Sonine 14 (np.float64(0.03583102515721159), np.float64(0.1382949178591192))
+FINE ('H2', 0, 2.8, 1, 0.2) (np.float64(0.03583102515721159), np.float64(0.1382949178591192)) 120.84389925003052
+[?2004hroot@80c1e2a6cbf9:/app# tail -35 /app/mesh_tests.log; tail -25 /app/more_tests.log; tail -20 /app/fine_tests.log; ls -lh /app/output/transport.py
+[?2004lSonine 17 (np.float64(0.04142230478684465), np.float64(0.16063438735680502))
+Sonine 18 (np.float64(0.04142230761359588), np.float64(0.16063448033906552))
+Sonine 19 (np.float64(0.04142230905725787), np.float64(0.16063452857269114))
+Sonine 20 (np.float64(0.04142230978001105), np.float64(0.1606345531062812))
+Sonine 21 (np.float64(0.04142231013320563), np.float64(0.16063456527732253))
+Sonine 22 (np.float64(0.04142231030059392), np.float64(0.16063457113155952))
+SMALLMESH ('H2', 0.12, 2.8, 1, 0.2) (np.float64(0.04142231030059392), np.float64(0.16063457113155952)) 43.41751718521118
+START ('H2', 0.25, 2.4, 1, 0.2)
+integration 0 120 0 1.1595959054089278e-09 47.26614165306091
+worst [0.13270923 0.16383765] 2.0215856766370166e-11
+worst [1.00000000e-10 1.63910519e-03] 2.0380460340196915e-11
+worst [0.0065548  0.01474709] 2.76807882171326e-11
+worst [0.01474709 0.02621597] 1.1595959054089278e-09
+Sonine 3 (np.float64(0.04697377416084582), np.float64(0.17975909532309223))
+Sonine 4 (np.float64(0.04698031012260372), np.float64(0.17996215146239608))
+Sonine 5 (np.float64(0.04698213557998787), np.float64(0.18005105263320934))
+Sonine 6 (np.float64(0.046982893272479585), np.float64(0.18007910227208043))
+Sonine 7 (np.float64(0.046983349296544775), np.float64(0.18009084205882947))
+Sonine 8 (np.float64(0.04698363255403488), np.float64(0.18009797384694626))
+Sonine 9 (np.float64(0.046983791785628476), np.float64(0.18010266308432135))
+Sonine 10 (np.float64(0.04698387560038941), np.float64(0.18010549205422832))
+Sonine 11 (np.float64(0.046983920171160376), np.float64(0.18010706472231863))
+Sonine 12 (np.float64(0.04698394530091101), np.float64(0.18010792475484655))
+Sonine 13 (np.float64(0.046983960289974556), np.float64(0.1801084143858463))
+Sonine 14 (np.float64(0.04698396945852854), np.float64(0.18010870896086836))
+Sonine 15 (np.float64(0.04698397505315268), np.float64(0.1801088924236193))
+Sonine 16 (np.float64(0.04698397842569673), np.float64(0.18010900740021163))
+Sonine 17 (np.float64(0.04698398044559695), np.float64(0.1801090787395704))
+Sonine 18 (np.float64(0.046983981662381887), np.float64(0.18010912253361577))
+Sonine 19 (np.float64(0.046983982407268685), np.float64(0.18010914937639538))
+Sonine 20 (np.float64(0.046983982872325), np.float64(0.18010916598629265))
+Sonine 21 (np.float64(0.046983983167499514), np.float64(0.18010917643462268))
+Sonine 22 (np.float64(0.04698398335671789), np.float64(0.1801091831196335))
+SMALLMESH ('H2', 0.25, 2.4, 1, 0.2) (np.float64(0.04698398335671789), np.float64(0.1801091831196335)) 47.576669454574585
+START ('D2', 0, 0.8, 1, 0.6)
+worst [0.03058917 0.03995263] 2.5959123739482948e-11
+worst [0.0006247  0.00249779] 1.9289392305665842e-10
+worst [0.00998916 0.01560743] 2.3233520107801553e-09
+worst [1.00000000e-10 6.24697231e-04] 2.2526816884943512e-05
+integration 1 2 0 1.1789323720937106e-06 74.67100930213928
+worst [0.00031235 0.0006247 ] 7.939413015911612e-13
+worst [1.00000000e-10 3.12348665e-04] 1.1789323720937106e-06
+Sonine 3 (np.float64(0.07066473144203125), np.float64(0.14409422866197943))
+Sonine 4 (np.float64(0.07066479930493093), np.float64(0.14409426397473907))
+Sonine 5 (np.float64(0.07066485774332912), np.float64(0.14409470939610342))
+Sonine 6 (np.float64(0.07066487864467452), np.float64(0.14409514200677037))
+Sonine 7 (np.float64(0.07066488333770539), np.float64(0.14409531605573206))
+Sonine 8 (np.float64(0.07066488412878291), np.float64(0.1440953590961701))
+Sonine 9 (np.float64(0.07066488424957354), np.float64(0.1440953667597833))
+Sonine 10 (np.float64(0.07066488427155859), np.float64(0.1440953678854262))
+Sonine 11 (np.float64(0.0706648842772368), np.float64(0.1440953680542011))
+Sonine 12 (np.float64(0.0706648842789349), np.float64(0.14409536808685852))
+Sonine 13 (np.float64(0.07066488427930846), np.float64(0.1440953680943568))
+Sonine 14 (np.float64(0.07066488427932684), np.float64(0.14409536809542897))
+Sonine 15 (np.float64(0.07066488427934994), np.float64(0.14409536809546006))
+Sonine 16 (np.float64(0.07066488427943049), np.float64(0.14409536809615406))
+Sonine 17 (np.float64(0.07066488427952577), np.float64(0.1440953680974397))
+Sonine 18 (np.float64(0.07066488427960116), np.float64(0.1440953680987588))
+DONE ('D2', 0.25, 2.8, 1, 0.2) (np.float64(0.07066488427960116), np.float64(0.1440953680987588)) 74.79328894615173
+START ('D2', 0, 0.8, 1, 0.6)
+fine:169: RuntimeWarning: invalid value encountered in add
+fine:169: RuntimeWarning: invalid value encountered in add
+integration 0 182 0 3.025037442760947e-10 120.81299710273743
+worst [0.00052478 0.00209822] 1.8259596612502094e-10
+worst [0.0047203  0.00839104] 2.1486640244816613e-10
+worst [0.00839104 0.01311043] 2.463723114409788e-10
+worst [0.01311043 0.01887847] 3.025037442760947e-10
+Sonine 3 (np.float64(0.03580786442450357), np.float64(0.13754206234661917))
+Sonine 4 (np.float64(0.03582187765779433), np.float64(0.1380258432463309))
+Sonine 5 (np.float64(0.03582747255451528), np.float64(0.13818922277628173))
+Sonine 6 (np.float64(0.03582983816107849), np.float64(0.13825437339860214))
+Sonine 7 (np.float64(0.03583069949331754), np.float64(0.13828189515051678))
+Sonine 8 (np.float64(0.03583095174310868), np.float64(0.13829168533533703))
+Sonine 9 (np.float64(0.03583100702423397), np.float64(0.13829426228363045))
+Sonine 10 (np.float64(0.03583101332619209), np.float64(0.13829467703414333))
+Sonine 11 (np.float64(0.03583101337227135), np.float64(0.1382946875824777))
+Sonine 12 (np.float64(0.0358310159046119), np.float64(0.13829471828855738))
+Sonine 13 (np.float64(0.03583102044839171), np.float64(0.13829480760449944))
+Sonine 14 (np.float64(0.03583102515721159), np.float64(0.1382949178591192))
+FINE ('H2', 0, 2.8, 1, 0.2) (np.float64(0.03583102515721159), np.float64(0.1382949178591192)) 120.84389925003052
+-rw-r--r-- 1 root root 3.1M Nov  5 19:47 /app/output/transport.py
+[?2004hroot@80c1e2a6cbf9:/app# sleep 60; tail -30 /app/mesh_tests.log; tail -22 /app/more_tests.log; tail -20 /app/fine_tests.log; jobs
+[?2004lSonine 22 (np.float64(0.04142231030059392), np.float64(0.16063457113155952))
+SMALLMESH ('H2', 0.12, 2.8, 1, 0.2) (np.float64(0.04142231030059392), np.float64(0.16063457113155952)) 43.41751718521118
+START ('H2', 0.25, 2.4, 1, 0.2)
+integration 0 120 0 1.1595959054089278e-09 47.26614165306091
+worst [0.13270923 0.16383765] 2.0215856766370166e-11
+worst [1.00000000e-10 1.63910519e-03] 2.0380460340196915e-11
+worst [0.0065548  0.01474709] 2.76807882171326e-11
+worst [0.01474709 0.02621597] 1.1595959054089278e-09
+Sonine 3 (np.float64(0.04697377416084582), np.float64(0.17975909532309223))
+Sonine 4 (np.float64(0.04698031012260372), np.float64(0.17996215146239608))
+Sonine 5 (np.float64(0.04698213557998787), np.float64(0.18005105263320934))
+Sonine 6 (np.float64(0.046982893272479585), np.float64(0.18007910227208043))
+Sonine 7 (np.float64(0.046983349296544775), np.float64(0.18009084205882947))
+Sonine 8 (np.float64(0.04698363255403488), np.float64(0.18009797384694626))
+Sonine 9 (np.float64(0.046983791785628476), np.float64(0.18010266308432135))
+Sonine 10 (np.float64(0.04698387560038941), np.float64(0.18010549205422832))
+Sonine 11 (np.float64(0.046983920171160376), np.float64(0.18010706472231863))
+Sonine 12 (np.float64(0.04698394530091101), np.float64(0.18010792475484655))
+Sonine 13 (np.float64(0.046983960289974556), np.float64(0.1801084143858463))
+Sonine 14 (np.float64(0.04698396945852854), np.float64(0.18010870896086836))
+Sonine 15 (np.float64(0.04698397505315268), np.float64(0.1801088924236193))
+Sonine 16 (np.float64(0.04698397842569673), np.float64(0.18010900740021163))
+Sonine 17 (np.float64(0.04698398044559695), np.float64(0.1801090787395704))
+Sonine 18 (np.float64(0.046983981662381887), np.float64(0.18010912253361577))
+Sonine 19 (np.float64(0.046983982407268685), np.float64(0.18010914937639538))
+Sonine 20 (np.float64(0.046983982872325), np.float64(0.18010916598629265))
+Sonine 21 (np.float64(0.046983983167499514), np.float64(0.18010917643462268))
+Sonine 22 (np.float64(0.04698398335671789), np.float64(0.1801091831196335))
+SMALLMESH ('H2', 0.25, 2.4, 1, 0.2) (np.float64(0.04698398335671789), np.float64(0.1801091831196335)) 47.576669454574585
+START ('D2', 0, 0.8, 1, 0.6)
+worst [1.00000000e-10 6.24697231e-04] 2.2526816884943512e-05
+integration 1 2 0 1.1789323720937106e-06 74.67100930213928
+worst [0.00031235 0.0006247 ] 7.939413015911612e-13
+worst [1.00000000e-10 3.12348665e-04] 1.1789323720937106e-06
+Sonine 3 (np.float64(0.07066473144203125), np.float64(0.14409422866197943))
+Sonine 4 (np.float64(0.07066479930493093), np.float64(0.14409426397473907))
+Sonine 5 (np.float64(0.07066485774332912), np.float64(0.14409470939610342))
+Sonine 6 (np.float64(0.07066487864467452), np.float64(0.14409514200677037))
+Sonine 7 (np.float64(0.07066488333770539), np.float64(0.14409531605573206))
+Sonine 8 (np.float64(0.07066488412878291), np.float64(0.1440953590961701))
+Sonine 9 (np.float64(0.07066488424957354), np.float64(0.1440953667597833))
+Sonine 10 (np.float64(0.07066488427155859), np.float64(0.1440953678854262))
+Sonine 11 (np.float64(0.0706648842772368), np.float64(0.1440953680542011))
+Sonine 12 (np.float64(0.0706648842789349), np.float64(0.14409536808685852))
+Sonine 13 (np.float64(0.07066488427930846), np.float64(0.1440953680943568))
+Sonine 14 (np.float64(0.07066488427932684), np.float64(0.14409536809542897))
+Sonine 15 (np.float64(0.07066488427934994), np.float64(0.14409536809546006))
+Sonine 16 (np.float64(0.07066488427943049), np.float64(0.14409536809615406))
+Sonine 17 (np.float64(0.07066488427952577), np.float64(0.1440953680974397))
+Sonine 18 (np.float64(0.07066488427960116), np.float64(0.1440953680987588))
+DONE ('D2', 0.25, 2.8, 1, 0.2) (np.float64(0.07066488427960116), np.float64(0.1440953680987588)) 74.79328894615173
+START ('D2', 0, 0.8, 1, 0.6)
+fine:169: RuntimeWarning: invalid value encountered in add
+fine:169: RuntimeWarning: invalid value encountered in add
+integration 0 182 0 3.025037442760947e-10 120.81299710273743
+worst [0.00052478 0.00209822] 1.8259596612502094e-10
+worst [0.0047203  0.00839104] 2.1486640244816613e-10
+worst [0.00839104 0.01311043] 2.463723114409788e-10
+worst [0.01311043 0.01887847] 3.025037442760947e-10
+Sonine 3 (np.float64(0.03580786442450357), np.float64(0.13754206234661917))
+Sonine 4 (np.float64(0.03582187765779433), np.float64(0.1380258432463309))
+Sonine 5 (np.float64(0.03582747255451528), np.float64(0.13818922277628173))
+Sonine 6 (np.float64(0.03582983816107849), np.float64(0.13825437339860214))
+Sonine 7 (np.float64(0.03583069949331754), np.float64(0.13828189515051678))
+Sonine 8 (np.float64(0.03583095174310868), np.float64(0.13829168533533703))
+Sonine 9 (np.float64(0.03583100702423397), np.float64(0.13829426228363045))
+Sonine 10 (np.float64(0.03583101332619209), np.float64(0.13829467703414333))
+Sonine 11 (np.float64(0.03583101337227135), np.float64(0.1382946875824777))
+Sonine 12 (np.float64(0.0358310159046119), np.float64(0.13829471828855738))
+Sonine 13 (np.float64(0.03583102044839171), np.float64(0.13829480760449944))
+Sonine 14 (np.float64(0.03583102515721159), np.float64(0.1382949178591192))
+FINE ('H2', 0, 2.8, 1, 0.2) (np.float64(0.03583102515721159), np.float64(0.1382949178591192)) 120.84389925003052
+[1]   Running                 OPENBLAS_NUM_THREADS=2 python3 /app/more_tests.py > /app/more_tests.log 2>&1 &
+[2]-  Running                 python3 /app/fine_tests.py > /app/fine_tests.log 2>&1 &
+[3]+  Running                 python3 /app/mesh_tests.py > /app/mesh_tests.log 2>&1 &
+[?2004hroot@80c1e2a6cbf9:/app# tail -35 /app/mesh_tests.log; tail -25 /app/more_tests.log; tail -20 /app/fine_tests.log; jobs
+[?2004lSonine 17 (np.float64(0.04142230478684465), np.float64(0.16063438735680502))
+Sonine 18 (np.float64(0.04142230761359588), np.float64(0.16063448033906552))
+Sonine 19 (np.float64(0.04142230905725787), np.float64(0.16063452857269114))
+Sonine 20 (np.float64(0.04142230978001105), np.float64(0.1606345531062812))
+Sonine 21 (np.float64(0.04142231013320563), np.float64(0.16063456527732253))
+Sonine 22 (np.float64(0.04142231030059392), np.float64(0.16063457113155952))
+SMALLMESH ('H2', 0.12, 2.8, 1, 0.2) (np.float64(0.04142231030059392), np.float64(0.16063457113155952)) 43.41751718521118
+START ('H2', 0.25, 2.4, 1, 0.2)
+integration 0 120 0 1.1595959054089278e-09 47.26614165306091
+worst [0.13270923 0.16383765] 2.0215856766370166e-11
+worst [1.00000000e-10 1.63910519e-03] 2.0380460340196915e-11
+worst [0.0065548  0.01474709] 2.76807882171326e-11
+worst [0.01474709 0.02621597] 1.1595959054089278e-09
+Sonine 3 (np.float64(0.04697377416084582), np.float64(0.17975909532309223))
+Sonine 4 (np.float64(0.04698031012260372), np.float64(0.17996215146239608))
+Sonine 5 (np.float64(0.04698213557998787), np.float64(0.18005105263320934))
+Sonine 6 (np.float64(0.046982893272479585), np.float64(0.18007910227208043))
+Sonine 7 (np.float64(0.046983349296544775), np.float64(0.18009084205882947))
+Sonine 8 (np.float64(0.04698363255403488), np.float64(0.18009797384694626))
+Sonine 9 (np.float64(0.046983791785628476), np.float64(0.18010266308432135))
+Sonine 10 (np.float64(0.04698387560038941), np.float64(0.18010549205422832))
+Sonine 11 (np.float64(0.046983920171160376), np.float64(0.18010706472231863))
+Sonine 12 (np.float64(0.04698394530091101), np.float64(0.18010792475484655))
+Sonine 13 (np.float64(0.046983960289974556), np.float64(0.1801084143858463))
+Sonine 14 (np.float64(0.04698396945852854), np.float64(0.18010870896086836))
+Sonine 15 (np.float64(0.04698397505315268), np.float64(0.1801088924236193))
+Sonine 16 (np.float64(0.04698397842569673), np.float64(0.18010900740021163))
+Sonine 17 (np.float64(0.04698398044559695), np.float64(0.1801090787395704))
+Sonine 18 (np.float64(0.046983981662381887), np.float64(0.18010912253361577))
+Sonine 19 (np.float64(0.046983982407268685), np.float64(0.18010914937639538))
+Sonine 20 (np.float64(0.046983982872325), np.float64(0.18010916598629265))
+Sonine 21 (np.float64(0.046983983167499514), np.float64(0.18010917643462268))
+Sonine 22 (np.float64(0.04698398335671789), np.float64(0.1801091831196335))
+SMALLMESH ('H2', 0.25, 2.4, 1, 0.2) (np.float64(0.04698398335671789), np.float64(0.1801091831196335)) 47.576669454574585
+START ('D2', 0, 0.8, 1, 0.6)
+worst [0.03058917 0.03995263] 2.5959123739482948e-11
+worst [0.0006247  0.00249779] 1.9289392305665842e-10
+worst [0.00998916 0.01560743] 2.3233520107801553e-09
+worst [1.00000000e-10 6.24697231e-04] 2.2526816884943512e-05
+integration 1 2 0 1.1789323720937106e-06 74.67100930213928
+worst [0.00031235 0.0006247 ] 7.939413015911612e-13
+worst [1.00000000e-10 3.12348665e-04] 1.1789323720937106e-06
+Sonine 3 (np.float64(0.07066473144203125), np.float64(0.14409422866197943))
+Sonine 4 (np.float64(0.07066479930493093), np.float64(0.14409426397473907))
+Sonine 5 (np.float64(0.07066485774332912), np.float64(0.14409470939610342))
+Sonine 6 (np.float64(0.07066487864467452), np.float64(0.14409514200677037))
+Sonine 7 (np.float64(0.07066488333770539), np.float64(0.14409531605573206))
+Sonine 8 (np.float64(0.07066488412878291), np.float64(0.1440953590961701))
+Sonine 9 (np.float64(0.07066488424957354), np.float64(0.1440953667597833))
+Sonine 10 (np.float64(0.07066488427155859), np.float64(0.1440953678854262))
+Sonine 11 (np.float64(0.0706648842772368), np.float64(0.1440953680542011))
+Sonine 12 (np.float64(0.0706648842789349), np.float64(0.14409536808685852))
+Sonine 13 (np.float64(0.07066488427930846), np.float64(0.1440953680943568))
+Sonine 14 (np.float64(0.07066488427932684), np.float64(0.14409536809542897))
+Sonine 15 (np.float64(0.07066488427934994), np.float64(0.14409536809546006))
+Sonine 16 (np.float64(0.07066488427943049), np.float64(0.14409536809615406))
+Sonine 17 (np.float64(0.07066488427952577), np.float64(0.1440953680974397))
+Sonine 18 (np.float64(0.07066488427960116), np.float64(0.1440953680987588))
+DONE ('D2', 0.25, 2.8, 1, 0.2) (np.float64(0.07066488427960116), np.float64(0.1440953680987588)) 74.79328894615173
+START ('D2', 0, 0.8, 1, 0.6)
+fine:169: RuntimeWarning: invalid value encountered in add
+fine:169: RuntimeWarning: invalid value encountered in add
+integration 0 182 0 3.025037442760947e-10 120.81299710273743
+worst [0.00052478 0.00209822] 1.8259596612502094e-10
+worst [0.0047203  0.00839104] 2.1486640244816613e-10
+worst [0.00839104 0.01311043] 2.463723114409788e-10
+worst [0.01311043 0.01887847] 3.025037442760947e-10
+Sonine 3 (np.float64(0.03580786442450357), np.float64(0.13754206234661917))
+Sonine 4 (np.float64(0.03582187765779433), np.float64(0.1380258432463309))
+Sonine 5 (np.float64(0.03582747255451528), np.float64(0.13818922277628173))
+Sonine 6 (np.float64(0.03582983816107849), np.float64(0.13825437339860214))
+Sonine 7 (np.float64(0.03583069949331754), np.float64(0.13828189515051678))
+Sonine 8 (np.float64(0.03583095174310868), np.float64(0.13829168533533703))
+Sonine 9 (np.float64(0.03583100702423397), np.float64(0.13829426228363045))
+Sonine 10 (np.float64(0.03583101332619209), np.float64(0.13829467703414333))
+Sonine 11 (np.float64(0.03583101337227135), np.float64(0.1382946875824777))
+Sonine 12 (np.float64(0.0358310159046119), np.float64(0.13829471828855738))
+Sonine 13 (np.float64(0.03583102044839171), np.float64(0.13829480760449944))
+Sonine 14 (np.float64(0.03583102515721159), np.float64(0.1382949178591192))
+FINE ('H2', 0, 2.8, 1, 0.2) (np.float64(0.03583102515721159), np.float64(0.1382949178591192)) 120.84389925003052
+[1]   Running                 OPENBLAS_NUM_THREADS=2 python3 /app/more_tests.py > /app/more_tests.log 2>&1 &
+[2]-  Running                 python3 /app/fine_tests.py > /app/fine_tests.log 2>&1 &
+[3]+  Running                 python3 /app/mesh_tests.py > /app/mesh_tests.log 2>&1 &
+[?2004hroot@80c1e2a6cbf9:/app# tail -5 /app/mesh_tests.log; tail -5 /app/more_tests.log; tail -5 /app/fine_tests.log; mkdir -p /app/isolated; cp /app/output/transport.py /app/isolated/transport.py
+[?2004lSonine 20 (np.float64(0.046983982872325), np.float64(0.18010916598629265))
+Sonine 21 (np.float64(0.046983983167499514), np.float64(0.18010917643462268))
+Sonine 22 (np.float64(0.04698398335671789), np.float64(0.1801091831196335))
+SMALLMESH ('H2', 0.25, 2.4, 1, 0.2) (np.float64(0.04698398335671789), np.float64(0.1801091831196335)) 47.576669454574585
+START ('D2', 0, 0.8, 1, 0.6)
+Sonine 16 (np.float64(0.07066488427943049), np.float64(0.14409536809615406))
+Sonine 17 (np.float64(0.07066488427952577), np.float64(0.1440953680974397))
+Sonine 18 (np.float64(0.07066488427960116), np.float64(0.1440953680987588))
+DONE ('D2', 0.25, 2.8, 1, 0.2) (np.float64(0.07066488427960116), np.float64(0.1440953680987588)) 74.79328894615173
+START ('D2', 0, 0.8, 1, 0.6)
+Sonine 11 (np.float64(0.03583101337227135), np.float64(0.1382946875824777))
+Sonine 12 (np.float64(0.0358310159046119), np.float64(0.13829471828855738))
+Sonine 13 (np.float64(0.03583102044839171), np.float64(0.13829480760449944))
+Sonine 14 (np.float64(0.03583102515721159), np.float64(0.1382949178591192))
+FINE ('H2', 0, 2.8, 1, 0.2) (np.float64(0.03583102515721159), np.float64(0.1382949178591192)) 120.84389925003052
+[?2004hroot@80c1e2a6cbf9:/app# sleep 60; tail -8 /app/mesh_tests.log; tail -8 /app/more_tests.log; tail -8 /app/fine_tests.log
+[?2004lSonine 18 (np.float64(0.046983981662381887), np.float64(0.18010912253361577))
+Sonine 19 (np.float64(0.046983982407268685), np.float64(0.18010914937639538))
+Sonine 20 (np.float64(0.046983982872325), np.float64(0.18010916598629265))
+Sonine 21 (np.float64(0.046983983167499514), np.float64(0.18010917643462268))
+Sonine 22 (np.float64(0.04698398335671789), np.float64(0.1801091831196335))
+SMALLMESH ('H2', 0.25, 2.4, 1, 0.2) (np.float64(0.04698398335671789), np.float64(0.1801091831196335)) 47.576669454574585
+START ('D2', 0, 0.8, 1, 0.6)
+smallmesh:169: RuntimeWarning: overflow encountered in multiply
+Sonine 13 (np.float64(0.07066488427930846), np.float64(0.1440953680943568))
+Sonine 14 (np.float64(0.07066488427932684), np.float64(0.14409536809542897))
+Sonine 15 (np.float64(0.07066488427934994), np.float64(0.14409536809546006))
+Sonine 16 (np.float64(0.07066488427943049), np.float64(0.14409536809615406))
+Sonine 17 (np.float64(0.07066488427952577), np.float64(0.1440953680974397))
+Sonine 18 (np.float64(0.07066488427960116), np.float64(0.1440953680987588))
+DONE ('D2', 0.25, 2.8, 1, 0.2) (np.float64(0.07066488427960116), np.float64(0.1440953680987588)) 74.79328894615173
+START ('D2', 0, 0.8, 1, 0.6)
+Sonine 8 (np.float64(0.03583095174310868), np.float64(0.13829168533533703))
+Sonine 9 (np.float64(0.03583100702423397), np.float64(0.13829426228363045))
+Sonine 10 (np.float64(0.03583101332619209), np.float64(0.13829467703414333))
+Sonine 11 (np.float64(0.03583101337227135), np.float64(0.1382946875824777))
+Sonine 12 (np.float64(0.0358310159046119), np.float64(0.13829471828855738))
+Sonine 13 (np.float64(0.03583102044839171), np.float64(0.13829480760449944))
+Sonine 14 (np.float64(0.03583102515721159), np.float64(0.1382949178591192))
+FINE ('H2', 0, 2.8, 1, 0.2) (np.float64(0.03583102515721159), np.float64(0.1382949178591192)) 120.84389925003052
+[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read();s=s.replace('def run(G,A,L,B,T,verbose=False,N=22):','def run(G,A,L,B,T,verbose=False,N=None):\n    if N is None: N=18 if G=="H2" else 14')
+[?2004l[?2004h> s=s.replace('    return values[-1]\n','''    # Check a block of high orders, not merely one accidental small increment.
+[?2004l[?2004h>     last=np.asarray(values[-1]);earlier=np.asarray(values[-4])
+[?2004l[?2004h>     if N<22 and np.max(abs(last-earlier)/last)>2e-7:
+[?2004l[?2004h>         return run(G,A,L,B,T,verbose=verbose,N=22)
+[?2004l[?2004h>     return values[-1]
+[?2004l[?2004h> ''')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# cp /app/output/transport.py /app/isolated/transport.py
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# cd /app/isolated && python3 transport.py H2 0.12 2.8 1 0.2 > /app/final_smoke.json; echo status=$?; cat /app/final_smoke.json
+[?2004ltail -8 /app/mesh_tests.log; tail -8 /app/more_tests.log; tail -8 /app/fine_tests.log; jobs
+^CTraceback (most recent call last):
+  File "/app/isolated/transport.py", line 30076, in <module>
+    eta,lam=run(G,A,L,B,T,verbose=False)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/isolated/transport.py", line 30071, in run
+    return run(G,A,L,B,T,verbose=verbose,N=22)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/isolated/transport.py", line 30061, in run
+    mom=integrate_moments(A,L,M,T,D,verbose=verbose)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/isolated/transport.py", line 30034, in integrate_moments
+    v16,v8=evalints(intervals)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/app/isolated/transport.py", line 30021, in evalints
+    de,kk,*_=phases(en[st:st+500],A,L,M,step=.0015,R=32.)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/isolated/transport.py", line 29898, in phases
+    um,uc=uc,un;qm,qc=qc,qp
+                ^^
+KeyboardInterrupt
+
+[?2004hroot@80c1e2a6cbf9:/app/isolated# kill 2412 2477 2646 2>/dev/null; jobs; tail -12 /app/mesh_tests.log; tail -12 /app/more_tests.log; tail -12 /app/fine_tests.log; cd /app
+[?2004l[1]   Running                 OPENBLAS_NUM_THREADS=2 python3 /app/more_tests.py > /app/more_tests.log 2>&1 &  (wd: /app)
+[2]-  Running                 python3 /app/fine_tests.py > /app/fine_tests.log 2>&1 &  (wd: /app)
+[3]+  Done                    python3 /app/mesh_tests.py > /app/mesh_tests.log 2>&1  (wd: /app)
+Sonine 12 (np.float64(0.09268473707660775), np.float64(0.20338824610228134))
+Sonine 13 (np.float64(0.09268473707745589), np.float64(0.20338824613779927))
+Sonine 14 (np.float64(0.0926847370775626), np.float64(0.20338824614368956))
+Sonine 15 (np.float64(0.09268473707756492), np.float64(0.20338824614413573))
+Sonine 16 (np.float64(0.09268473707756973), np.float64(0.2033882461441536))
+Sonine 17 (np.float64(0.09268473707758158), np.float64(0.20338824614433632))
+Sonine 18 (np.float64(0.09268473707759409), np.float64(0.20338824614457898))
+Sonine 19 (np.float64(0.09268473707760398), np.float64(0.2033882461447878))
+Sonine 20 (np.float64(0.09268473707761064), np.float64(0.20338824614493586))
+Sonine 21 (np.float64(0.09268473707761468), np.float64(0.20338824614502957))
+Sonine 22 (np.float64(0.09268473707761704), np.float64(0.20338824614508463))
+SMALLMESH ('D2', 0, 0.8, 1, 0.6) (np.float64(0.09268473707761704), np.float64(0.20338824614508463)) 484.69308948516846
+Sonine 9 (np.float64(0.07066488424957354), np.float64(0.1440953667597833))
+Sonine 10 (np.float64(0.07066488427155859), np.float64(0.1440953678854262))
+Sonine 11 (np.float64(0.0706648842772368), np.float64(0.1440953680542011))
+Sonine 12 (np.float64(0.0706648842789349), np.float64(0.14409536808685852))
+Sonine 13 (np.float64(0.07066488427930846), np.float64(0.1440953680943568))
+Sonine 14 (np.float64(0.07066488427932684), np.float64(0.14409536809542897))
+Sonine 15 (np.float64(0.07066488427934994), np.float64(0.14409536809546006))
+Sonine 16 (np.float64(0.07066488427943049), np.float64(0.14409536809615406))
+Sonine 17 (np.float64(0.07066488427952577), np.float64(0.1440953680974397))
+Sonine 18 (np.float64(0.07066488427960116), np.float64(0.1440953680987588))
+DONE ('D2', 0.25, 2.8, 1, 0.2) (np.float64(0.07066488427960116), np.float64(0.1440953680987588)) 74.79328894615173
+START ('D2', 0, 0.8, 1, 0.6)
+Sonine 4 (np.float64(0.03582187765779433), np.float64(0.1380258432463309))
+Sonine 5 (np.float64(0.03582747255451528), np.float64(0.13818922277628173))
+Sonine 6 (np.float64(0.03582983816107849), np.float64(0.13825437339860214))
+Sonine 7 (np.float64(0.03583069949331754), np.float64(0.13828189515051678))
+Sonine 8 (np.float64(0.03583095174310868), np.float64(0.13829168533533703))
+Sonine 9 (np.float64(0.03583100702423397), np.float64(0.13829426228363045))
+Sonine 10 (np.float64(0.03583101332619209), np.float64(0.13829467703414333))
+Sonine 11 (np.float64(0.03583101337227135), np.float64(0.1382946875824777))
+Sonine 12 (np.float64(0.0358310159046119), np.float64(0.13829471828855738))
+Sonine 13 (np.float64(0.03583102044839171), np.float64(0.13829480760449944))
+Sonine 14 (np.float64(0.03583102515721159), np.float64(0.1382949178591192))
+FINE ('H2', 0, 2.8, 1, 0.2) (np.float64(0.03583102515721159), np.float64(0.1382949178591192)) 120.84389925003052
+[?2004hroot@80c1e2a6cbf9:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py';s=open(p).read().replace('        _angular_cache[key]=weights','        if len(_angular_cache)>8: _angular_cache.clear()\n        _angular_cache[key]=weights');open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[1]-  Terminated              OPENBLAS_NUM_THREADS=2 python3 /app/more_tests.py > /app/more_tests.log 2>&1
+[2]+  Terminated              python3 /app/fine_tests.py > /app/fine_tests.log 2>&1
+[?2004hroot@80c1e2a6cbf9:/app# cp /app/output/transport.py /app/isolated/transport.py
+[?2004l[?2004hroot@80c1e2a6cbf9:/app# cd /app/isolated && python3 - <<'PY'
+[?2004l[?2004h> import transport,time,json
+[?2004l[?2004h> start=time.time();eta,lam=transport.run('H2',.12,2.8,1,.2)
+[?2004l[?2004h> print(json.dumps({'viscosity':float(eta),'thermal_conductivity':float(lam)}));print('runtime',time.time()-start)
+[?2004l[?2004h> PY
+[?2004l{"viscosity": 0.04142231030059392, "thermal_conductivity": 0.16063457113155952}
+runtime 52.52324438095093
+[?2004hroot@80c1e2a6cbf9:/app/isolated# cd /app && python3 - <<'PY'
+[?2004l[?2004h> import subprocess,time,json,os,resource
+[?2004l[?2004h> start=time.time()
+[?2004l[?2004h> env={k:os.environ[k] for k in ['HOME','TMPDIR','PATH','LANG'] if k in os.environ}
+[?2004l[?2004h> p=subprocess.run(['python3','transport.py','D2','0','0.8','1','0.6'],cwd='/app/isolated',env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+[?2004l[?2004h> print('status',p.returncode,'seconds',time.time()-start,'maxrss_kb',resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
+[?2004l[?2004h> print('stdout',repr(p.stdout));print('stderr',repr(p.stderr[:500]))
+[?2004l[?2004h> d=json.loads(p.stdout);assert set(d)=={'viscosity','thermal_conductivity'} and len(d)==2
+[?2004l[?2004h> assert all(isinstance(v,(int,float)) and v>0 for v in d.values())
+[?2004l[?2004h> PY
+[?2004l

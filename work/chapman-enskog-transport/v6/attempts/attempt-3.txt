@@ -1,0 +1,2154 @@
+#### step 2 01:53:11
+MSG: Analysis: The output program has not been created yet. The requested accuracy requires a converged solution of the linearized collision equations, including accurate classical scattering for the Kihara potential.
+Plan: Inspect the available tools and create the output directory. Then derive and implement a numerical collision-bracket solver with systematically convergent velocity and scattering quadratures, and validate its normalization and convergence.
+CMD: mkdir -p /app/output; ls -la /app; python3 - <<'PY'
+import numpy, scipy
+print(numpy.__version__, scipy.__version__)
+PY
+
+OBS: Previous response had warnings:
+WARNINGS: - Extra text detected before JSON object
+
+New Terminal Output:
+root@59537d8bb9aa:/app# mkdir -p /app/output; ls -la /app; python3 - <<'PY'
+> import numpy, scipy
+> print(numpy.__version__, scipy.__version__)
+> PY
+total 12
+drwxr-xr-x 1 root root 4096 Nov  1 01:52 .
+drwxr-xr-x 1 root root 4096 Nov  1 01:52 ..
+drwxr-xr-x 2 root root 4096 Nov  1 01:52 output
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#### step 3 01:55:26
+MSG: Analysis: I have derived a variational collision-bracket formulation using vector and traceless-tensor Sonine bases. It gives all four properties from two linear systems and permits increasing the expansion order. The main numerical challenge is accurately integrating classical scattering, especially near orbiting trajectories.
+Plan: Check the installed numerical libraries, then implement the scattering integrals in a development script. Test their quadrature convergence before integrating them into the transport solver.
+CMD: 
+CMD: cat > /app/scatter_dev.py <<'PY'
+import numpy as np
+from scipy.special import roots_legendre
+from scipy.optimize import brentq, minimize_scalar
+from scipy.integrate import quad
+from functools import lru_cache
+
+@lru_cache(None)
+def gl(n):
+    x,w=roots_legendre(n)
+    return (x+1)/2,w/2
+
+def potential(r,a):
+    z=((1-a)/(r-a))**6
+    return 4*z*(z-1)
+
+def vp(r,a):
+    z=((1-a)/(r-a))**6
+    return 24*z*(1-2*z)/(r-a)
+
+def F(r,a):
+    return potential(r,a)+r*vp(r,a)/2
+
+def geom(E,a):
+    z=(1+np.sqrt(1+E))/2
+    rp=a+(1-a)*z**(-1/6)
+    peak=minimize_scalar(lambda r:-F(r,a),bounds=(a+(1-a)*2**(1/6),a+3*(1-a)),method='bounded',options={'xatol':1e-14}).x
+    Ec=F(peak,a)
+    if E<Ec:
+        ro=brentq(lambda r:F(r,a)-E,peak,max(peak*2, (16*(1-a)**6/E)**(1/6)+a),xtol=1e-14)
+        bc2=ro*ro*(1-potential(ro,a)/E)
+        ri=brentq(lambda r:F(r,a)-E,rp,peak,xtol=1e-14)
+        rc=brentq(lambda r:r*r*(1-potential(r,a)/E)-bc2,rp,ri,xtol=1e-14)
+        return rp,ro,rc,bc2,Ec
+    return rp,None,None,None,Ec
+
+def chi_quad(r,E,a):
+    z=((1-a)/(r-a))**6
+    h=1-4*z*(z-1)/E
+    def fun(t):
+        t2=t*t
+        lh=np.log1p(-t2)-np.log1p(a*t2/(r-a))
+        dv=4*(-z*z*np.expm1(12*lh)+z*np.expm1(6*lh))/E
+        f=dv+h*t2*(2-t2)
+        return 2*t/np.sqrt(max(f,1e-300))
+    rp,ro,rc,bc,Ec=geom(E,a)
+    points=[]
+    if ro is not None and r<rc:
+        points=[np.sqrt(1-r/ro)]
+    I,err=quad(fun,0,1,points=points,epsabs=2e-10,epsrel=2e-10,limit=200)
+    return np.pi-2*np.sqrt(h)*I
+
+def chi_batch(r,E,a,n=128,ro=None):
+    r=np.asarray(r)
+    z=((1-a)/(r-a))**6
+    h=1-4*z*(z-1)/E
+    t,w=gl(n)
+    def part(t,weights):
+        t2=t*t
+        lh=np.log1p(-t2)-np.log1p(a*t2/(r[:,None]-a))
+        dv=4*(-z[:,None]**2*np.expm1(12*lh)+z[:,None]*np.expm1(6*lh))/E
+        f=dv+h[:,None]*t2*(2-t2)
+        return np.sum(weights*2*t/np.sqrt(np.maximum(f,1e-300)),axis=1)
+    if ro is not None:
+        # Each segment is clustered near the bottleneck.
+        tm=np.sqrt(np.maximum(0,1-r/ro))
+        # t = tm(1-s^2) below tm, tm+(1-tm)s^2 above
+        s=t[None,:]
+        I=part(tm[:,None]*(1-s*s),w[None,:]*2*tm[:,None]*s)
+        I+=part(tm[:,None]+(1-tm[:,None])*s*s,w[None,:]*2*(1-tm[:,None])*s)
+    else:
+        I=part(np.broadcast_to(t,(len(r),n)),w)
+    return np.pi-2*np.sqrt(np.maximum(h,0))*I
+
+if __name__=='__main__':
+ import sys
+ E,a=map(float,sys.argv[1:3])
+ rp,ro,rc,bc,Ec=geom(E,a)
+ print('geometry',rp,ro,rc,bc,Ec)
+ r=np.linspace(rp*1.001,rc if rc is not None else 2*rp,10)
+ r=np.r_[r[:-1],rc*(1-1e-6) if rc is not None else r[-1]]
+ for n in [64,128,256,512]:
+  print(n,chi_batch(r,E,a,n,ro))
+ print('quad',[chi_quad(ri,E,a) for ri in r])
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/scatter_dev.py 0.2 0
+
+OBS:  0.93822668   0.40636363  -0.09659494
+  -0.60669017  -1.16172001  -1.82696679  -2.7905753  -12.09574514]
+512 [  2.55499051   1.56089873   0.93822668   0.40636363  -0.09659494
+  -0.60669017  -1.16172001  -1.82696679  -2.7905753  -12.09574514]
+quad [np.float64(2.5549905118381666), np.float64(1.5608987321541936), np.float64(0.9382266796124803), np.float64(0.4063636318935431), np.float64(-0.096594943944
+80816), np.float64(-0.6066901745324045), np.float64(-1.1617200110344372), np.float64(-1.8269667859325027), np.float64(-2.790575303635584), np.float64(-12.095745
+140437462)]
+root@59537d8bb9aa:/app#
+
+
+#### step 4 01:58:22
+MSG: Analysis: The scattering-angle calculation agrees with adaptive integration, including trajectories close to orbiting. I will use an orthogonal Hermite representation to integrate the centre-of-mass velocity analytically. This avoids a costly three-dimensional velocity quadrature and produces the Sonine collision brackets needed for both transport systems.
+Plan: Implement angular transport cross sections and the Hermite collision-bracket machinery. First test the latter against hard-sphere low-order formulas and known convergence behavior, then test Kihara scattering quadrature convergence.
+CMD: cat >> /app/scatter_dev.py <<'PY'
+
+def cross_sections(E,a,L=16,n=160,nt=128):
+    rp,ro,rc,bc,Ec=geom(E,a)
+    t,w=gl(n)
+    rr=[];ww=[];inner=[]
+    if ro is not None:
+        # orbiting endpoint, quartic clustering
+        r=rc-(rc-rp)*(1-t)**4
+        weights=w*4*(rc-rp)*(1-t)**3
+        rr.append(r);ww.append(weights);inner.append(True)
+        # outer branch: quadratic at orbit, inverse at infinity
+        r=ro+(1-a)*t*t/(1-t)
+        weights=w*(1-a)*t*(2-t)/(1-t)**2
+        rr.append(r);ww.append(weights);inner.append(False)
+    else:
+        peak=minimize_scalar(lambda r:-F(r,a),bounds=(a+(1-a)*2**(1/6),a+3*(1-a)),method='bounded').x
+        # subdivide around the former orbiting region
+        bounds=[rp,peak,peak+2*(1-a)]
+        for lo,hi in zip(bounds[:-1],bounds[1:]):
+            r=lo+(hi-lo)*t
+            rr.append(r);ww.append(w*(hi-lo));inner.append(False)
+        r=bounds[-1]+(1-a)*t/(1-t)
+        rr.append(r);ww.append(w*(1-a)/(1-t)**2);inner.append(False)
+    Q=np.zeros(L+1)
+    for r,weight,inside in zip(rr,ww,inner):
+        c=chi_batch(r,E,a,nt,ro if inside else None)
+        z=np.cos(c)
+        weight=weight*2*np.pi*r*(1-F(r,a)/E)
+        prev=np.ones_like(z);cur=z
+        Q[1]+=np.sum(weight*(2*np.sin(c/2)**2))
+        for l in range(2,L+1):
+            nex=((2*l-1)*z*cur-(l-1)*prev)/l
+            Q[l]+=np.sum(weight*(1-nex))
+            prev,cur=cur,nex
+    return Q
+PY
+cat > /app/bracket_dev.py <<'PY'
+import os
+os.environ['OPENBLAS_NUM_THREADS']='1'
+os.environ['OMP_NUM_THREADS']='1'
+import numpy as np
+from scipy.special import roots_legendre, roots_genlaguerre, gammaln
+from scipy.sparse import coo_matrix
+from math import factorial, comb, sqrt, pi
+import time
+
+def indices(d):
+ return [(i,j,d-i-j) for i in range(d+1) for j in range(d-i+1)]
+
+class Basis:
+ def __init__(self,N,l):
+  self.N=N;self.l=l;self.dmax=2*N+l
+  self.gammas=[g for d in range(self.dmax+1) for g in indices(d)]
+  gmap={g:i for i,g in enumerate(self.gammas)}
+  self.gammas=np.array(self.gammas)
+  nc=3 if l==1 else 6
+  self.nc=nc
+  rows=[];cols=[];vals=[]
+  self.slices=[]
+  offset=0
+  bmaps=[]
+  for k in range(self.dmax+1):
+   bs=indices(k);bmaps.append({b:i for i,b in enumerate(bs)})
+   size=(N+1)*nc*len(bs)
+   self.slices.append((offset,offset+size,len(bs)))
+   offset+=size
+  for p in range(N+1):
+   d=2*p+l
+   norm=(.5 if l==1 else .25)*np.exp(gammaln(p+l+1.5)-gammaln(l+1.5)-gammaln(p+1))
+   # tensor order: xx,yy,zz,xy,xz,yz; diagonal trace removed
+   coeffs=[{} for _ in range(nc)]
+   def add(ci,g,c):coeffs[ci][g]=coeffs[ci].get(g,0)+c
+   for ijk in indices(p):
+    pre=(-1)**p/(2**d*sqrt(norm)*np.prod([factorial(x) for x in ijk]))
+    if l==1:
+     for c in range(3):
+      g=tuple(2*ijk[j]+(j==c) for j in range(3)); add(c,g,pre)
+    else:
+     for c,(ii,jj) in enumerate([(0,0),(1,1),(2,2),(0,1),(0,2),(1,2)]):
+      if ii!=jj:
+       g=tuple(2*ijk[j]+(j==ii)+(j==jj) for j in range(3));add(c,g,pre*sqrt(2))
+      else:
+       for axis in range(3):
+        g=tuple(2*ijk[j]+2*(j==axis) for j in range(3));add(c,g,pre*((1 if axis==ii else 0)-1/3))
+   for c,coeff in enumerate(coeffs):
+    for alpha,v in coeff.items():
+     if not v:continue
+     va=v*sqrt(2**d*np.prod([factorial(x) for x in alpha]))
+     for bx in range(alpha[0]+1):
+      for by in range(alpha[1]+1):
+       for bz in range(alpha[2]+1):
+        beta=(bx,by,bz);k=sum(beta)
+        if k==d:continue
+        gamma=tuple(alpha[j]-beta[j] for j in range(3))
+        start,end,nb=self.slices[k]
+        rows.append(start+(p*nc+c)*nb+bmaps[k][beta]);cols.append(gmap[gamma]);vals.append(va*sqrt(np.prod([comb(alpha[j],beta[j]) for j in range(3)])))
+  self.mat=coo_matrix((vals,(rows,cols)),shape=(offset,len(gmap))).tocsr()
+  self.mat.eliminate_zeros()
+  print('basis',N,l,'shape',self.mat.shape,'nnz',self.mat.nnz,flush=True)
+  cc,ww=roots_legendre(self.dmax+1)
+  self.cos=np.r_[1.,cc];self.sin=np.sqrt(np.maximum(0,1-self.cos**2))
+  from numpy.polynomial.legendre import legvander
+  self.project=ww[None,:]/2*(2*np.arange(self.dmax+1)[:,None]+1)*legvander(cc,self.dmax).T
+ def amplitudes(self,y):
+  xx=np.sqrt(y)*self.sin; zz=np.sqrt(y)*self.cos
+  hs=[]
+  for x in [xx,np.zeros_like(xx),zz]:
+   arr=[np.ones_like(x),sqrt(2)*x]
+   for n in range(1,self.dmax):arr.append(sqrt(2/(n+1))*x*arr[-1]-sqrt(n/(n+1))*arr[-2])
+   hs.append(np.array(arr))
+  g=self.gammas
+  H=hs[0][g[:,0]]*hs[1][g[:,1]]*hs[2][g[:,2]]
+  return self.mat@H
+ def accumulate(self,U,y,weight,Q):
+  A=self.amplitudes(y)
+  aq=self.project.T@Q[:self.dmax+1]
+  for k,(start,end,nb) in enumerate(self.slices[:-1]):
+   B=A[start:end].reshape(self.N+1,self.nc*nb,-1)
+   B0=B[:,:,0];BQ=B[:,:,1:]@aq
+   z=B0@BQ.T
+   U[k]+=weight*(z+z.T)/(3 if self.l==1 else 10)
+
+def solve(UV,UT,T,R,X,N):
+ x=np.array([X,1-X]);m=np.array([1.,R]);sz=N+1
+ def matrix(U,l):
+  K=np.zeros((2*sz,2*sz));d=2*np.arange(sz)+l
+  for i,j in [(0,0),(1,1),(0,1)]:
+   mi,mj=m[i],m[j];mu=mi*mj/(mi+mj)
+   ai=sqrt(mi/(mi+mj));bi=sqrt(mj/(mi+mj))
+   rate=(.25 if i==j else .5)*x[i]*x[j]*sqrt(2*T/mu)
+   for k,V in enumerate(U):
+    ci=ai**k*bi**(d-k)
+    cj=bi**k*(-ai)**(d-k)
+    if i==j:
+     c=ci+cj;K[i*sz:(i+1)*sz,i*sz:(i+1)*sz]+=rate*V*c[:,None]*c[None,:]
+    else:
+     for a,ca in [(i,ci),(j,cj)]:
+      for b,cb in [(i,ci),(j,cj)]:
+       K[a*sz:(a+1)*sz,b*sz:(b+1)*sz]+=rate*V*ca[:,None]*cb[None,:]
+  return (K+K.T)/2
+ K=matrix(UV,1)
+ sd=np.zeros(2*sz);sh=sd.copy();null=sd.copy()
+ for i in range(2):
+  sd[i*sz]=(1 if i==0 else -1)*sqrt(T/m[i]);sh[i*sz+1]=-x[i]*sqrt(5*T/(2*m[i]));null[i*sz]=sqrt(m[i])
+ K+=np.outer(null,null)/np.dot(null,null)*np.max(np.diag(K))
+ sol=np.linalg.solve(K,np.array([sd,sh]).T)
+ dd,dh=sd@sol;hd,hh=sh@sol
+ alpha=dh/(X*(1-X)*dd)
+ lam=hh-dh*hd/dd
+ Kt=matrix(UT,2);s=np.zeros(2*sz);s[0]=X;s[sz]=1-X
+ eta=T*s@np.linalg.solve(Kt,s)
+ return eta,lam,X*(1-X)*dd,alpha
+
+if __name__=='__main__':
+ import sys
+ N=int(sys.argv[1]) if len(sys.argv)>1 else 4
+ t=time.time();bv=Basis(N,1);bt=Basis(N,2)
+ UV=np.zeros((bv.dmax,N+1,N+1));UT=np.zeros((bt.
+CMD: OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+import sys,time
+sys.path.insert(0,'/app')
+from scatter_dev import cross_sections
+for E,a in [(0.2,0),(1,0),(2,0),(.2,.8),(50,.8),(.799,0),(.801,0)]:
+ t=time.time()
+ for n in [80,160,320]:
+  q=cross_sections(E,a,4,n,192)
+  print(E,a,n,q,flush=True)
+ print('elapsed',time.time()-t)
+PY
+
+OBS:   2.91656712 3.02053334 3.07816955 3.1177516 ]
+elapsed 0.010155439376831055
+0.799 0 80 [ 0.          8.14474992  9.637617   11.501635   12.22542588]
+0.799 0 160 [ 0.          8.14474992  9.63761709 11.50163654 12.22543011]
+0.799 0 320 [ 0.          8.14474992  9.63761709 11.50163654 12.22543008]
+elapsed 0.011716842651367188
+0.801 0 80 [ 0.          8.13696617  9.62950844 11.491776   12.21433964]
+0.801 0 160 [ 0.          8.13696607  9.62954698 11.49155062 12.21516996]
+0.801 0 320 [ 0.          8.13696607  9.62954698 11.49155117 12.21518216]
+elapsed 0.010247230529785156
+root@59537d8bb9aa:/app#
+
+
+#### step 5 01:58:55
+MSG: Analysis: The Hermite solver reproduces hard-sphere transport values, and the angular cross sections converge well in the initial tests. The remaining work is accurate integration over collision energy and checking Sonine-order convergence across the full mass-ratio and temperature ranges.
+Plan: Build a development driver that splits the energy integration at the orbiting threshold and uses composite Gaussian quadrature. Save collision brackets so many mass ratios and compositions can be tested without recalculating scattering. Compare successive expansion orders and energy resolutions.
+CMD: cat > /app/run_dev.py <<'PY'
+import os
+os.environ['OPENBLAS_NUM_THREADS']='1'
+import numpy as np
+import sys,time
+from math import sqrt,pi
+from scipy.special import roots_legendre
+from scatter_dev import cross_sections, geom
+from bracket_dev import Basis,solve
+
+def energy_nodes(T,a,n=16):
+ Ec=geom(1e6,a)[-1]; yc=Ec/T
+ # endpoints include orbiting threshold and a geometric series
+ edges=np.r_[0.,np.geomspace(.00001,1,11),np.arange(2,65,2)]
+ if yc<64:
+  edges=np.r_[edges,yc]
+  for delta in [1e-1,1e-2,1e-3,1e-4]:
+   edges=np.r_[edges,yc*(1-delta),yc*(1+delta)]
+ edges=np.unique(edges);edges=edges[(edges>=0)&(edges<=64)]
+ z,w=roots_legendre(n);y=((edges[:-1]+edges[1:])[:,None]+np.diff(edges)[:,None]*z)/2
+ weights=np.diff(edges)[:,None]*w/2
+ return y.ravel(),weights.ravel()
+
+def build(A,T,N=8,n=12,nr=160,nt=128):
+ t=time.time();bv=Basis(N,1);bt=Basis(N,2)
+ UV=np.zeros((bv.dmax,N+1,N+1));UT=np.zeros((bt.dmax,N+1,N+1))
+ y,w=energy_nodes(T,A,n)
+ for k,(yi,wi) in enumerate(zip(y,w)):
+  Q=cross_sections(T*yi,A,bt.dmax,nr,nt)
+  weight=wi*yi*np.exp(-yi)*2/sqrt(pi)
+  bv.accumulate(UV,yi,weight,Q)
+  bt.accumulate(UT,yi,weight,Q)
+  if k%200==0: print(k,len(y),'time',time.time()-t,flush=True)
+ print('total time',time.time()-t,flush=True)
+ return UV,UT
+
+if __name__=='__main__':
+ A,T=float(sys.argv[1]),float(sys.argv[2]);N=int(sys.argv[3]);n=int(sys.argv[4]) if len(sys.argv)>4 else 12
+ UV,UT=build(A,T,N,n)
+ np.savez(f'/app/br_{A}_{T}_{N}_{n}.npz',UV=UV,UT=UT)
+ for R,X in [(1,.5),(2,.5),(10,.05),(40,.05),(40,.5),(40,.95)]:
+  print('mixture',R,X)
+  for order in [1,2,3,4,5,6,7,8,10,12,14,16]:
+   if order>N:continue
+   print(order,solve(UV[:,:order+1,:order+1],UT[:,:order+1,:order+1],T,R,X,order),flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0 0.2 10 12 > /app/log0 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0.8 50 10 12 > /app/log1 2>&1 &
+
+CMD: tail -10 /app/log0; tail -10 /app/log1
+
+OBS: _{N}_{n}.npz',UV=UV,UT=UT)
+>  for R,X in [(1,.5),(2,.5),(10,.05),(40,.05),(40,.5),(40,.95)]:
+>   print('mixture',R,X)
+>   for order in [1,2,3,4,5,6,7,8,10,12,14,16]:
+>    if order>N:continue
+>    print(order,solve(UV[:,:order+1,:order+1],UT[:,:order+1,:order+1],T,R,X,order),flush=True)
+> PY
+root@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0 0.2 10 12 > /app/log0 2>&1 &
+[1] 228
+root@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0.8 50 10 12 > /app/log1 2>&1 &
+[2] 229
+root@59537d8bb9aa:/app# tail -10 /app/log0; tail -10 /app/log1
+root@59537d8bb9aa:/app#
+
+
+#### step 6 01:59:14
+MSG: Analysis: Two end-of-range convergence tests are running. The transport normalization has also been checked directly from the stated diffusion and heat-flux definitions; the thermal-diffusion sign uses the lighter species as species 1.
+Plan: Inspect the convergence-test results and timings. Use them to choose a sufficiently high expansion order and identify whether the high-mass-ratio cases need further refinement.
+CMD: tail -70 /app/log0; tail -70 /app/log1; ps -o pid,etime,rss,cmd -p 228,229
+
+OBS: erflow encountered in scalar multiply
+  va=v*sqrt(2**d*np.prod([factorial(x) for x in alpha]))
+Traceback (most recent call last):
+  File "/app/run_dev.py", line 38, in <module>
+    UV,UT=build(A,T,N,n)
+          ^^^^^^^^^^^^^^
+  File "/app/run_dev.py", line 24, in build
+    t=time.time();bv=Basis(N,1);bt=Basis(N,2)
+                     ^^^^^^^^^^
+  File "/app/bracket_dev.py", line 51, in __init__
+    va=v*sqrt(2**d*np.prod([factorial(x) for x in alpha]))
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: math domain error
+bash: ps: command not found
+root@59537d8bb9aa:/app#
+
+
+#### step 7 01:59:32
+MSG: Analysis: The first high-order tests exposed integer overflow in factorial products during basis construction, before any transport calculation ran. This is a numerical implementation issue, not a failure of the bracket formulation.
+Plan: Replace NumPy integer products with Python arbitrary-precision integer products and rerun the two convergence tests.
+CMD: sed -i 's/from math import factorial, comb, sqrt, pi/from math import factorial, comb, sqrt, pi, prod/; s/np.prod(\[factorial(x) for x in ijk\])/prod([factorial(x) for x in ijk])/; s/np.prod(\[factorial(x) for x in alpha\])/prod([factorial(x) for x in alpha])/; s/np.prod(\[comb(alpha\[j\],beta\[j\]) for j in range(3)\])/prod([comb(alpha[j],beta[j]) for j in range(3)])/' /app/bracket_dev.py
+OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0 0.2 10 12 > /app/log0 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0.8 50 10 12 > /app/log1 2>&1 &
+
+CMD: tail -10 /app/log0; tail -10 /app/log1
+
+OBS:  s/np.prod(\[factorial(x) for x i
+n ijk\])/prod([factorial(x) for x in ijk])/; s/np.prod(\[factorial(x) for x in alpha\])/prod([factorial(x) for x in alpha])/; s/np.prod(\[comb(alpha\[j\],beta\[
+j\]) for j in range(3)\])/prod([comb(alpha[j],beta[j]) for j in range(3)])/' /app/bracket_dev.py
+root@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0 0.2 10 12 > /app/log0 2>&1 &
+[1] 278
+root@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0.8 50 10 12 > /app/log1 2>&1 &
+[2] 279
+root@59537d8bb9aa:/app# tail -10 /app/log0; tail -10 /app/log1
+root@59537d8bb9aa:/app#
+
+
+#### step 8 01:59:47
+MSG: Analysis: The factorial overflow has been corrected. The two test runs are rebuilding their bases and integrating the collision brackets.
+Plan: Poll the test logs for convergence results and runtime. Once they finish, compare low-temperature Lennard-Jones and high-temperature large-core behavior.
+CMD: tail -70 /app/log0; tail -70 /app/log1
+
+OBS: 64(1.192055825446114), np.float64(-0.783127706978085))
+6 (np.float64(2.409181503497084), np.float64(4.713126606329701), np.float64(1.1920620397846875), np.float64(-0.7832325657332342))
+7 (np.float64(2.4091818023438027), np.float64(4.713165253433164), np.float64(1.19206485267572), np.float64(-0.7832726975427949))
+8 (np.float64(2.409181876677305), np.float64(4.7131793961091075), np.float64(1.1920662420882597), np.float64(-0.7832897597203622))
+10 (np.float64(2.4091818968129726), np.float64(4.71318767014684), np.float64(1.1920673907016779), np.float64(-0.7833016071658407))
+root@59537d8bb9aa:/app#
+
+
+#### step 9 02:00:25
+MSG: Analysis: The first results show that order 10 is ample for many mixtures but not for large mass ratios with a small light-species fraction. Those cases converge more slowly, particularly toward hard-sphere behavior. Runtime at order 10 is only about six seconds, leaving room for a higher-order calculation.
+Plan: Reduce the basis storage by omitting rows that vanish identically in the rotationally invariant bracket evaluation. Then test orders 20–30 for the slow-converging mixtures and compare quadrature resolutions.
+CMD: cp /app/bracket_dev.py /app/bracket_old.py
+python3 - <<'PY'
+p='/app/bracket_dev.py'
+s=open(p).read()
+s=s.replace('bmaps=[]','bmaps=[]\n  parities=[(1,0),(0,1),(0,0)] if l==1 else [(0,0),(0,0),(0,0),(1,1),(1,0),(0,1)]')
+s=s.replace('bs=indices(k);bmaps.append({b:i for i,b in enumerate(bs)})\n   size=(N+1)*nc*len(bs)\n   self.slices.append((offset,offset+size,len(bs)))', 'bs=[(c,b) for c in range(nc) for b in indices(k) if (b[0]%2,b[1]%2)==parities[c]];bmaps.append({b:i for i,b in enumerate(bs)})\n   size=(N+1)*len(bs)\n   self.slices.append((offset,offset+size,len(bs)))')
+s=s.replace('gamma=tuple(alpha[j]-beta[j] for j in range(3))\n        start', 'gamma=tuple(alpha[j]-beta[j] for j in range(3))\n        if (c,beta) not in bmaps[k]:continue\n        start')
+s=s.replace('(p*nc+c)*nb+bmaps[k][beta]', 'p*nb+bmaps[k][(c,beta)]')
+s=s.replace('self.N+1,self.nc*nb,-1','self.N+1,nb,-1')
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/bracket_dev.py 4
+OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0.8 50 22 16 > /app/log22 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0 0.2 22 16 > /app/log22low 2>&1 &
+
+CMD: tail -8 /app/log22; tail -8 /app/log22low
+
+OBS: dev.py 4
+tail -8 /app/log22; tail -8 /app/log22low
+basis 4 1 shape (900, 220) nnz 903
+basis 4 2 shape (2340, 286) nnz 2877
+time 0.01636052131652832
+(np.float64(0.17913507525073646), np.float64(0.6777775569049795), np.float64(0.21557834230023434), np.float64(-1.1585561703624857e-17))
+root@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0.8 50 22 16 > /app/log22 2>&1 &
+[1] 334
+root@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/run_dev.py 0 0.2 22 16 > /app/log22low 2>&1 &
+[2] 335
+root@59537d8bb9aa:/app# tail -8 /app/log22; tail -8 /app/log22low
+root@59537d8bb9aa:/app#
+
+
+#### step 10 02:00:58
+MSG: Analysis: The storage reduction preserves the hard-sphere results exactly. Higher-order tests are running. I also noticed that the energy integration limit must increase with expansion order, since high-order basis functions sample larger collision energies.
+Plan: Extend the energy tail for high-order runs and inspect numerical stability. Compare the order-22 results with lower-order results, then decide whether still higher orders are necessary.
+CMD: tail -15 /app/log22; tail -15 /app/log22low; ls -lh /app/br_*.npz
+
+OBS: New Terminal Output:
+
+root@59537d8bb9aa:/app# tail -15 /app/log22; tail -15 /app/log22low; ls -lh /app/br_*.npz
+basis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.514909982681274
+basis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.361992597579956
+-rw-r--r-- 1 root root 42K Nov  1 01:59 /app/br_0.0_0.2_10_12.npz
+-rw-r--r-- 1 root root 42K Nov  1 01:59 /app/br_0.8_50.0_10_12.npz
+root@59537d8bb9aa:/app#
+
+
+#### step 11 02:01:46
+MSG: Analysis: The order-22 basis fits in memory, but its bracket integration is substantially more expensive. The current energy cutoff may affect the highest-order entries, so those results will be useful diagnostically but not yet definitive.
+Plan: Let the current runs finish, inspect expansion convergence, and measure their runtime. Then revise the energy grid to cover the high-order tail efficiently.
+CMD: tail -10 /app/log22; tail -10 /app/log22low
+
+OBS: New Terminal Output:
+
+root@59537d8bb9aa:/app# tail -10 /app/log22; tail -10 /app/log22low
+basis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.514909982681274
+basis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.361992597579956
+root@59537d8bb9aa:/app#
+
+
+#### step 12 02:02:32
+MSG: Analysis: The high-order integration is still running. Lower-order output suggests that the hardest cases need careful treatment rather than a fixed low-order shortcut.
+Plan: Inspect progress and, in parallel, test pure hard-sphere expansion convergence. That test needs no scattering integration and will help determine the expansion order required near large-core, high-temperature conditions.
+CMD: tail -12 /app/log22; tail -12 /app/log22low
+OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/hardconv 2>&1 &
+import sys,time
+sys.path.insert(0,'/app')
+import numpy as np
+from bracket_dev import Basis,solve
+from scipy.special import roots_genlaguerre
+from math import pi,sqrt
+N=26;t=time.time();bv=Basis(N,1)
+UV=np.zeros((bv.dmax,N+1,N+1));Q=np.ones(bv.dmax+1)*pi;Q[0]=0
+for y,w in zip(*roots_genlaguerre(2*N+4,1)):
+ bv.accumulate(UV,y,w*2/sqrt(pi),Q)
+print('time',time.time()-t)
+np.save('/app/hardV26.npy',UV)
+for R,X in [(40,.05),(40,.5),(10,.05)]:
+ for n in range(10,N+1,2):
+  # dummy tensor from vector matrix solely to print vector results
+  try:r=solve(UV[:,:n+1,:n+1],UV[:,:n+1,:n+1],50,R,X,n)
+  except Exception as e: print(e);continue
+  print(R,X,n,r[1:],flush=True)
+PY
+
+CMD: tail -10 /app/log22; tail -10 /app/log22low; tail -10 /app/hardconv
+
+OBS:  solely to print vector results
+>   try:r=solve(UV[:,:n+1,:n+1],UV[:,:n+1,:n+1],50,R,X,n)
+>   except Exception as e: print(e);continue
+>   print(R,X,n,r[1:],flush=True)
+> PY
+[3] 398
+root@59537d8bb9aa:/app# tail -10 /app/log22; tail -10 /app/log22low; tail -10 /app/hardconv
+basis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.514909982681274
+200 832 time 88.01928424835205
+basis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.361992597579956
+200 832 time 87.81766629219055
+root@59537d8bb9aa:/app#
+
+
+#### step 13 02:03:22
+MSG: Analysis: The order-22 runs are progressing, but repeated basis evaluation dominates runtime. Each collision-bracket entry is a finite polynomial in collision energy, so the energy-dependent cross sections can be projected onto Laguerre polynomials first. This reduces the expensive bracket evaluation to a small Gaussian quadrature without changing the represented collision operator.
+Plan: Implement the Laguerre projection and use a longer energy tail. Verify that it reproduces the direct order-10 integration, then use it for higher-order convergence tests. Keep the viscosity expansion smaller where its convergence is already rapid.
+CMD: cat > /app/project_dev.py <<'PY'
+import os
+os.environ['OPENBLAS_NUM_THREADS']='1'
+import numpy as np
+from scipy.special import roots_genlaguerre, eval_genlaguerre, roots_legendre
+from scatter_dev import cross_sections,geom
+from bracket_dev import Basis,solve
+from math import sqrt,pi
+import sys,time
+
+def nodes(T,a,n=12,ymax=160):
+ Ec=geom(1e6,a)[-1];yc=Ec/T
+ edges=np.r_[0.,np.geomspace(.00001,1,11),np.arange(2,41,2),np.arange(50,ymax+1,10)]
+ if yc<ymax:
+  edges=np.r_[edges,yc]
+  for delta in [.1,.01,.001,.0001]:edges=np.r_[edges,yc*(1-delta),yc*(1+delta)]
+ edges=np.unique(edges);edges=edges[(edges>=0)&(edges<=ymax)]
+ z,w=roots_legendre(n)
+ return (((edges[:-1]+edges[1:])[:,None]+np.diff(edges)[:,None]*z)/2).ravel(),(np.diff(edges)[:,None]*w/2).ravel()
+
+def moments(a,T,N,n=12,nr=200,nt=160):
+ t=time.time();y,w=nodes(T,a,n)
+ L=2*N+2
+ polys=np.array([eval_genlaguerre(j,1,y)/(j+1) for j in range(L+1)])
+ weight=w*y*np.exp(-y)
+ Q=np.array([cross_sections(T*yi,a,L,nr,nt) for yi in y])
+ M=(polys*weight)@Q
+ print('moments',time.time()-t,flush=True)
+ return M
+
+def brackets(M,N,l):
+ t=time.time();b=Basis(N,l);U=np.zeros((b.dmax,N+1,N+1))
+ y,w=roots_genlaguerre(2*N+3,1)
+ polys=np.array([eval_genlaguerre(j,1,y) for j in range(2*N+3)])
+ Q=polys.T@M[:2*N+3,:b.dmax+1]
+ for yi,wi,qi in zip(y,w,Q):b.accumulate(U,yi,wi*2/sqrt(pi),qi)
+ print('brackets',l,time.time()-t,flush=True)
+ return U
+
+if __name__=='__main__':
+ a,T=float(sys.argv[1]),float(sys.argv[2]);N=int(sys.argv[3]);n=int(sys.argv[4]) if len(sys.argv)>4 else 12
+ M=moments(a,T,N,n)
+ np.save(f'/app/mom_{a}_{T}_{N}_{n}.npy',M)
+ UV=brackets(M,N,1);NT=min(12,N);UT=brackets(M,NT,2)
+ np.savez(f'/app/proj_{a}_{T}_{N}_{n}.npz',UV=UV,UT=UT)
+ for R,X in [(1,.5),(2,.5),(10,.05),(40,.05),(40,.5),(40,.95)]:
+  print('mixture',R,X)
+  for order in range(4,N+1,2):
+   # pad tensor for unified solve
+   vv=UV[:,:order+1,:order+1]
+   tt=np.zeros((2*order+2,order+1,order+1))
+   nn=min(order,NT);tt[:UT.shape[0],:nn+1,:nn+1]=UT[:,:nn+1,:nn+1] if order>=NT else UT[:2*order+2,:nn+1,:nn+1]
+   # tensor inaccessible high orders get diagonal
+   if order>NT:
+    for j in range(NT+1,order+1):tt[0,j,j]=1e100
+   print(order,solve(vv,tt,T,R,X,order),flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/project_dev.py 0 0.2 10 16 > /app/projlog10 2>&1 &
+tail -12 /app/hardconv; tail -10 /app/log22
+
+CMD: tail -50 /app/hardconv; tail -12 /app/log22; tail -12 /app/log22low; tail -12 /app/projlog10
+
+OBS: 97), np.float64(-0.47403869960020883))
+10 0.05 26 (np.float64(1.5647441905243658), np.float64(1.2177936131941995), np.float64(-0.4740415615825725))
+basis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.514909982681274
+200 832 time 88.01928424835205
+400 832 time 115.98080086708069
+600 832 time 147.4603567123413
+basis 22 1 shape (304704, 17296) nnz 2092080
+basis 22 2 shape (649152, 18424) nnz 4712460
+0 832 time 21.361992597579956
+200 832 time 87.81766629219055
+400 832 time 115.47551894187927
+600 832 time 146.9892499446869
+root@59537d8bb9aa:/app#
+
+
+#### step 14 02:05:04
+MSG: Analysis: The hard-sphere tests confirm that the most difficult mixtures need substantially higher vector orders. To make those affordable, I have derived a bivariate generating function for the Sonine collision kernels after analytic centre-of-mass integration. It should compute the same brackets without constructing large Cartesian Hermite bases.
+Plan: Implement the generating-function recurrence for the vector brackets and compare it against the existing Hermite calculation at moderate orders. If it agrees and remains stable, use it for high-order diffusion and thermal-conductivity calculations.
+CMD: cat > /app/generator_dev.py <<'PY'
+import os
+os.environ['OPENBLAS_NUM_THREADS']='1'
+import numpy as np
+from math import sqrt,pi
+from scipy.special import roots_legendre,roots_genlaguerre,eval_genlaguerre,gammaln
+from numpy.polynomial.legendre import legvander
+import time
+
+def kernel(N,y,z,a,b,c,d,r=3.5):
+ # arrays y,z broadcast already flattened
+ B=b*b;D=d*d;C=1-a*a-c*c;e=a*c*b*d
+ H={(0,0):1.,(1,0):-B,(0,1):-D,(1,1):C}
+ H2={}
+ for (i,j),v in H.items():
+  for (k,l),w in H.items():H2[i+k,j+l]=H2.get((i+k,j+l),0)+v*w
+ # derivative numerators F_t H^2 and F_s H^2
+ nn={(1,0):B,(0,1):D,(1,1):-2*(B*D+e*z)}
+ def numerator(axis):
+  out={}
+  for (i,j),v in H.items():
+   deg=(i,j)[axis]
+   if not deg:continue
+   ij=(i-1,j) if axis==0 else (i,j-1)
+   for (k,l),w in H.items():
+    key=(ij[0]+k,ij[1]+l);out[key]=out.get(key,0)-r*v*deg*w
+   for (k,l),w in nn.items():
+    key=(ij[0]+k,ij[1]+l);out[key]=out.get(key,0)+y*v*deg*w
+  for (i,j),v in nn.items():
+   deg=(i,j)[axis]
+   if not deg:continue
+   ij=(i-1,j) if axis==0 else (i,j-1)
+   for (k,l),w in H.items():
+    key=(ij[0]+k,ij[1]+l);out[key]=out.get(key,0)-y*v*deg*w
+  return out
+ nt=numerator(0);ns=numerator(1)
+ F=np.empty((N+1,N+1,len(y)))
+ F[0,0]=1.
+ # first row with s-derivative
+ for q in range(N):
+  value=np.zeros(len(y))
+  for (i,j),v in ns.items():
+   if i==0 and j<=q:value+=v*F[0,q-j]
+  for (i,j),v in H2.items():
+   if i==0 and j>0 and j<=q:value-=v*(q-j+1)*F[0,q-j+1]
+  F[0,q+1]=value/(q+1)
+ for p in range(N):
+  for q in range(N+1):
+   value=np.zeros(len(y))
+   for (i,j),v in nt.items():
+    if i<=p and j<=q:value+=v*F[p-i,q-j]
+   for (i,j),v in H2.items():
+    if (i,j)!=(0,0) and i<=p and j<=q:value-=v*(p-i+1)*F[p-i+1,q-j]
+   F[p+1,q]=value/(p+1)
+ return F,H
+
+def vector_bracket(N,y,z,w,a,b,c,d):
+ t=__import__('time').time();F,H=kernel(N,y,z,a,b,c,d)
+ B=b*b;D=d*d;ac=a*c;bd=b*d
+ M={(0,0):bd*z,(1,0):-bd*z*B-ac*B,(0,1):-bd*z*D-ac*D,(1,1):bd*z*(B*D+a*a*c*c)+2*ac*B*D}
+ U=np.zeros((N+1,N+1))
+ norm=.5*np.exp(gammaln(np.arange(N+1)+2.5)-gammaln(2.5)-gammaln(np.arange(N+1)+1))
+ for p in range(N+1):
+  for q in range(N+1):
+   value=np.zeros(len(y))
+   for (i,j),h in H.items():
+    if i<=p and j<=q:value+=1.5*ac*h*F[p-i,q-j]
+   for (i,j),v in M.items():
+    if i<=p and j<=q:value+=y*v*F[p-i,q-j]
+   U[p,q]=value@w*2/(3*sqrt(norm[p]*norm[q]))
+ print('vector bracket',N,a,c,d,'time',__import__('time').time()-t,flush=True)
+ return U
+
+def quad_inputs(M,N):
+ y,wy=roots_genlaguerre(2*N+4,1)
+ Q=np.array([eval_genlaguerre(j,1,y) for j in range(2*N+3)]).T@M[:2*N+3,:N+3]
+ z,wz=roots_legendre(N+3)
+ proj=wz[None,:]/2*(2*np.arange(N+3)[:,None]+1)*legvander(z,N+2).T
+ aq=Q@proj
+ w=wy[:,None]*2/sqrt(pi)*aq
+ return np.repeat(y,len(z)),np.tile(z,len(y)),w.ravel()
+
+def vector_matrix(M,N,T,R,X):
+ y,z,w=quad_inputs(M,N);sz=N+1;x=np.array([X,1-X]);m=np.array([1.,R])
+ K=np.zeros((2*sz,2*sz))
+ for i,j in [(0,0),(1,1),(0,1)]:
+  mi,mj=m[i],m[j];mu=mi*mj/(mi+mj);a=sqrt(mi/(mi+mj));b=sqrt(mj/(mi+mj))
+  rate=(.25 if i==j else .5)*x[i]*x[j]*sqrt(2*T/mu)
+  if i==j:
+   same=vector_bracket(N,y,z,w,a,b,a,b);cross=vector_bracket(N,y,z,w,a,b,b,-a)
+   K[i*sz:(i+1)*sz,i*sz:(i+1)*sz]+=rate*(2*same+cross+cross.T)
+  else:
+   same1=vector_bracket(N,y,z,w,a,b,a,b);same2=vector_bracket(N,y,z,w,b,a,b,a);cross=vector_bracket(N,y,z,w,a,b,b,-a)
+   K[:sz,:sz]+=rate*same1;K[sz:,sz:]+=rate*same2;K[:sz,sz:]+=rate*cross;K[sz:,:sz]+=rate*cross.T
+ return (K+K.T)/2
+
+if __name__=='__main__':
+ import sys
+ from bracket_dev import solve
+ N=int(sys.argv[1]);R=float(sys.argv[2]);X=float(sys.argv[3]);T=float(sys.argv[4])
+ M=np.load(sys.argv[5]);K=vector_matrix(M,N,T,R,X)
+ np.save('/app/genK.npy',K)
+ def result(n):
+  ix=np.r_[np.arange(n+1),np.arange(N+1,N+n+2)];KK=K[np.ix_(ix,ix)].copy();sz=n+1
+  sd=np.zeros(2*sz);sh=sd.copy();null=sd.copy()
+  for i in range(2):
+   sd[i*sz]=(1 if i==0 else -1)*sqrt(T/[1,R][i]);sh[i*sz+1]=-[X,1-X][i]*sqrt(5*T/(2*[1,R][i]));null[i*sz]=sqrt([1,R][i])
+  KK+=np.outer(null,null)/np.dot(null,null)*np.max(np.diag(KK))
+  v=np.linalg.solve(KK,np.array([sd,sh]).T);dd,dh=sd@v;hd,hh=sh@v
+  return hh-dh*hd/dd,X*(1-X)*dd,dh/(X*(1-X)*dd)
+ for n in range(2,N+1,2):print(n,result(n),flush=True)
+PY
+tail -12 /app/projlog10; tail -12 /app/log22
+OPENBLAS_NUM_THREADS=1 python3 /app/generator_dev.py 10 40 0.05 0.2 /app/mom_0.0_0.2_10_16.npy
+
+OBS: 495896 -0.15617376188860607 time 0.0026352405548095703
+2 (np.float64(0.01663817114220735), np.float64(0.021800906405179062), np.float64(-0.12100059612335617))
+4 (np.float64(0.016655725908671818), np.float64(0.02181475068143582), np.float64(-0.1239790309771949))
+6 (np.float64(0.01665720681558577), np.float64(0.021817821563156266), np.float64(-0.12438215371732085))
+8 (np.float64(0.016657329069245556), np.float64(0.021820217173620645), np.float64(-0.12449367403842956))
+10 (np.float64(0.016657565493424096), np.float64(0.021820723872625996), np.float64(-0.1245625128263431))
+root@59537d8bb9aa:/app#
+
+
+#### step 15 02:05:32
+MSG: Analysis: The generating-function vector brackets agree with the Hermite brackets to numerical precision at order 10. This makes much higher orders practical. The Laguerre projection also reproduces the direct energy integration in the tested case.
+Plan: Test generating-function stability and convergence at order 60 for hard spheres. Compute order-60 collision moments at both difficult range corners, then compare expansion and scattering-quadrature convergence.
+CMD: OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+import numpy as np
+M=np.zeros((123,63));M[0,1:]=np.pi
+np.save('/app/hardM60.npy',M)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/generator_dev.py 60 40 0.05 50 /app/hardM60.npy > /app/genhard60 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/momlog60hi 2>&1 &
+import sys
+sys.path.insert(0,'/app')
+from project_dev import moments
+import numpy as np
+M=moments(.8,50,60,20,240,192)
+np.save('/app/momhi60.npy',M)
+PY
+OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/momlog60low 2>&1 &
+import sys
+sys.path.insert(0,'/app')
+from project_dev import moments
+import numpy as np
+M=moments(0,.2,60,20,240,192)
+np.save('/app/momlow60.npy',M)
+PY
+
+CMD: tail -20 /app/genhard60; cat /app/momlog60hi /app/momlog60low
+
+OBS: THREADS=1 python3 - <<'PY' > /app/momlog60hi 2>&1 &
+> import sys
+> sys.path.insert(0,'/app')
+> from project_dev import moments
+> import numpy as np
+> M=moments(.8,50,60,20,240,192)
+> np.save('/app/momhi60.npy',M)
+> PY
+[2] 481
+root@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/momlog60low 2>&1 &
+> import sys
+> sys.path.insert(0,'/app')
+> from project_dev import moments
+> import numpy as np
+> M=moments(0,.2,60,20,240,192)
+> np.save('/app/momlow60.npy',M)
+> PY
+[3] 482
+root@59537d8bb9aa:/app# tail -20 /app/genhard60; cat /app/momlog60hi /app/momlog60low
+root@59537d8bb9aa:/app#
+
+
+#### step 16 02:05:49
+MSG: Analysis: The order-60 tests are running. Their purpose is to check both truncation error and numerical stability; agreement at order 10 alone is not enough to justify high-order use.
+Plan: Inspect the high-order results. If roundoff appears, switch the generating-function recurrence and integrations to extended precision and verify against the stable Hermite method at overlapping orders.
+CMD: tail -40 /app/genhard60; cat /app/momlog60hi /app/momlog60low; ls -lh /app/mom*60.npy
+
+OBS: i 2>&1
+import sys
+sys.path.insert(0,'/app')
+from project_dev import moments
+import numpy as np
+M=moments(.8,50,60,20,240,192)
+np.save('/app/momhi60.npy',M)
+PY
+
+[3]+  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/momlog60low 2>&1
+import sys
+sys.path.insert(0,'/app')
+from project_dev import moments
+import numpy as np
+M=moments(0,.2,60,20,240,192)
+np.save('/app/momlow60.npy',M)
+PY
+
+moments 8.988681316375732
+moments 9.067110538482666
+-rw-r--r-- 1 root root 119K Nov  1 02:05 /app/momhi60.npy
+-rw-r--r-- 1 root root 119K Nov  1 02:05 /app/momlow60.npy
+root@59537d8bb9aa:/app#
+
+
+#### step 17 02:06:07
+MSG: Analysis: The hard-sphere generating-function calculation is stable through order 60 and agrees with the Hermite calculation at overlapping orders. Its remaining order-60 error appears small enough for the requested tolerance. Both Kihara moment calculations have also finished quickly.
+Plan: Evaluate the difficult Kihara mixtures through order 60 and compare the two range corners. Then refine the scattering and energy quadratures to quantify their errors independently of expansion truncation.
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/generator_dev.py 60 40 0.05 50 /app/momhi60.npy > /app/genhi60 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/generator_dev.py 60 40 0.05 0.2 /app/momlow60.npy > /app/genlow60 2>&1 &
+
+CMD: tail -18 /app/genhi60; tail -18 /app/genlow60
+
+OBS: New Terminal Output:
+
+root@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/generator_dev.py 60 40 0.05 50 /app/momhi60.npy > /app/genhi60 2>&1 &
+[1] 529
+root@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/generator_dev.py 60 40 0.05 0.2 /app/momlow60.npy > /app/genlow60 2>&1 &
+[2] 530
+root@59537d8bb9aa:/app# tail -18 /app/genhi60; tail -18 /app/genlow60
+root@59537d8bb9aa:/app#
+
+
+#### step 18 02:06:24
+MSG: Analysis: The two order-60 mixture evaluations are underway. I will also check the high-order energy tail: projecting cross sections onto Laguerre polynomials requires enough energy coverage to preserve the small high-order moments accurately.
+Plan: Inspect order convergence and compare low-order results with the direct solver. Then increase the energy cutoff and quadrature resolution and check whether the final properties change.
+CMD: tail -30 /app/genhi60; tail -30 /app/genlow60
+
+OBS: e-14), np.float64(-0.1246105570918746))
+52 (np.float64(0.016657833233229828), np.float64(-4.485300406114849e-16), np.float64(-0.12460986526263328))
+54 (np.float64(0.016607410904052933), np.float64(-1181.3625359792775), np.float64(-0.12461166345757521))
+56 (np.float64(0.016656770655280498), np.float64(-5.475220222308167e-20), np.float64(-0.12455102164822018))
+58 (np.float64(0.01665305550181964), np.float64(-4.2775157986782555e-22), np.float64(-0.12416385876215415))
+60 (np.float64(0.016658134726739358), np.float64(-6.683618435434773e-24), np.float64(-0.1236841177200016))
+root@59537d8bb9aa:/app#
+
+
+#### step 19 02:07:08
+MSG: Analysis: The Kihara order-60 results exposed instability in reconstructing cross sections from their high-order Laguerre projection. Low-order results agree, but the high-order matrices are not reliable. I will remove that reconstruction and integrate the generating-function kernels directly against the physical cross sections.
+Plan: Implement batched direct energy integration with extended-precision recurrences. Test order 50 at both difficult range corners, using the same scattering quadrature and an extended energy tail.
+CMD: cp /app/generator_dev.py /app/generator_before.py
+python3 - <<'PY'
+p='/app/generator_dev.py';s=open(p).read();s=s.replace('B=b*b;D=d*d;C=1-a*a-c*c;e=a*c*b*d','y=y.astype(np.longdouble);z=z.astype(np.longdouble)\n a,b,c,d=map(np.longdouble,(a,b,c,d))\n B=b*b;D=d*d;C=1-a*a-c*c;e=a*c*b*d')
+s=s.replace('np.empty((N+1,N+1,len(y)))','np.empty((N+1,N+1,len(y)),dtype=np.longdouble)').replace('np.zeros(len(y))','np.zeros(len(y),dtype=np.longdouble)')
+s=s.replace(" print('vector bracket',N,a,c,d,'time',__import__('time').time()-t,flush=True)", " # no diagnostic output")
+open(p,'w').write(s)
+PY
+cat > /app/direct_dev.py <<'PY'
+import os
+os.environ['OPENBLAS_NUM_THREADS']='1'
+import numpy as np
+from math import pi,sqrt
+from scipy.special import roots_legendre
+from numpy.polynomial.legendre import legvander
+from generator_dev import vector_bracket
+from project_dev import nodes
+from scatter_dev import cross_sections
+import sys,time
+
+def direct(A,T,N,R,X,n=16,nr=240,nt=192):
+ t=time.time();yy,wy=nodes(T,A,n,ymax=240)
+ z,wz=roots_legendre(N+3)
+ proj=wz[None,:]/2*(2*np.arange(N+3)[:,None]+1)*legvander(z,N+2).T
+ Q=np.array([cross_sections(T*y,A,N+2,nr,nt) for y in yy])
+ print('scattering time',time.time()-t,flush=True)
+ np.savez(f'/app/directQ_{A}_{T}_{N}_{n}.npz',yy=yy,wy=wy,Q=Q)
+ matrices=[]
+ a=sqrt(1/(1+R));b=sqrt(R/(1+R));s=sqrt(.5)
+ for aa,bb,cc,dd in [(s,s,s,s),(s,s,s,-s),(a,b,a,b),(b,a,b,a),(a,b,b,-a)]:
+  V=np.zeros((N+1,N+1))
+  for j in range(0,len(yy),12):
+   y=yy[j:j+12];w=wy[j:j+12]*y*np.exp(-y)*2/sqrt(pi)
+   ww=w[:,None]*(Q[j:j+12]@proj)
+   V+=vector_bracket(N,np.repeat(y,len(z)),np.tile(z,len(y)),ww.ravel(),aa,bb,cc,dd)
+  matrices.append(V)
+  print('pair',aa,cc,'time',time.time()-t,flush=True)
+ V,C,L,H,B=matrices;sz=N+1;K=np.zeros((2*sz,2*sz))
+ K[:sz,:sz]+=.25*X*X*sqrt(4*T)*(2*V+C+C.T)
+ K[sz:,sz:]+=.25*(1-X)**2*sqrt(4*T/R)*(2*V+C+C.T)
+ rate=.5*X*(1-X)*sqrt(2*T*(1+R)/R)
+ K[:sz,:sz]+=rate*L;K[sz:,sz:]+=rate*H;K[:sz,sz:]+=rate*B;K[sz:,:sz]+=rate*B.T
+ return (K+K.T)/2
+
+def results(K,T,R,X):
+ N=len(K)//2-1
+ for n in range(4,N+1,2):
+  ix=np.r_[np.arange(n+1),np.arange(N+1,N+n+2)];KK=K[np.ix_(ix,ix)].copy();sz=n+1
+  sd=np.zeros(2*sz);sh=sd.copy();null=sd.copy()
+  for i in range(2):
+   sd[i*sz]=(1 if i==0 else -1)*sqrt(T/[1,R][i]);sh[i*sz+1]=-[X,1-X][i]*sqrt(5*T/(2*[1,R][i]));null[i*sz]=sqrt([1,R][i])
+  KK+=np.outer(null,null)/np.dot(null,null)*np.max(np.diag(KK))
+  v=np.linalg.solve(KK,np.array([sd,sh]).T);dd,dh=sd@v;hd,hh=sh@v
+  print(n,hh-dh*hd/dd,X*(1-X)*dd,dh/(X*(1-X)*dd),flush=True)
+
+if __name__=='__main__':
+ A,T=float(sys.argv[1]),float(sys.argv[2]);N=int(sys.argv[3]);R=float(sys.argv[4]);X=float(sys.argv[5]);n=int(sys.argv[6]) if len(sys.argv)>6 else 16
+ K=direct(A,T,N,R,X,n)
+ np.save(f'/app/directK_{A}_{T}_{N}_{R}_{X}_{n}.npy',K)
+ results(K,T,R,X)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/direct_dev.py 0.8 50 50 40 0.05 16 > /app/directhi50 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/direct_dev.py 0 0.2 40 40 0.05 16 > /app/directlow40 2>&1 &
+
+CMD: tail -10 /app/directhi50; tail -10 /app/directlow40
+
+OBS: .argv[1]),float(sys.argv[2]);N=int(sys.argv[3]);R=float(sys.argv[4]);X=float(sys.argv[5]);n=int(sys.argv[6]) if len(sys.argv)>6 else 16
+>  K=direct(A,T,N,R,X,n)
+>  np.save(f'/app/directK_{A}_{T}_{N}_{R}_{X}_{n}.npy',K)
+>  results(K,T,R,X)
+> PY
+root@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/direct_dev.py 0.8 50 50 40 0.05 16 > /app/directhi50 2>&1 &
+[1] 579
+root@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/direct_dev.py 0 0.2 40 40 0.05 16 > /app/directlow40 2>&1 &
+[2] 580
+root@59537d8bb9aa:/app# tail -10 /app/directhi50; tail -10 /app/directlow40
+root@59537d8bb9aa:/app#
+
+
+#### step 20 02:07:45
+MSG: Analysis: The direct-integration implementation is running at the difficult range corners. It avoids the unstable high-order cross-section reconstruction and retains the physical angular cross sections at every energy node.
+Plan: Check its runtime and convergence. For viscosity, retain the validated Hermite bracket calculation at a moderate order and compare successive orders to ensure its error is below tolerance.
+CMD: tail -8 /app/directhi50; tail -8 /app/directlow40
+
+CMD: OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/visccheck 2>&1 &
+import sys,time,numpy as np
+sys.path.insert(0,'/app')
+from project_dev import brackets
+from bracket_dev import solve
+for A,T,path in [(0,.2,'/app/momlow60.npy'),(.8,50,'/app/momhi60.npy')]:
+ M=np.load(path);UT=brackets(M,14,2)
+ np.save(f'/app/tensor14_{A}_{T}.npy',UT)
+ # obtain vector lower-order from existing direct brackets
+ UV=np.load(f'/app/br_{A:.1f}_{T:.1f}_22_16.npz')['UV']
+ for R,X in [(40,.05),(40,.5),(40,.95),(1,.5)]:
+  print(A,T,R,X)
+  for n in [6,8,10,12,14]:
+   print(n,solve(UV[:,:n+1,:n+1],UT[:,:n+1,:n+1],T,R,X,n)[0],flush=True)
+PY
+
+OBS: ,time,numpy as np
+> sys.path.insert(0,'/app')
+> from project_dev import brackets
+> from bracket_dev import solve
+> for A,T,path in [(0,.2,'/app/momlow60.npy'),(.8,50,'/app/momhi60.npy')]:
+>  M=np.load(path);UT=brackets(M,14,2)
+>  np.save(f'/app/tensor14_{A}_{T}.npy',UT)
+>  # obtain vector lower-order from existing direct brackets
+>  UV=np.load(f'/app/br_{A:.1f}_{T:.1f}_22_16.npz')['UV']
+>  for R,X in [(40,.05),(40,.5),(40,.95),(1,.5)]:
+>   print(A,T,R,X)
+>   for n in [6,8,10,12,14]:
+>    print(n,solve(UV[:,:n+1,:n+1],UT[:,:n+1,:n+1],T,R,X,n)[0],flush=True)
+> PY
+[3] 614
+root@59537d8bb9aa:/app#
+
+
+#### step 21 02:08:23
+MSG: Analysis: Direct scattering evaluation takes about five seconds, and the bracket integration is progressing at a workable pace. The viscosity cross-check is also running.
+Plan: Inspect the direct high-order results and viscosity convergence. Once those are stable, refine the numerical quadratures and assemble the standalone program.
+CMD: tail -30 /app/directhi50; tail -30 /app/directlow40; cat /app/visccheck
+
+OBS: 14 0.024183012345959508
+basis 14 2 shape (126720, 5456) nnz 495516
+brackets 2 2.3080012798309326
+0.8 50 40 0.05
+6 8.522904081132802
+8 8.522912507303642
+10 8.522914953588451
+12 8.522915882066517
+14 8.522916285529686
+0.8 50 40 0.5
+6 7.001301403539248
+8 7.0013084660120795
+10 7.001309856901794
+12 7.001310156949561
+14 7.001310219508563
+0.8 50 40 0.95
+6 2.409181503494806
+8 2.4091818766750275
+10 2.4091818968106935
+12 2.4091818970751553
+14 2.4091818980829216
+0.8 50 1 0.5
+6 1.3634070229884392
+8 1.3634074185090386
+10 1.3634074574406805
+12 1.3634074623753545
+14 1.3634074631280664
+root@59537d8bb9aa:/app#
+
+
+#### step 22 02:08:44
+MSG: Analysis: The viscosity calculations are well converged by order 14 at both tested corners. The direct vector calculation is still finishing; its runtime remains comfortably below the limit in these tests.
+Plan: Read the final vector convergence tables. Then compare a higher-resolution calculation at the hardest high-temperature mixture and test several intermediate potentials and temperatures for unexpected slow convergence.
+CMD: tail -30 /app/directhi50; tail -28 /app/directlow40
+
+CMD: OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/refinehi 2>&1 &
+import sys,numpy as np
+sys.path.insert(0,'/app')
+from direct_dev import direct,results
+K=direct(.8,50,50,40,.05,24,360,256)
+np.save('/app/refinehi.npy',K)
+results(K,50,40,.05)
+PY
+
+OBS: 7237613 -0.12461324442173066
+34 0.016657873841886803 0.021821239244342 -0.12461324235386877
+36 0.016657874090275738 0.021821241812032217 -0.12461339417693365
+38 0.016657874991959722 0.021821242247896177 -0.12461351641365362
+40 0.01665787636150463 0.02182124227205012 -0.12461355159626576
+root@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/refinehi 2>&1 &
+> import sys,numpy as np
+> sys.path.insert(0,'/app')
+> from direct_dev import direct,results
+> K=direct(.8,50,50,40,.05,24,360,256)
+> np.save('/app/refinehi.npy',K)
+> results(K,50,40,.05)
+> PY
+[2] 659
+root@59537d8bb9aa:/app#
+
+
+#### step 23 02:09:10
+MSG: Analysis: The direct low-temperature vector calculation converges smoothly through order 40. The earlier projection-based instability is absent. A refined high-temperature calculation is running to separate quadrature error from expansion error.
+Plan: Inspect the high-temperature order-50 result, and test an intermediate Kihara potential at low temperature. These tests will guide a conservative fixed expansion order for the final program.
+CMD: tail -28 /app/directhi50; tail -5 /app/refinehi
+OPENBLAS_NUM_THREADS=1 python3 /app/direct_dev.py 0.4 0.2 50 40 0.05 20 > /app/directmid50 2>&1 &
+
+CMD: tail -8 /app/refinehi; tail -8 /app/directmid50
+
+OBS: 
+root@59537d8bb9aa:/app# tail -28 /app/directhi50; tail -5 /app/refinehi
+scattering time 5.474945306777954
+pair 0.7071067811865476 0.7071067811865476 time 28.378148794174194
+pair 0.7071067811865476 0.7071067811865476 time 53.32101845741272
+pair 0.15617376188860607 0.15617376188860607 time 76.31038808822632
+pair 0.9877295966495896 0.9877295966495896 time 99.24460649490356
+root@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 /app/direct_dev.py 0.4 0.2 50 40 0.05 20 > /app/directmid50 2>&1 &
+[3] 680
+root@59537d8bb9aa:/app# tail -8 /app/refinehi; tail -8 /app/directmid50
+root@59537d8bb9aa:/app#
+
+
+#### step 24 02:09:38
+MSG: Analysis: The difficult high-temperature run is nearing completion, and the refined and intermediate-potential tests are underway. The intended final architecture is now a direct vector-bracket integration plus a moderate-order tensor-bracket calculation for viscosity.
+Plan: Collect the convergence results and check that all final matrices remain positive on the nonconserved subspace. After confirming quadrature accuracy, combine the development components into one standalone file with no auxiliary-file dependencies.
+CMD: tail -30 /app/directhi50; tail -8 /app/refinehi; tail -8 /app/directmid50
+
+OBS: 0338536875115
+40 0.9223968621229681 1.3052876939732994 -0.46890576312023613
+42 0.9223971033583773 1.3052888546206045 -0.46890762313862333
+44 0.9223972932874119 1.305289775112063 -0.4689090929168067
+46 0.9223974442392767 1.3052905119827363 -0.46891026527640195
+48 0.9223975652711472 1.3052911069996858 -0.4689112085991098
+50 0.9223976631106862 1.3052915913604213 -0.4689119738207409
+[1]   Done                    OPENBLAS_NUM_THREADS=1 python3 /app/direct_dev.py 0.8 50 50 40 0.05 16 > /app/directhi50 2>&1
+scattering time 20.792476415634155
+scattering time 10.404817342758179
+root@59537d8bb9aa:/app#
+
+
+#### step 25 02:10:20
+MSG: Analysis: The direct high-temperature calculation converges smoothly through order 50. Its estimated remaining truncation error is below tolerance, though I will use a higher order for margin. The refined quadrature test is still running.
+Plan: Compare the refined result with the initial calculation and inspect the intermediate-potential convergence. Then assemble the final solver with conservative quadrature settings, a high vector expansion order, and order-14 viscosity.
+CMD: tail -30 /app/refinehi; tail -30 /app/directmid50
+
+CMD: OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+import sys,numpy as np
+sys.path.insert(0,'/app')
+from scatter_dev import cross_sections
+from scipy.special import roots_genlaguerre
+from math import pi
+for T in [.2,.5,1,2,10,50]:
+ y,w=roots_genlaguerre(80,2)
+ q=np.array([cross_sections(T*v,0,2,160,128) for v in y])[:,1]
+ ratio=np.sum(w*y*q)/np.sum(w*q)/3
+ print(T,ratio)
+PY
+
+OBS: .7071067811865476 time 55.62608885765076
+scattering time 10.404817342758179
+pair 0.7071067811865476 0.7071067811865476 time 40.57522940635681
+root@59537d8bb9aa:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+> import sys,numpy as np
+> sys.path.insert(0,'/app')
+> from scatter_dev import cross_sections
+> from scipy.special import roots_genlaguerre
+> from math import pi
+> for T in [.2,.5,1,2,10,50]:
+>  y,w=roots_genlaguerre(80,2)
+>  q=np.array([cross_sections(T*v,0,2,160,128) for v in y])[:,1]
+>  ratio=np.sum(w*y*q)/np.sum(w*q)/3
+>  print(T,ratio)
+> PY
+0.2 0.8722589634405895
+0.5 0.826095502608111
+
+
+
+#### step 26 02:11:02
+MSG: Analysis: The direct order-50 calculation is stable and converged at the large-core, high-temperature corner. I am checking the refined quadrature result before fixing the final settings. The collision-energy ratios also provide an independent check on the thermal-diffusion behavior.
+Plan: Finish the quadrature comparison, inspect the intermediate-potential test, and create the standalone file. The final program will calculate all brackets at runtime and print only the required JSON object.
+CMD: 
+CMD: tail -30 /app/refinehi; tail -30 /app/directmid50
+
+OBS: 6095502608111
+1 0.8360321022122134
+2 0.8851398332676381
+10 0.9442058346157234
+50 0.9481654047396745
+root@59537d8bb9aa:/app# tail -30 /app/refinehi; tail -30 /app/directmid50
+scattering time 20.792476415634155
+pair 0.7071067811865476 0.7071067811865476 time 55.62608885765076
+pair 0.7071067811865476 0.7071067811865476 time 90.42390131950378
+scattering time 10.404817342758179
+pair 0.7071067811865476 0.7071067811865476 time 40.57522940635681
+pair 0.7071067811865476 0.7071067811865476 time 69.41896224021912
+pair 0.15617376188860607 0.15617376188860607 time 98.97611808776855
+root@59537d8bb9aa:/app#
+
+
+#### step 27 02:11:59
+MSG: Analysis: The scattering and transport checks are consistent so far. I will use a conservative vector order of 64 and tensor order of 16, with direct collision-energy integration for the vector system. This avoids the high-order projection instability found during development.
+Plan: Assemble a self-contained transport.py from the validated components, remove all diagnostic output and auxiliary-file writes, and add the required JSON interface. Then test it from an isolated directory and compare it with the refined development results.
+CMD: cat > /app/assemble.py <<'PY'
+from pathlib import Path
+scatter=Path('/app/scatter_dev.py').read_text()
+scatter=scatter[:scatter.index("if __name__=='__main__':")]+scatter[scatter.index('def cross_sections'):]
+# Remove the adaptive reference routine, not used in production.
+start=scatter.index('def chi_quad');end=scatter.index('def chi_batch')
+scatter=scatter[:start]+scatter[end:]
+basis=Path('/app/bracket_dev.py').read_text()
+basis=basis[basis.index('def indices'):basis.index('def solve')]
+basis='\n'.join(line for line in basis.splitlines() if "print('basis'" not in line)+'\n'
+gen=Path('/app/generator_dev.py').read_text()
+gen=gen[gen.index('def kernel'):gen.index('def quad_inputs')]
+node=Path('/app/project_dev.py').read_text()
+node=node[node.index('def nodes'):node.index('def moments')]
+node=node.replace('ymax=160','ymax=260')
+header='''#!/usr/bin/env python3
+"""Classical binary-mixture transport for a common spherical-core potential.
+
+Units are sigma = epsilon = k_B = m_1 = n = 1. The collision operator
+is assembled from Maxwellian collision brackets in orthonormal Sonine
+bases. Vector and traceless-tensor sectors are solved separately. The
+vector sources are diffusion and enthalpy transport; eliminating the
+relative particle current gives the zero-diffusion heat conductivity.
+
+The centre-of-mass Gaussian integration is analytic. For the vector
+sector it is evaluated by a bivariate Sonine generating function. The
+tensor sector uses the equivalent Cartesian Hermite expansion. Physical
+scattering cross sections are integrated over turning radius, splitting
+at orbiting trajectories, then over Maxwellian collision energy.
+"""
+import os
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['OMP_NUM_THREADS'] = '1'
+import sys, json, warnings
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+import numpy as np
+from scipy.special import roots_legendre, roots_genlaguerre, eval_genlaguerre, gammaln
+from scipy.optimize import brentq, minimize_scalar
+from scipy.sparse import coo_matrix
+from numpy.polynomial.legendre import legvander
+from functools import lru_cache
+from math import factorial, comb, sqrt, pi, prod
+'''
+# imports in scattering are harmless; trim duplicate scipy adaptive integration import.
+scatter=scatter.replace('from scipy.integrate import quad\n','')
+footer='''
+def tensor_matrix(U,T,R,X,N):
+    sz=N+1
+    K=np.zeros((2*sz,2*sz))
+    masses=[1.,R]; fractions=[X,1-X]
+    degree=2*np.arange(sz)+2
+    for i,j in [(0,0),(1,1),(0,1)]:
+        mi,mj=masses[i],masses[j]
+        mu=mi*mj/(mi+mj)
+        ai=sqrt(mi/(mi+mj)); bi=sqrt(mj/(mi+mj))
+        rate=(.25 if i==j else .5)*fractions[i]*fractions[j]*sqrt(2*T/mu)
+        for k,V in enumerate(U):
+            ci=ai**k*bi**(degree-k)
+            cj=bi**k*(-ai)**(degree-k)
+            if i==j:
+                c=ci+cj
+                K[i*sz:(i+1)*sz,i*sz:(i+1)*sz]+=rate*V*c[:,None]*c[None,:]
+            else:
+                for a,ca in [(i,ci),(j,cj)]:
+                    for b,cb in [(i,ci),(j,cj)]:
+                        K[a*sz:(a+1)*sz,b*sz:(b+1)*sz]+=rate*V*ca[:,None]*cb[None,:]
+    return (K+K.T)/2
+
+def compute(A,R,X,T):
+    N=64; NT=16
+    yy,wy=nodes(T,A,24)
+    zz,wz=roots_legendre(N+3)
+    projection=wz[None,:]/2*(2*np.arange(N+3)[:,None]+1)*legvander(zz,N+2).T
+    Q=np.array([cross_sections(T*y,A,N+2,320,256) for y in yy])
+    weights=wy*yy*np.exp(-yy)*2/sqrt(pi)
+    angular=Q@projection
+    pair_matrices=[]
+    a=sqrt(1/(1+R)); b=sqrt(R/(1+R)); s=sqrt(.5)
+    for aa,bb,cc,dd in [(s,s,s,s),(s,s,s,-s),(a,b,a,b),(b,a,b,a),(a,b,b,-a)]:
+        V=np.zeros((N+1,N+1),dtype=np.longdouble)
+        for j in range(0,len(yy),12):
+            y=yy[j:j+12]
+            w=weights[j:j+12,None]*angular[j:j+12]
+            V+=vector_bracket(N,np.repeat(y,len(zz)),np.tile(zz,len(y)),w.ravel(),aa,bb,cc,dd)
+        pair_matrices.append(np.asarray(V,dtype=float))
+    V,C,L,H,B=pair_matrices
+    sz=N+1; K=np.zeros((2*sz,2*sz))
+    K[:sz,:sz]+=.25*X*X*sqrt(4*T)*(2*V+C+C.T)
+    K[sz:,sz:]+=.25*(1-X)**2*sqrt(4*T/R)*(2*V+C+C.T)
+    rate=.5*X*(1-X)*sqrt(2*T*(1+R)/R)
+    K[:sz,:sz]+=rate*L; K[sz:,sz:]+=rate*H
+    K[:sz,sz:]+=rate*B; K[sz:,:sz]+=rate*B.T
+    K=(K+K.T)/2
+    sd=np.zeros(2*sz); sh=sd.copy(); null=sd.copy()
+    for i in range(2):
+        mi=[1.,R][i]; xi=[X,1-X][i]
+        sd[i*sz]=(1 if i==0 else -1)*sqrt(T/mi)
+        sh[i*sz+1]=-xi*sqrt(5*T/(2*mi))
+        null[i*sz]=sqrt(mi)
+    # Lift only the conserved total-momentum null direction.
+    K+=np.outer(null,null)/np.dot(null,null)*np.max(np.diag(K))
+    sol=np.linalg.solve(K,np.array([sd,sh]).T)
+    dd,dh=sd@sol; hd,hh=sh@sol
+    conductivity=hh-dh*hd/dd
+    diffusion=X*(1-X)*dd
+    alpha=dh/(X*(1-X)*dd)
+    if R==1.: alpha=0.
+    # The finite tensor kernels are energy polynomials, so this projection
+    # followed by Gaussian integration is exactly their moment contraction.
+    M=np.array([eval_genlaguerre(j,1,yy)/(j+1) for j in range(2*NT+3)])
+    M=(M*(wy*yy*np.exp(-yy)))@Q[:,:2*NT+3]
+    basis=Basis(NT,2)
+    UT=np.zeros((basis.dmax,NT+1,NT+1))
+    y,w=roots_genlaguerre(2*NT+3,1)
+    QQ=np.array([eval_genlaguerre(j,1,y) for j in range(2*NT+3)]).T@M
+    for yi,wi,qi in zip(y,w,QQ):
+        basis.accumulate(UT,yi,wi*2/sqrt(pi),qi)
+    KT=tensor_matrix(UT,T,R,X,NT)
+    source=np.zeros(2*(NT+1));source[0]=X;source[NT+1]=1-X
+    viscosity=T*source@np.linalg.solve(KT,source)
+    return dict(viscosity=float(viscosity),thermal_conductivity=float(conductivity),
+                binary_diffusion=float(diffusion),thermal_diffusion_factor=float(alpha))
+
+if __name__ == '__main__':
+    A,R,X,T=map(float,sys.argv[1:5])
+    print(json.dumps(compute(A,R,X,T),allow_nan=False,separators=(',',':')))
+'''
+Path('/app/output/transport.py').write_text(header+'\n'+scatter+'\n'+basis+'\n'+gen+'\n'+node+'\n'+footer)
+PY
+python3 /app/assemble.py
+python3 -m py_compile /app/output/transport.py
+mkdir -p /app/isolated; cp /app/output/transport.py /app/isolated/
+cd /app/isolated; python3 transport.py 0.8 40 0.05 50 > /ap
+CMD: tail -28 /app/refinehi; tail -28 /app/directmid50; wc -c /app/output/transport.py; cat /app/finalerrhi
+
+OBS: 86966022 -0.2574687525754975
+36 0.024524513919124274 0.034309563544197064 -0.25746927583475177
+38 0.024524515310764074 0.0343095690670262 -0.2574696460225065
+40 0.024524516062630446 0.03430957374173479 -0.25746989642442153
+42 0.024524516541042807 0.03430957748841338 -0.2574700754693858
+44 0.024524516976070977 0.03430958026982251 -0.25747022240295286
+46 0.024524517454290073 0.03430958225054549 -0.25747035236642857
+48 0.024524517941968426 0.034309583700232384 -0.2574704647758198
+50 0.02452451834715714 0.03430958485419324 -0.2574705562098465
+13639 /app/output/transport.py
+root@59537d8bb9aa:/app#
+
+
+#### step 28 02:12:33
+MSG: Analysis: The standalone file has been created and compiles. The intermediate-potential calculation converges smoothly through order 50, and the isolated order-64 test is running. The refined high-temperature quadrature calculation is almost finished.
+Plan: Compare the isolated output with the refined reference and measure runtime. Also run an equal-mass case and a low-temperature case in the isolated directory to verify the JSON interface, symmetry, and high-order stability.
+CMD: tail -26 /app/refinehi; cat /app/finaltesthi /app/finalerrhi
+cd /app/isolated; (date +%s; python3 transport.py 0 1 0.5 0.2; date +%s) > /app/testequal 2>/app/errequal &
+cd /app
+
+CMD: tail -10 /app/refinehi; cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal
+
+OBS: .468890973210193
+34 0.9223956240638594 1.305281833385528 -0.4688962944939701
+36 0.9223961510853252 1.3052843125385531 -0.46890031253261455
+38 0.9223965525974176 1.3052862157414566 -0.4689033853689367
+40 0.9223968621229542 1.3052876939728335 -0.46890576312042126
+42 0.9223971033583634 1.305288854620139 -0.4689076231388083
+44 0.9223972932873981 1.3052897751115966 -0.46890909291699273
+46 0.9223974442392631 1.305290511982271 -0.468910265276588
+48 0.9223975652711335 1.3052911069992197 -0.4689112085992958
+50 0.9223976631106723 1.305291591359955 -0.46891197382092636
+1793499133
+root@59537d8bb9aa:/app#
+
+
+#### step 29 02:13:07
+MSG: Analysis: The refined high-temperature result agrees with the initial quadrature to far better than the requested tolerance. The isolated order-64 and equal-mass tests are still running, so I have not yet confirmed their final output or runtime.
+Plan: Inspect both isolated tests and verify that only one four-member JSON object is printed. Check elapsed time and compare the equal-mass transport values with the converged lower-order calculation.
+CMD: cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s; jobs -l; ls -la /app/output
+
+OBS: pp/testequal /app/errequal; date +%s; jobs -l; ls -la /app/output
+1793499133
+1793499167
+[3]-   786 Running                 python3 transport.py 0.8 40 0.05 50 > /app/finaltesthi 2> /app/finalerrhi &  (wd: /app/isolated)
+[4]+   816 Running                 ( date +%s; python3 transport.py 0 1 0.5 0.2; date +%s ) > /app/testequal 2> /app/errequal &  (wd: /app/isolated)
+total 32
+drwxr-xr-x 1 root root  4096 Nov  1 02:11 .
+drwxr-xr-x 1 root root  4096 Nov  1 02:12 ..
+drwxr-xr-x 2 root root  4096 Nov  1 02:11 __pycache__
+-rw-r--r-- 1 root root 13639 Nov  1 02:11 transport.py
+root@59537d8bb9aa:/app#
+
+
+#### step 30 02:13:47
+MSG: Analysis: Both isolated runs remain active with no error output. The final file is small and self-contained. I will remove the development bytecode directory from the collected output folder before finishing.
+Plan: Continue monitoring the tests. Inspect process memory and elapsed time using /proc, since the container lacks ps, and remove the unnecessary output-folder bytecode cache.
+CMD: rm -rf /app/output/__pycache__; python3 - <<'PY'
+from pathlib import Path
+for p in [786,816]:
+ f=Path(f'/proc/{p}/status')
+ if f.exists():
+  print(p, '\n'.join(x for x in f.read_text().splitlines() if x.startswith(('Name:','VmRSS:','VmPeak:','Threads:'))))
+PY
+cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s
+
+OBS: t@59537d8bb9aa:/app# rm -rf /app/output/__pycache__; python3 - <<'PY'
+> from pathlib import Path
+> for p in [786,816]:
+>  f=Path(f'/proc/{p}/status')
+>  if f.exists():
+>   print(p, '\n'.join(x for x in f.read_text().splitlines() if x.startswith(('Name:','VmRSS:','VmPeak:','Threads:'))))
+> PY
+786 Name:       python3
+VmPeak:   317428 kB
+VmRSS:    132104 kB
+Threads:        1
+816 Name:       bash
+VmPeak:     5272 kB
+VmRSS:      2044 kB
+Threads:        1
+root@59537d8bb9aa:/app# cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s
+1793499133
+1793499197
+root@59537d8bb9aa:/app#
+
+
+#### step 31 02:14:21
+MSG: Analysis: The isolated solver uses roughly 132 MB of resident memory, well below the limit. I will use the waiting time to test scattering accuracy very close to the orbiting threshold, where the angular integrals are most demanding.
+Plan: Compare several scattering quadrature resolutions near the critical collision energy for core ratios 0, 0.4, and 0.8. Continue monitoring the isolated transport tests.
+CMD: OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/orbitcheck 2>&1 &
+import sys,numpy as np
+sys.path.insert(0,'/app')
+from scatter_dev import cross_sections,geom
+for A in [0,.4,.8]:
+ ec=geom(10000,A)[-1]
+ for delta in [-.001,-.00001,.00001,.001]:
+  E=ec*(1+delta)
+  q=cross_sections(E,A,10,320,256)
+  qr=cross_sections(E,A,10,640,512)
+  print(A,delta,'relative errors',np.max(np.abs(q[1:3]/qr[1:3]-1)),np.max(np.abs(q[1:]/qr[1:]-1)),flush=True)
+PY
+cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s
+
+OBS: =1 python3 - <<'PY' > /app/orbitcheck 2>&1 &
+> import sys,numpy as np
+> sys.path.insert(0,'/app')
+> from scatter_dev import cross_sections,geom
+> for A in [0,.4,.8]:
+>  ec=geom(10000,A)[-1]
+>  for delta in [-.001,-.00001,.00001,.001]:
+>   E=ec*(1+delta)
+>   q=cross_sections(E,A,10,320,256)
+>   qr=cross_sections(E,A,10,640,512)
+>   print(A,delta,'relative errors',np.max(np.abs(q[1:3]/qr[1:3]-1)),np.max(np.abs(q[1:]/qr[1:]-1)),flush=True)
+> PY
+[5] 887
+root@59537d8bb9aa:/app# cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s
+1793499133
+1793499251
+root@59537d8bb9aa:/app#
+
+
+#### step 32 02:15:05
+MSG: Analysis: The isolated runs are still active. The solver’s memory use is modest, and the orbiting-threshold scattering comparison is running. No transport errors have been reported.
+Plan: Read the orbiting comparison and isolated outputs, then run a fast viscosity convergence sweep at intermediate core ratios and temperatures. This will check that the fixed tensor order is adequate beyond the two range corners.
+CMD: cat /app/orbitcheck; cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s
+OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/tensorsweep 2>&1 &
+import sys,numpy as np
+sys.path.insert(0,'/app')
+from project_dev import moments,brackets
+from bracket_dev import solve
+for A,T in [(.8,.2),(.4,.2),(0,1),(.4,1),(.8,1),(0,50)]:
+ M=moments(A,T,16,16,240,192);UT=brackets(M,16,2);UV=brackets(M,10,1)
+ for R,X in [(40,.05),(40,.5),(40,.95),(1,.5)]:
+  values=[]
+  for n in [6,8,10,12,14,16]:
+   uv=np.zeros((2*n+1,n+1,n+1));nn=min(n,10);uv[:2*nn+1,:nn+1,:nn+1]=UV[:,:nn+1,:nn+1]
+   for j in range(11,n+1):uv[0,j,j]=1e100
+   values.append(solve(uv,UT[:,:n+1,:n+1],T,R,X,n)[0])
+  print(A,T,R,X,values,flush=True)
+PY
+
+CMD: cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; tail -5 /app/tensorsweep; date +%s
+
+OBS: ,1),(.8,1),(0,50)]:
+>  M=moments(A,T,16,16,240,192);UT=brackets(M,16,2);UV=brackets(M,10,1)
+>  for R,X in [(40,.05),(40,.5),(40,.95),(1,.5)]:
+>   values=[]
+>   for n in [6,8,10,12,14,16]:
+>    uv=np.zeros((2*n+1,n+1,n+1));nn=min(n,10);uv[:2*nn+1,:nn+1,:nn+1]=UV[:,:nn+1,:nn+1]
+>    for j in range(11,n+1):uv[0,j,j]=1e100
+>    values.append(solve(uv,UT[:,:n+1,:n+1],T,R,X,n)[0])
+>   print(A,T,R,X,values,flush=True)
+> PY
+[5] 909
+root@59537d8bb9aa:/app# cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; tail -5 /app/tensorsweep; date +%s
+1793499133
+1793499285
+root@59537d8bb9aa:/app#
+
+
+#### step 33 02:15:39
+MSG: Analysis: The orbiting-threshold comparisons show very small errors in the leading cross sections and acceptable errors in the higher angular moments. The isolated runs have not finished yet; I need their final results and timings before declaring the program complete.
+Plan: Inspect process CPU time and the ongoing viscosity sweep, then poll the isolated outputs. Verify that the solver remains comfortably within the 600-second limit.
+CMD: python3 - <<'PY'
+from pathlib import Path
+for p in Path('/proc').iterdir():
+ if not p.name.isdigit():continue
+ try:
+  cmd=(p/'cmdline').read_bytes().replace(b'\0',b' ').decode()
+  if 'python3 transport.py' in cmd and 'bash' not in cmd:
+   s=(p/'stat').read_text().split();print(p.name,cmd,'CPU seconds',(int(s[13])+int(s[14]))/100)
+ except (OSError,UnicodeError):pass
+PY
+cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; tail -10 /app/tensorsweep; date +%s
+
+OBS: 1e100
+   values.append(solve(uv,UT[:,:n+1,:n+1],T,R,X,n)[0])
+  print(A,T,R,X,values,flush=True)
+PY
+
+root@59537d8bb9aa:/app# cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; tail -10 /app/tensorsweep; date +%s
+1793499133
+moments 6.966816186904907
+basis 16 2 shape (203796, 7770) nnz 947682
+brackets 2 4.428384065628052
+basis 10 1 shape (17424, 2024) nnz 41184
+brackets 1 0.1926136016845703
+Traceback (most recent call last):
+  File "<stdin>", line 10, in <module>
+ValueError: could not broadcast input array from shape (21,7,7) into shape (13,7,7)
+1793499319
+root@59537d8bb9aa:/app#
+
+
+#### step 34 02:16:22
+MSG: Analysis: The isolated runs have used about 180–205 CPU seconds so far, with no errors. The viscosity sweep failed because of a development-script array-slicing mistake; it does not affect transport.py.
+Plan: Correct the sweep’s slicing and rerun it. Continue polling the isolated tests, then compare their final outputs with the converged references.
+CMD: OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/tensorsweep 2>&1 &
+import sys,numpy as np
+sys.path.insert(0,'/app')
+from project_dev import moments,brackets
+from bracket_dev import solve
+for A,T in [(.8,.2),(.4,.2),(0,1),(.4,1),(.8,1),(0,50)]:
+ M=moments(A,T,16,16,240,192);UT=brackets(M,16,2);UV=brackets(M,10,1)
+ for R,X in [(40,.05),(40,.5),(40,.95),(1,.5)]:
+  values=[]
+  for n in [6,8,10,12,14,16]:
+   uv=np.zeros((2*n+1,n+1,n+1));nn=min(n,10);uv[:2*nn+1,:nn+1,:nn+1]=UV[:2*nn+1,:nn+1,:nn+1]
+   for j in range(11,n+1):uv[0,j,j]=1e100
+   values.append(solve(uv,UT[:,:n+1,:n+1],T,R,X,n)[0])
+  print(A,T,R,X,values,flush=True)
+PY
+cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s
+
+OBS: 2),(.4,.2),(0,1),(.4,1),(.8,1),(0,50)]:
+>  M=moments(A,T,16,16,240,192);UT=brackets(M,16,2);UV=brackets(M,10,1)
+>  for R,X in [(40,.05),(40,.5),(40,.95),(1,.5)]:
+>   values=[]
+>   for n in [6,8,10,12,14,16]:
+>    uv=np.zeros((2*n+1,n+1,n+1));nn=min(n,10);uv[:2*nn+1,:nn+1,:nn+1]=UV[:2*nn+1,:nn+1,:nn+1]
+>    for j in range(11,n+1):uv[0,j,j]=1e100
+>    values.append(solve(uv,UT[:,:n+1,:n+1],T,R,X,n)[0])
+>   print(A,T,R,X,values,flush=True)
+> PY
+[5] 958
+root@59537d8bb9aa:/app# cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s
+1793499133
+1793499363
+root@59537d8bb9aa:/app#
+
+
+#### step 35 02:16:52
+MSG: Analysis: The corrected viscosity sweep is running. The isolated order-64 tests are taking longer than the development order-50 tests, but remain within the time limit so far.
+Plan: Read the completed outputs as soon as they become available and assess whether order 64 adds numerical stability or merely unnecessary runtime. Check the viscosity sweep for any case requiring a larger tensor order.
+CMD: cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; tail -15 /app/tensorsweep; date +%s; jobs -l
+
+OBS: e
+    r = gufunc(a, b, signature=signature)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/numpy/linalg/_linalg.py", line 163, in _raise_linalgerror_singular
+    raise LinAlgError("Singular matrix")
+numpy.linalg.LinAlgError: Singular matrix
+1793499392
+[3]-   786 Running                 python3 transport.py 0.8 40 0.05 50 > /app/finaltesthi 2> /app/finalerrhi &  (wd: /app/isolated)
+[4]+   816 Running                 ( date +%s; python3 transport.py 0 1 0.5 0.2; date +%s ) > /app/testequal 2> /app/errequal &  (wd: /app/isolated)
+root@59537d8bb9aa:/app#
+
+
+#### step 36 02:17:23
+MSG: Analysis: The viscosity sweep’s second failure came from its artificial padded vector matrix, not from the viscosity calculation. I will test the tensor system directly instead. The isolated runs still have no error output.
+Plan: Run a tensor-only convergence sweep using the final tensor-matrix routine. Poll the isolated runs and inspect their output and runtime.
+CMD: OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/tensorsweep 2>&1 &
+import sys,numpy as np
+sys.path.insert(0,'/app');sys.path.insert(0,'/app/output')
+from project_dev import moments,brackets
+from transport import tensor_matrix
+for A,T in [(.8,.2),(.4,.2),(0,1),(.4,1),(.8,1),(0,50)]:
+ M=moments(A,T,16,16,240,192);UT=brackets(M,16,2)
+ for R,X in [(40,.05),(40,.5),(40,.95),(1,.5)]:
+  values=[]
+  for n in [6,8,10,12,14,16]:
+   K=tensor_matrix(UT[:,:n+1,:n+1],T,R,X,n);s=np.zeros(2*(n+1));s[0]=X;s[n+1]=1-X
+   values.append(T*s@np.linalg.solve(K,s))
+  print(A,T,R,X,values,flush=True)
+PY
+cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s
+
+OBS: t_dev import moments,brackets
+> from transport import tensor_matrix
+> for A,T in [(.8,.2),(.4,.2),(0,1),(.4,1),(.8,1),(0,50)]:
+>  M=moments(A,T,16,16,240,192);UT=brackets(M,16,2)
+>  for R,X in [(40,.05),(40,.5),(40,.95),(1,.5)]:
+>   values=[]
+>   for n in [6,8,10,12,14,16]:
+>    K=tensor_matrix(UT[:,:n+1,:n+1],T,R,X,n);s=np.zeros(2*(n+1));s[0]=X;s[n+1]=1-X
+>    values.append(T*s@np.linalg.solve(K,s))
+>   print(A,T,R,X,values,flush=True)
+> PY
+[5] 999
+root@59537d8bb9aa:/app# cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s
+1793499133
+1793499422
+root@59537d8bb9aa:/app#
+
+
+#### step 37 02:18:07
+MSG: Analysis: The tensor-only sweep is running and avoids the artificial vector padding that caused the development-test failures. The final program itself has reported no errors.
+Plan: Wait for the isolated transport results and tensor convergence tables. Compare them against the earlier references and verify the final output folder contains only the standalone program.
+CMD: cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; tail -15 /app/tensorsweep; date +%s
+
+OBS: 64(0.5800013261265808), np.float64(0.580001826132106), np.float64(0.58000224
+16259865), np.float64(0.5800024086885355)]
+0 1 40 0.95 [np.float64(0.20243423103573668), np.float64(0.20243423510575595), np.float64(0.20243426187784294), np.float64(0.20243429139763455), np.float64(0.20
+24343064734686), np.float64(0.2024343099305358)]
+0 1 1 0.5 [np.float64(0.1106707118932322), np.float64(0.11067071251098173), np.float64(0.1106707125311581), np.float64(0.11067071253556907), np.float64(0.110670
+71253628694), np.float64(0.11067071253635224)]
+moments 3.8875269889831543
+1793499457
+root@59537d8bb9aa:/app#
+
+
+#### step 38 02:18:34
+MSG: Analysis: The tensor-only sweep shows strong viscosity convergence at the tested intermediate conditions. The isolated order-64 runs are still active, so the outstanding checks are their final numerical stability and runtime.
+Plan: Inspect the completed tensor sweep and process timings. If the equal-mass calculation agrees with the converged reference, add an equal-mass fast path to avoid computing redundant pair brackets.
+CMD: cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; tail -14 /app/tensorsweep; date +%s; python3 - <<'PY'
+from pathlib import Path
+for pid in [786,818]:
+ try:
+  s=Path(f'/proc/{pid}/stat').read_text().split();print(pid,'cpu',(int(s[13])+int(s[14]))/100)
+ except OSError: pass
+PY
+
+OBS: np.float64(10.1404846945443), np.float64(10.140484793652366), np.float64(10.14048480
+7234692), np.float64(10.140484808051344)]
+0 50 40 0.95 [np.float64(3.5499613714831706), np.float64(3.549961467035651), np.float64(3.5499614680373517), np.float64(3.549961470154876), np.float64(3.5499614
+72929162), np.float64(3.5499614750539106)]
+0 50 1 0.5 [np.float64(1.9336283065180944), np.float64(1.9336284507787833), np.float64(1.9336284626309854), np.float64(1.933628463905459), np.float64(1.93362846
+40724193), np.float64(1.9336284640978865)]
+1793499494
+786 cpu 358.18
+818 cpu 334.28
+root@59537d8bb9aa:/app#
+
+
+#### step 39 02:19:18
+MSG: Analysis: The viscosity sweep is complete and shows that order 16 is adequate across the tested conditions. The isolated order-64 runs have used about 334–358 CPU seconds and are approaching completion. Their results will determine whether the final vector order is numerically safe.
+Plan: Poll for the final JSON outputs, validate their fields and values, and compare the equal-mass result with the earlier converged calculation. Then make any necessary runtime optimization and run a final isolated check.
+CMD: cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s; jobs -l
+
+OBS: root@59537d8bb9aa:/app# cat /app/finaltesthi /app/finalerrhi /app/testequal /app/errequal; date +%s; jobs -l
+{"viscosity":8.522916476159427,"thermal_conductivity":0.92239800267648,"binary_diffusion":1.305293309190165,"thermal_diffusion_factor":-0.4689146585432783}
+1793499133
+[3]-  Done                    python3 transport.py 0.8 40 0.05 50 > /app/finaltesthi 2> /app/finalerrhi  (wd: /app/isolated)
+(wd now: /app)
+1793499528
+[4]+   816 Running                 ( date +%s; python3 transport.py 0 1 0.5 0.2; date +%s ) > /app/testequal 2> /app/errequal &  (wd: /app/isolated)
+root@59537d8bb9aa:/app#
+
+
+#### step 40 02:19:49
+MSG: Analysis: The difficult isolated order-64 run completed successfully and printed exactly the required four-member JSON object. Its result is consistent with the order-50 convergence trend and refined quadrature. The equal-mass run is still finishing.
+Plan: Confirm the equal-mass output, then reduce redundant bracket work for equal masses. Run additional checks at an intermediate Lennard-Jones condition and a nearly equal mass ratio to test stability and the small thermal-diffusion factor.
+CMD: cat /app/testequal /app/errequal; date +%s; rm -rf /app/output/__pycache__
+
+OBS: New Terminal Output:
+
+root@59537d8bb9aa:/app# cat /app/testequal /app/errequal; date +%s; rm -rf /app/output/__pycache__
+1793499133
+{"viscosity":0.024183012345626587,"thermal_conductivity":0.09078670301388517,"binary_diffusion":0.030247948253147368,"thermal_diffusion_factor":0.0}
+1793499539
+[4]+  Done                    ( date +%s; python3 transport.py 0 1 0.5 0.2; date +%s ) > /app/testequal 2> /app/errequal  (wd: /app/isolated)
+(wd now: /app)
+1793499569
+root@59537d8bb9aa:/app#
+
+
+#### step 41 02:20:12
+MSG: Analysis: The equal-mass isolated run completed successfully, with thermal diffusion exactly zero and the other properties agreeing with the converged reference. Both isolated tests stayed below 600 seconds. I can safely avoid three redundant pair-bracket calculations when the masses are equal.
+Plan: Add an equal-mass bracket reuse optimization without changing the numerical method. Then test an intermediate Lennard-Jones mixture and a nearly equal-mass mixture, including the small thermal-diffusion factor.
+CMD: python3 - <<'PY'
+p='/app/output/transport.py'
+s=open(p).read()
+s=s.replace('for aa,bb,cc,dd in [(s,s,s,s),(s,s,s,-s),(a,b,a,b),(b,a,b,a),(a,b,b,-a)]:', 'pairs=[(s,s,s,s),(s,s,s,-s)]\n    if R!=1.: pairs += [(a,b,a,b),(b,a,b,a),(a,b,b,-a)]\n    for aa,bb,cc,dd in pairs:')
+s=s.replace('V,C,L,H,B=pair_matrices', 'if R==1.:\n        pair_matrices += [pair_matrices[0],pair_matrices[0],pair_matrices[1]]\n    V,C,L,H,B=pair_matrices')
+open(p,'w').write(s)
+PY
+cp /app/output/transport.py /app/isolated/transport.py
+cd /app/isolated; (date +%s; python3 transport.py 0 40 0.5 1; date +%s) > /app/testlj1 2>/app/errlj1 &
+(date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s) > /app/testnear1 2>/app/errnear1 &
+cd /app
+
+OBS: ce('V,C,L,H,B=pair_matrices', 'if R==1.:\n        pair_matrices += [pair_matrices[0],pair_matrices[0],pair_matrices[1]]\n    V,C,L,H,B=pair_matrices'
+)
+> open(p,'w').write(s)
+> PY
+root@59537d8bb9aa:/app# cp /app/output/transport.py /app/isolated/transport.py
+root@59537d8bb9aa:/app# cd /app/isolated; (date +%s; python3 transport.py 0 40 0.5 1; date +%s) > /app/testlj1 2>/app/errlj1 &
+[1] 1105
+root@59537d8bb9aa:/app/isolated# (date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s) > /app/testnear1 2>/app/errnear1 &
+[2] 1106
+root@59537d8bb9aa:/app/isolated# cd /app
+root@59537d8bb9aa:/app#
+
+
+#### step 42 02:20:50
+MSG: Analysis: The standalone solver has passed the difficult high-temperature and equal-mass checks. Two more isolated tests are running. I will use a smaller vector expansion for modest mass contrasts, where convergence is much faster, while retaining order 64 for the slowest-converging heavy-rich mixtures.
+Plan: Select conservative vector orders based on mass ratio and composition, keeping order 64 for the difficult cases. Test the reduced-order nearly equal-mass case against the existing order-64 run, and run the low-temperature, high-mass-ratio corner.
+CMD: python3 - <<'PY'
+p='/app/output/transport.py';s=open(p).read()
+s=s.replace('N=64; NT=16', '# Mass contrast controls the slow velocity-space convergence.\n    N=32 if R<=3. else (48 if R<=15. or X>=.25 else 64)\n    NT=16')
+open(p,'w').write(s)
+PY
+cp /app/output/transport.py /app/isolated/transport.py
+cd /app/isolated; (date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s) > /app/testnear1fast 2>/app/errnear1fast &
+cd /app; cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1
+
+CMD: cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testnear1fast /app/errnear1fast; date +%s
+
+OBS: 4)\n    NT=16'
+)
+> open(p,'w').write(s)
+> PY
+root@59537d8bb9aa:/app# cp /app/output/transport.py /app/isolated/transport.py
+root@59537d8bb9aa:/app# cd /app/isolated; (date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s) > /app/testnear1fast 2>/app/errnear1fast &
+[3] 1130
+root@59537d8bb9aa:/app/isolated# cd /app; cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1
+1793499611
+1793499611
+root@59537d8bb9aa:/app# cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testnear1fast /app/errnear1fast; date +%s
+1793499611
+1793499611
+1793499630
+1793499630
+root@59537d8bb9aa:/app#
+
+
+#### step 43 02:21:50
+MSG: Analysis: The reduced-order and order-64 nearly equal-mass tests are running for comparison. I will also improve worst-case runtime by calculating independent pair brackets on the two CPUs available to the checker.
+Plan: Parallelize the independent pair-bracket integrations with two worker processes and extend the energy tail for additional high-order margin. Keep all output in the main process, then test the revised standalone program in the isolated directory.
+CMD: python3 - <<'PY'
+p='/app/output/transport.py';s=open(p).read()
+s=s.replace('from math import factorial, comb, sqrt, pi, prod','from math import factorial, comb, sqrt, pi, prod\nfrom concurrent.futures import ProcessPoolExecutor')
+s=s.replace('ymax=260','ymax=360')
+start=s.index('    for aa,bb,cc,dd in pairs:')
+end=s.index('    if R==1.:\n        pair_matrices',start)
+s=s[:start]+'''    with ProcessPoolExecutor(max_workers=2) as pool:
+        futures=[pool.submit(integrated_pair,N,yy,zz,weights,angular,pair) for pair in pairs]
+        pair_matrices=[future.result() for future in futures]
+'''+s[end:]
+where=s.index('def compute(')
+s=s[:where]+'''def integrated_pair(N,yy,zz,weights,angular,pair):
+    aa,bb,cc,dd=pair
+    V=np.zeros((N+1,N+1),dtype=np.longdouble)
+    for j in range(0,len(yy),12):
+        y=yy[j:j+12]
+        w=weights[j:j+12,None]*angular[j:j+12]
+        V+=vector_bracket(N,np.repeat(y,len(zz)),np.tile(zz,len(y)),w.ravel(),aa,bb,cc,dd)
+    return np.asarray(V,dtype=float)
+
+'''+s[where:]
+open(p,'w').write(s)
+PY
+cp /app/output/transport.py /app/isolated/transport.py
+cd /app/isolated; (date +%s; python3 transport.py 0 40 0.05 0.2; date +%s) > /app/testlowparallel 2>/app/errlowparallel &
+cd /app; cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testnear1fast /app/errnear1fast
+
+CMD: cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testnear1fast /app/errnear1fast /app/testlowparallel /app/errlowparallel; date +%s
+
+OBS: pp/isolated/transport.py
+root@59537d8bb9aa:/app# cd /app/isolated; (date +%s; python3 transport.py 0 40 0.05 0.2; date +%s) > /app/testlowparallel 2>/app/errlowparallel &
+[4] 1162
+root@59537d8bb9aa:/app/isolated# cd /app; cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testnear1fast /app/errnear1fast
+1793499611
+1793499611
+1793499630
+root@59537d8bb9aa:/app# cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testnear1fast /app/errnear1fast /app/testlowparallel /app/errlowparallel;
+ date +%s
+1793499611
+1793499611
+1793499630
+1793499690
+1793499690
+root@59537d8bb9aa:/app#
+
+
+#### step 44 02:22:38
+MSG: Analysis: The revised program uses two worker processes for independent pair brackets and a longer energy tail. Several validation runs are active, including a low-temperature, high-mass-ratio case. The final solver still prints only from the main process.
+Plan: Collect the reduced-order versus order-64 comparison and the parallel low-temperature result. Inspect the final file for accidental diagnostics or file writes, and confirm its output and memory behavior.
+CMD: cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testnear1fast /app/errnear1fast /app/testlowparallel /app/errlowparallel; date +%s; jobs -l; grep -nE 'print|save|open|N=|ymax=' /app/output/transport.py
+
+OBS: rrnear1 &  (wd: /app/isolated)
+[3]-  1130 Running                 ( date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s ) > /app/testnear1fast 2> /app/errnear1fast &  (wd: /app/isola
+ted)
+[4]+  1162 Running                 ( date +%s; python3 transport.py 0 40 0.05 0.2; date +%s ) > /app/testlowparallel 2> /app/errlowparallel &  (wd: /app/isolate
+d)
+126:  self.N=N;self.l=l;self.dmax=2*N+l
+266:def nodes(T,a,n=12,ymax=360):
+311:    N=32 if R<=3. else (48 if R<=15. or X>=.25 else 64)
+368:    print(json.dumps(compute(A,R,X,T),allow_nan=False,separators=(',',':')))
+root@59537d8bb9aa:/app#
+
+
+#### step 45 02:23:27
+MSG: Analysis: The final file contains no auxiliary-file writes and only one print statement, for the required JSON object. The active validation runs are sharing the container’s CPUs, so their wall-clock times are not representative of an isolated checker run.
+Plan: Retain order 64 for all substantial mass contrasts to maximize truncation-error margin, and use order 32 only for mass ratios at or below 3. Continue collecting the validation results and check the worker processes’ memory use.
+CMD: python3 - <<'PY'
+p='/app/output/transport.py';s=open(p).read();s=s.replace('N=32 if R<=3. else (48 if R<=15. or X>=.25 else 64)','N=32 if R<=3. else 64');open(p,'w').write(s)
+from pathlib import Path
+for p in Path('/proc').iterdir():
+ if not p.name.isdigit():continue
+ try:
+  cmd=(p/'cmdline').read_bytes().replace(b'\0',b' ').decode()
+  if cmd.startswith('python3 transport.py'):
+   st=(p/'stat').read_text().split();status=(p/'status').read_text().splitlines()
+   print(p.name,cmd,'CPU',(int(st[13])+int(st[14]))/100,next(x for x in status if x.startswith('VmRSS')))
+ except OSError: pass
+PY
+cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testnear1fast /app/errnear1fast /app/testlowparallel /app/errlowparallel; date +%s
+
+OBS: [3]-  Done                    ( date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s ) > /app/testnear1fast 2> /app/errnear1fast  (wd: /app/isolated)
+(wd now: /app)
+root@59537d8bb9aa:/app# cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testnear1fast /app/errnear1fast /app/testlowparallel /app/errlowparallel;
+ date +%s
+1793499611
+1793499611
+1793499630
+{"viscosity":0.19016464905125574,"thermal_conductivity":0.7136409114310975,"binary_diffusion":0.24577801544152356,"thermal_diffusion_factor":-0.0001956536938119
+825}
+1793499762
+1793499690
+1793499777
+root@59537d8bb9aa:/app#
+
+
+#### step 46 02:24:17
+MSG: Analysis: The reduced-order nearly equal-mass test completed successfully and produced a small, finite thermal-diffusion factor. The parallel low-temperature test uses about 300 MB across its processes, well below the memory limit. I have retained order 64 for all mass ratios above 3 to give additional accuracy margin.
+Plan: Compare the nearly equal-mass result with the ongoing order-64 reference and wait for the low-temperature parallel result. Then run the final file once under a minimal environment to verify the checker interface and exit status.
+CMD: cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testnear1fast /app/errnear1fast /app/testlowparallel /app/errlowparallel; date +%s; jobs -l
+
+OBS: sion":0.24577801544152356,"thermal_diffusion_factor":-0.0001956536938119
+825}
+1793499762
+1793499690
+1793499827
+[1]   1105 Running                 ( date +%s; python3 transport.py 0 40 0.5 1; date +%s ) > /app/testlj1 2> /app/errlj1 &  (wd: /app/isolated)
+[2]-  1106 Running                 ( date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s ) > /app/testnear1 2> /app/errnear1 &  (wd: /app/isolated)
+[4]+  1162 Running                 ( date +%s; python3 transport.py 0 40 0.05 0.2; date +%s ) > /app/testlowparallel 2> /app/errlowparallel &  (wd: /app/isolate
+d)
+root@59537d8bb9aa:/app#
+
+
+#### step 47 02:25:36
+MSG: Analysis: The reduced-order test is complete, while the two reference runs and parallel low-temperature test are still sharing the available CPUs. No errors have been reported.
+Plan: Allow the current tests to finish before starting more CPU-heavy work. Inspect the final source and validate the completed JSON objects while waiting.
+CMD: python3 - <<'PY'
+import ast,json
+from pathlib import Path
+p=Path('/app/output/transport.py');ast.parse(p.read_text())
+for f in ['/app/finaltesthi','/app/testequal','/app/testnear1fast']:
+ for line in Path(f).read_text().splitlines():
+  if line.startswith('{'):
+   obj=json.loads(line);assert set(obj)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+   assert all(isinstance(x,(int,float)) for x in obj.values())
+   print(f,obj)
+print('program bytes',p.stat().st_size,'regular file',p.is_file(),'symlink',p.is_symlink())
+PY
+cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testlowparallel /app/errlowparallel; date +%s
+
+OBS: viscosity': 0.024183012345626587, 'thermal_conductivity': 0.09078670301388517, 'binary_diffusion': 0.030247948253147368, 'thermal_diffusion_fac
+tor': 0.0}
+/app/testnear1fast {'viscosity': 0.19016464905125574, 'thermal_conductivity': 0.7136409114310975, 'binary_diffusion': 0.24577801544152356, 'thermal_diffusion_fa
+ctor': -0.0001956536938119825}
+program bytes 14122 regular file True symlink False
+root@59537d8bb9aa:/app# cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testlowparallel /app/errlowparallel; date +%s
+1793499611
+1793499611
+1793499690
+1793499876
+root@59537d8bb9aa:/app#
+
+
+#### step 48 02:26:53
+MSG: Analysis: The final source passes syntax and file-format checks, and completed runs print exactly four numeric JSON members. The remaining numerical validation runs are still active because they are sharing the container’s CPUs.
+Plan: Poll the remaining runs and compare their outputs with the earlier convergence tests. Once they finish, perform one final run with the checker’s minimal environment and verify exit status 0.
+CMD: cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testlowparallel /app/errlowparallel; date +%s; jobs -l
+
+OBS: rnear1 /app/testlowparallel /app/errlowparallel; date +%s; jobs -l
+1793499611
+1793499611
+1793499690
+1793499953
+[1]   1105 Running                 ( date +%s; python3 transport.py 0 40 0.5 1; date +%s ) > /app/testlj1 2> /app/errlj1 &  (wd: /app/isolated)
+[2]-  1106 Running                 ( date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s ) > /app/testnear1 2> /app/errnear1 &  (wd: /app/isolated)
+[4]+  1162 Running                 ( date +%s; python3 transport.py 0 40 0.05 0.2; date +%s ) > /app/testlowparallel 2> /app/errlowparallel &  (wd: /app/isolate
+d)
+root@59537d8bb9aa:/app#
+
+
+#### step 49 02:28:11
+MSG: Analysis: The remaining tests are computational checks of numerical convergence, not unresolved interface issues. I will inspect their CPU usage to distinguish genuine runtime problems from contention between simultaneous validation jobs.
+Plan: Read process CPU times and poll the pending outputs. Keep the current final source unchanged unless these tests reveal an accuracy or runtime issue.
+CMD: python3 - <<'PY'
+from pathlib import Path
+for p in Path('/proc').iterdir():
+ if not p.name.isdigit():continue
+ try:
+  cmd=(p/'cmdline').read_bytes().replace(b'\0',b' ').decode()
+  if cmd.startswith('python3 transport.py'):
+   s=(p/'stat').read_text().split();print(p.name,cmd,'CPU seconds',(int(s[13])+int(s[14]))/100)
+ except OSError:pass
+PY
+cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testlowparallel /app/errlowparallel; date +%s
+
+OBS: ().split();print(p.name,cmd,'CPU seconds',(int(s[13])+int(s[14]))/100)
+>  except OSError:pass
+> PY
+1109 python3 transport.py 0 40 0.5 1  CPU seconds 225.45
+1110 python3 transport.py 0.35 1.001 0.37 1.7  CPU seconds 225.3
+1165 python3 transport.py 0 40 0.05 0.2  CPU seconds 17.34
+1186 python3 transport.py 0 40 0.05 0.2  CPU seconds 149.0
+1187 python3 transport.py 0 40 0.05 0.2  CPU seconds 148.44
+root@59537d8bb9aa:/app# cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testlowparallel /app/errlowparallel; date +%s
+1793499611
+1793499611
+1793499690
+1793500031
+root@59537d8bb9aa:/app#
+
+
+#### step 50 02:29:34
+MSG: Analysis: The pending runs are progressing normally in CPU time; their longer wall times come from four CPU-heavy processes sharing the container. The final program’s two-worker calculation should complete much faster when run alone on the checker’s two CPUs.
+Plan: Wait for these numerical checks to complete, then compare the order-32 and order-64 nearly equal-mass outputs. Finally, run the actual final file alone under the minimal environment and verify its timing and exit status.
+CMD: cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testlowparallel /app/errlowparallel; date +%s; jobs -l
+
+OBS: rnear1 /app/testlowparallel /app/errlowparallel; date +%s; jobs -l
+1793499611
+1793499611
+1793499690
+1793500114
+[1]   1105 Running                 ( date +%s; python3 transport.py 0 40 0.5 1; date +%s ) > /app/testlj1 2> /app/errlj1 &  (wd: /app/isolated)
+[2]-  1106 Running                 ( date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s ) > /app/testnear1 2> /app/errnear1 &  (wd: /app/isolated)
+[4]+  1162 Running                 ( date +%s; python3 transport.py 0 40 0.05 0.2; date +%s ) > /app/testlowparallel 2> /app/errlowparallel &  (wd: /app/isolate
+d)
+root@59537d8bb9aa:/app#
+
+
+#### step 51 02:30:54
+MSG: Analysis: The active validation runs have not finished yet, but their CPU usage shows steady progress and no errors. The difficult cases already checked agree with independently refined quadratures and successive expansion orders.
+Plan: Poll the remaining numerical tests. Once they complete, perform the final minimal-environment execution and clean the output folder.
+CMD: cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testlowparallel /app/errlowparallel; date +%s; jobs -l
+
+OBS: rnear1 /app/testlowparallel /app/errlowparallel; date +%s; jobs -l
+1793499611
+1793499611
+1793499690
+1793500194
+[1]   1105 Running                 ( date +%s; python3 transport.py 0 40 0.5 1; date +%s ) > /app/testlj1 2> /app/errlj1 &  (wd: /app/isolated)
+[2]-  1106 Running                 ( date +%s; python3 transport.py 0.35 1.001 0.37 1.7; date +%s ) > /app/testnear1 2> /app/errnear1 &  (wd: /app/isolated)
+[4]+  1162 Running                 ( date +%s; python3 transport.py 0 40 0.05 0.2; date +%s ) > /app/testlowparallel 2> /app/errlowparallel &  (wd: /app/isolate
+d)
+root@59537d8bb9aa:/app#
+
+
+#### step 52 02:32:15
+MSG: Analysis: The remaining validation jobs are still progressing without errors. I will check their CPU usage again to ensure that the waits reflect CPU contention rather than a stalled calculation.
+Plan: Inspect active transport processes and their CPU times, then read any completed outputs. Keep the final source unchanged while these checks finish.
+CMD: python3 - <<'PY'
+from pathlib import Path
+for p in Path('/proc').iterdir():
+ if not p.name.isdigit():continue
+ try:
+  cmd=(p/'cmdline').read_bytes().replace(b'\0',b' ').decode()
+  if cmd.startswith('python3 transport.py'):
+   s=(p/'stat').read_text().split();print(p.name,cmd,'state',s[2],'CPU seconds',(int(s[13])+int(s[14]))/100)
+ except OSError:pass
+PY
+cat /app/testlj1 /app/errlj1 /app/testnear1 /app/errnear1 /app/testlowparallel /app/errlowparallel; date +%s
+
+OBS: ate +%s
+1793499611
+{"viscosity":0.5800024086031127,"thermal_conductivity":0.19594850202397693,"binary_diffusion":0.10531612228406,"thermal_diffusion_factor":-0.009500485554602946}
+1793500248
+1793499611
+{"viscosity":0.19016464905125574,"thermal_conductivity":0.7136409114258864,"binary_diffusion":0.2457780154399929,"thermal_diffusion_factor":-0.00019565369314038
+85}
+1793500250
+1793499690
+{"viscosity":0.1512743122272747,"thermal_conductivity":0.01665787896255707,"binary_diffusion":0.021821247385063233,"thermal_diffusion_factor":-0.124613660591863
+63}
+1793500201
+1793500275
+root@59537d8bb9aa:/app#
+
+
+#### step 53 02:33:11
+MSG: Analysis: All pending validation runs completed successfully. The order-32 and order-64 nearly equal-mass results agree far within tolerance, and the parallel low-temperature, high-mass-ratio result follows the converged order-40 trend. The longer wall times of these simultaneous tests were caused by CPU contention.
+Plan: Run the final program alone under the checker’s minimal environment, with an empty input stream and only transport.py in the working directory. Record elapsed time and exit status, then verify the output JSON and clean the collected output folder.
+CMD: cp /app/output/transport.py /app/isolated/transport.py; rm -rf /app/isolated/__pycache__; mkdir -p /app/testhome /app/testtmp
+python3 - <<'PY' > /app/minenvlog 2>&1 &
+import subprocess,time,json
+start=time.monotonic()
+p=subprocess.run(['python3','transport.py','0.8','40','0.05','50'],cwd='/app/isolated',env={'HOME':'/app/testhome','TMPDIR':'/app/testtmp','PATH':'/usr/local/bin:/usr/bin:/bin','LANG':'C.UTF-8'},stdin=subprocess.DEVNULL,capture_output=True,timeout=600)
+print('elapsed',time.monotonic()-start,'exit status',p.returncode,flush=True)
+print(p.stdout.decode(),end='',flush=True)
+print('stderr',p.stderr.decode(),flush=True)
+obj=json.loads(p.stdout);assert p.returncode==0 and len(obj)==4
+assert set(obj)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+assert all(isinstance(v,(int,float)) for v in obj.values())
+PY
+rm -rf /app/output/__pycache__; ls -la /app/output
+
+CMD: cat /app/minenvlog
+
+OBS: ',flush=True)
+> print('stderr',p.stderr.decode(),flush=True)
+> obj=json.loads(p.stdout);assert p.returncode==0 and len(obj)==4
+> assert set(obj)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+> assert all(isinstance(v,(int,float)) for v in obj.values())
+> PY
+[1] 1387
+root@59537d8bb9aa:/app# rm -rf /app/output/__pycache__; ls -la /app/output
+total 28
+drwxr-xr-x 1 root root  4096 Nov  1 02:19 .
+drwxr-xr-x 1 root root  4096 Nov  1 02:32 ..
+-rw-r--r-- 1 root root 14122 Nov  1 02:22 transport.py
+root@59537d8bb9aa:/app# cat /app/minenvlog
+root@59537d8bb9aa:/app#
+
+
+#### step 54 02:34:28
+MSG: Analysis: The final minimal-environment run is underway, with no competing transport jobs. The output directory now contains only the regular transport.py file. Previous convergence and quadrature tests support the selected numerical settings.
+Plan: Wait for the isolated final run, then verify its elapsed time, exit status, JSON format, and agreement with the earlier high-temperature result.
+CMD: cat /app/minenvlog; date +%s
+
+OBS: New Terminal Output:
+
+root@59537d8bb9aa:/app# cat /app/minenvlog; date +%s
+1793500408
+root@59537d8bb9aa:/app#
+
+
+#### step 55 02:35:44
+MSG: Analysis: The final run is still computing and has not reported an error. Its only remaining checks are successful completion, runtime under 600 seconds, and the final JSON output.
+Plan: Poll the final minimal-environment run. When it completes, compare its output with the previous high-temperature calculation and confirm that the output folder remains clean.
+CMD: cat /app/minenvlog; jobs -l
+
+OBS: pp/isolated',env={'HOME':'/app/testhome','TMPDIR':'/app/testtmp','PATH':'/usr/local/bi
+n:/usr/bin:/bin','LANG':'C.UTF-8'},stdin=subprocess.DEVNULL,capture_output=True,timeout=600)
+print('elapsed',time.monotonic()-start,'exit status',p.returncode,flush=True)
+print(p.stdout.decode(),end='',flush=True)
+print('stderr',p.stderr.decode(),flush=True)
+obj=json.loads(p.stdout);assert p.returncode==0 and len(obj)==4
+assert set(obj)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+assert all(isinstance(v,(int,float)) for v in obj.values())
+PY
+ &
+root@59537d8bb9aa:/app#
+
+
+#### step 56 02:36:55
+MSG: Analysis: The final isolated run remains active. Earlier tests used well below the memory limit, and the final two-worker version has no auxiliary-file dependencies or diagnostic standard output.
+Plan: Inspect the final run’s process CPU times and memory, then wait for its measured completion and JSON validation.
+CMD: python3 - <<'PY'
+from pathlib import Path
+for p in Path('/proc').iterdir():
+ if not p.name.isdigit():continue
+ try:
+  cmd=(p/'cmdline').read_bytes().replace(b'\0',b' ').decode()
+  if cmd.startswith('python3 transport.py'):
+   s=(p/'stat').read_text().split();st=(p/'status').read_text().splitlines()
+   print(p.name,cmd,'cpu',(int(s[13])+int(s[14]))/100,next(x for x in st if x.startswith('VmRSS')))
+ except OSError:pass
+PY
+cat /app/minenvlog
+
+OBS: line').read_bytes().replace(b'\0',b' ').decode()
+>   if cmd.startswith('python3 transport.py'):
+>    s=(p/'stat').read_text().split();st=(p/'status').read_text().splitlines()
+>    print(p.name,cmd,'cpu',(int(s[13])+int(s[14]))/100,next(x for x in st if x.startswith('VmRSS')))
+>  except OSError:pass
+> PY
+1390 python3 transport.py 0.8 40 0.05 50  cpu 17.85 VmRSS:         81976 kB
+1398 python3 transport.py 0.8 40 0.05 50  cpu 176.73 VmRSS:        74140 kB
+1399 python3 transport.py 0.8 40 0.05 50  cpu 169.24 VmRSS:        53828 kB
+root@59537d8bb9aa:/app# cat /app/minenvlog
+root@59537d8bb9aa:/app#
+
+
+#### step 57 02:38:05
+MSG: Analysis: The final minimal-environment run is nearing completion. Its main process and two workers remain well below the memory limit, and the workers have accumulated roughly 170 CPU seconds each.
+Plan: Poll for completion, then verify the measured runtime, exit status, and final output. No source changes are planned unless this final check exposes a problem.
+CMD: cat /app/minenvlog; ls -l /app/output/transport.py
+
+OBS: New Terminal Output:
+
+root@59537d8bb9aa:/app# cat /app/minenvlog; ls -l /app/output/transport.py
+-rw-r--r-- 1 root root 14122 Nov  1 02:22 /app/output/transport.py
+root@59537d8bb9aa:/app#
+
+
+#### step 58 02:39:09
+MSG: Analysis: The final run is still active, with no error reported. The standalone file remains a regular 14 KB Python program, and all prior numerical validation checks passed.
+Plan: Wait for the final minimal-environment run to finish and inspect its runtime and output before declaring completion.
+CMD: cat /app/minenvlog; jobs -l; date +%s
+
+OBS: ed',env={'HOME':'/app/testhome','TMPDIR':'/app/testtmp','PATH':'/usr/local/bi
+n:/usr/bin:/bin','LANG':'C.UTF-8'},stdin=subprocess.DEVNULL,capture_output=True,timeout=600)
+print('elapsed',time.monotonic()-start,'exit status',p.returncode,flush=True)
+print(p.stdout.decode(),end='',flush=True)
+print('stderr',p.stderr.decode(),flush=True)
+obj=json.loads(p.stdout);assert p.returncode==0 and len(obj)==4
+assert set(obj)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+assert all(isinstance(v,(int,float)) for v in obj.values())
+PY
+
+1793500689
+root@59537d8bb9aa:/app#
+
+
+#### step 59 02:39:16
+MSG: Analysis: The final minimal-environment test completed in 274.64 seconds with exit status 0, empty standard error, and exactly the required four-member numeric JSON object. Its values agree with the earlier high-temperature calculation. Scattering-quadrature and expansion-order convergence checks also passed for the tested range corners and intermediate mixtures. The standalone program is ready at /app/output/transport.py.
+Plan: Remove any bytecode cache and confirm that the collected output directory contains only the regular transport.py file.
+CMD: rm -rf /app/output/__pycache__; ls -la /app/output; test -f /app/output/transport.py && test ! -L /app/output/transport.py
+
+CMD: 
+OBS: Current terminal state:
+New Terminal Output:
+
+root@59537d8bb9aa:/app# rm -rf /app/output/__pycache__; ls -la /app/output; test -f /app/output/transport.py && test ! -L /app/output/transport.py
+total 28
+drwxr-xr-x 1 root root  4096 Nov  1 02:19 .
+drwxr-xr-x 1 root root  4096 Nov  1 02:32 ..
+-rw-r--r-- 1 root root 14122 Nov  1 02:22 transport.py
+root@59537d8bb9aa:/app#
+
+
+Are you sure you want to mark the task as complete? This will trigger your solution to be graded and you won't be able to make any further corrections. If so, include "task_complete": true in your JSON response again.
+
+#### step 60 02:39:19
+MSG: Analysis: The final file is present as a regular, non-link file at /app/output/transport.py. The output directory contains no extra files. The final isolated test exited successfully in about 275 seconds and produced the required JSON object.
+Plan: No further changes are needed.
+CMD: 
+OBS: New Terminal Output:
+
+root@59537d8bb9aa:/app#
+
+

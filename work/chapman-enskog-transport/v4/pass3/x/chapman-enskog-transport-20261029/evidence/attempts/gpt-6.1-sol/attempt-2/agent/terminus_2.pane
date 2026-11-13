@@ -1,0 +1,983 @@
+[?2004hroot@ed1bf3fd1688:/app# asciinema rec --stdin /logs/agent/recording.cast
+[?2004l[0;32masciinema: recording asciicast to /logs/agent/recording.cast[0m
+[0;32masciinema: press <ctrl-d> or type "exit" when you're done[0m
+[?2004hroot@ed1bf3fd1688:/app# clear
+[?2004l[H[J[3J[?2004hroot@ed1bf3fd1688:/app# mkdir -p /app/output; python3 - <<'PY'
+[?2004l[?2004h> import numpy, scipy, sympy
+[?2004l[?2004h> print(numpy.__version__,scipy.__version__,sympy.__version__)
+[?2004l[?2004h> PY
+[?2004l2.3.3 1.18.1 1.14.0
+[?2004hroot@ed1bf3fd1688:/app# cat > /app/kernels.py <<'PY'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from scipy.special import eval_genlaguerre, gammaln, roots_genlaguerre
+[?2004l[?2004h> from math import comb, factorial, pi
+[?2004l[?2004h> 
+[?2004l[?2004h> def cmul(a):
+[?2004l[?2004h>     b=np.zeros_like(a)
+[?2004l[?2004h>     for l in range(a.shape[-1]-1):
+[?2004l[?2004h>         b[...,l+1]+=a[...,l]*(l+1)/(2*l+1)
+[?2004l[?2004h>     for l in range(1,a.shape[-1]):
+[?2004l[?2004h>         b[...,l-1]+=a[...,l]*l/(2*l+1)
+[?2004l[?2004h>     return b
+[?2004l[?2004h> 
+[?2004l[?2004h> def base(z,N,nu,L):
+[?2004l[?2004h>     z=np.asarray(z)
+[?2004l[?2004h>     out=np.zeros((len(z),N,N,L))
+[?2004l[?2004h>     for i in range(N):
+[?2004l[?2004h>         for j in range(N):
+[?2004l[?2004h>             for k in range(min(i,j)+1):
+[?2004l[?2004h>                 p=i+j-2*k
+[?2004l[?2004h>                 v=(z/2)**k/factorial(k)*comb(p,i-k)/2**p*eval_genlaguerre(p,nu+k-1,z)
+[?2004l[?2004h>                 for l in range(min(k,L-1)+1):
+[?2004l[?2004h>                     c=(2*l+1)*2**k*factorial(k)**2/(factorial(k-l)*factorial(k+l+1))
+[?2004l[?2004h>                     out[:,i,j,l]+=c*v
+[?2004l[?2004h>     return out
+[?2004l[?2004h> 
+[?2004l[?2004h> R={(0,0):(0,4),(1,0):(-2,-2),(0,1):(-2,-2),(1,1):(2,2)}
+[?2004l[?2004h> def polymul(a,b):
+[?2004l[?2004h>     out={}
+[?2004l[?2004h>     for (i,j),v in a.items():
+[?2004l[?2004h>         for (k,l),w in b.items():
+[?2004l[?2004h>             key=i+k,j+l
+[?2004l[?2004h>             val=np.convolve(v,w)
+[?2004l[?2004h>             if key not in out: out[key]=np.zeros(len(val))
+[?2004l[?2004h>             if len(out[key])<len(val): out[key]=np.pad(out[key],(0,len(val)-len(out[key])))
+[?2004l[?2004h>             out[key][:len(val)]+=val
+[?2004l[?2004h>     return out
+[?2004l[?2004h> 
+[?2004l[?2004h> def mult(f,poly):
+[?2004l[?2004h>     out=np.zeros_like(f)
+[?2004l[?2004h>     N=f.shape[1]
+[?2004l[?2004h>     for (i,j),coef in poly.items():
+[?2004l[?2004h>         if i>=N or j>=N: continue
+[?2004l[?2004h>         v=f[:,:N-i,:N-j,:]
+[?2004l[?2004h>         for c in coef:
+[?2004l[?2004h>             if c: out[:,i:,j:,:]+=c*v
+[?2004l[?2004h>             v=cmul(v)
+[?2004l[?2004h>     return out
+[?2004l[?2004h> 
+[?2004l[?2004h> def kernels(z,N):
+[?2004l[?2004h>     z=np.asarray(z); L=N+2
+[?2004l[?2004h>     f25=base(z,N,2.5,L)
+[?2004l[?2004h>     f35=base(z,N,3.5,L)
+[?2004l[?2004h>     f45=base(z,N,4.5,L)
+[?2004l[?2004h>     f55=base(z,N,5.5,L)
+[?2004l[?2004h>     zz=z[:,None,None,None]
+[?2004l[?2004h>     vec=.75*f25+zz/8*mult(f35,R)
+[?2004l[?2004h>     ten=zz**2/96*mult(f55,polymul(R,R))-zz**2/12*mult(f35,{(0,0):(1,0,-1)})+5*zz/24*mult(f45,R)+5/8*f35
+[?2004l[?2004h>     return vec,ten
+[?2004l[?2004h> 
+[?2004l[?2004h> def solve(T,z,weights,Q,N=9):
+[?2004l[?2004h>     vec,ten=kernels(z,N)
+[?2004l[?2004h>     w=weights*4*np.sqrt(T/pi)
+[?2004l[?2004h>     even=np.arange(Q.shape[1])%2==0
+[?2004l[?2004h>     even[0]=False
+[?2004l[?2004h>     allq=Q.copy();allq[:,0]=0
+[?2004l[?2004h>     qe=Q*even
+[?2004l[?2004h>     bd=np.einsum('zijl,zl,z->ij',vec,allq,w)/3
+[?2004l[?2004h>     bh=np.einsum('zijl,zl,z->ij',vec,qe,w)*2/3
+[?2004l[?2004h>     bv=np.einsum('zijl,zl,z->ij',ten,qe,w)/5
+[?2004l[?2004h>     results=[]
+[?2004l[?2004h>     for n in range(2,N+1):
+[?2004l[?2004h>         def inv_entry(b,k):
+[?2004l[?2004h>             s=np.sqrt(np.maximum(np.diag(b[:n,:n]),1e-300))
+[?2004l[?2004h>             mat=b[:n,:n]/s[:,None]/s[None,:]
+[?2004l[?2004h>             rhs=np.zeros(n);rhs[k]=1/s[k]
+[?2004l[?2004h>             return np.linalg.solve(mat,rhs)[k]/s[k]
+[?2004l[?2004h>         results.append((T/4*inv_entry(bv,0),25*T/8*inv_entry(bh,1),T/2*inv_entry(bd,0)))
+[?2004l[?2004h>     return np.array(results)
+[?2004l[?2004h> 
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>     z,w=roots_genlaguerre(64,1)
+[?2004l[?2004h>     Q=np.full((len(z),11),pi)
+[?2004l[?2004h>     print(solve(1,z,w,Q))
+[?2004l[?2004h>     v,t=kernels(np.array([1.]),3)
+[?2004l[?2004h>     print('kernel',v[0,0,0],t[0,0,0])
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@ed1bf3fd1688:/app# OPENBLAS_NUM_THREADS=1 python3 /app/kernels.py
+[?2004lTraceback (most recent call last):
+  File "/app/kernels.py", line 83, in <module>
+    print(solve(1,z,w,Q))
+          ^^^^^^^^^^^^^^
+  File "/app/kernels.py", line 77, in solve
+    results.append((T/4*inv_entry(bv,0),25*T/8*inv_entry(bh,1),T/2*inv_entry(bd,0)))
+                                               ^^^^^^^^^^^^^^^
+  File "/app/kernels.py", line 76, in inv_entry
+    return np.linalg.solve(mat,rhs)[k]/s[k]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/numpy/linalg/_linalg.py", line 471, in solve
+    r = gufunc(a, b, signature=signature)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/numpy/linalg/_linalg.py", line 163, in _raise_linalgerror_singular
+    raise LinAlgError("Singular matrix")
+numpy.linalg.LinAlgError: Singular matrix
+[?2004hroot@ed1bf3fd1688:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/kernels.py'
+[?2004l[?2004h> s=open(p).read().replace('def inv_entry(b,k):\n            s=np.sqrt(np.maximum(np.diag(b[:n,:n]),1e-300))\n            mat=b[:n,:n]/s[:,None]/s[None,:]\n            rhs=np.zeros(n);rhs[k]=1/s[k]\n            return np.linalg.solve(mat,rhs)[k]/s[k]', 'def inv_entry(b,k,start=0):\n            b=b[start:n,start:n];k-=start\n            s=np.sqrt(np.maximum(np.diag(b),1e-300))\n            mat=b/s[:,None]/s[None,:]\n            rhs=np.zeros(n-start);rhs[k]=1/s[k]\n            return np.linalg.solve(mat,rhs)[k]/s[k]').replace('inv_entry(bh,1)','inv_entry(bh,1,1)')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004la [?2004h> PY
+[?2004l[?2004hroot@ed1bf3fd1688:/app# OPENBLAS_NUM_THREADS=1 python3 /app/kernels.py
+[?2004l[[0.1789277  0.66115967 0.21521887]
+ [0.17910884 0.67618602 0.21552531]
+ [0.17913124 0.67756868 0.21556971]
+ [0.17913508 0.67777756 0.21557834]
+ [0.17913589 0.6778191  0.21558037]
+ [0.17913609 0.67782899 0.21558092]
+ [0.17913615 0.67783168 0.21558108]
+ [0.17913617 0.67783249 0.21558114]]
+kernel [0.75 0.5  0.   0.   0.  ] [0.625      0.83333333 0.16666667 0.         0.        ]
+[?2004hroot@ed1bf3fd1688:/app# cat > /app/scatter.py <<'PY'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from scipy.special import roots_legendre
+[?2004l[?2004h> from scipy.optimize import brentq
+[?2004l[?2004h> from math import pi
+[?2004l[?2004h> from functools import lru_cache
+[?2004l[?2004h> 
+[?2004l[?2004h> @lru_cache(None)
+[?2004l[?2004h> def gauss(n):
+[?2004l[?2004h>     x,w=roots_legendre(n)
+[?2004l[?2004h>     return (x+1)/2,w/2
+[?2004l[?2004h> 
+[?2004l[?2004h> class Scatter:
+[?2004l[?2004h>     def __init__(self,a,L=11,tol=1e-7):
+[?2004l[?2004h>         self.a=a;self.d=1-a;self.L=L;self.tol=tol
+[?2004l[?2004h>         ad=a/self.d
+[?2004lrul[?2004h>         self.um=brentq(lambda u:4-20*u**6+7*ad*u-26*ad*u**7,0,1,xtol=1e-15)
+[?2004l[?2004h>         self.ec=self.H(self.um)
+[?2004l[?2004h>         self.calls=0;self.anglecalls=0
+[?2004l[?2004h>     def H(self,u):
+[?2004l[?2004h>         ad=self.a/self.d
+[?2004l[?2004h>         return 8*u**6-20*u**12+12*ad*u**7-24*ad*u**13
+[?2004l[?2004h>     def Hp(self,u):
+[?2004l[?2004h>         ad=self.a/self.d
+[?2004l[?2004h>         return 48*u**5-240*u**11+84*ad*u**6-312*ad*u**12
+[?2004l[?2004h>     def B(self,u,E):
+[?2004l[?2004h>         return (self.a+self.d/u)**2*(1+4*(u**6-u**12)/E)
+[?2004l[?2004h>     def minusBp(self,u,E):
+[?2004l[?2004h>         return 2*self.d*(self.a+self.d/u)/u**2*(1-self.H(u)/E)
+[?2004l[?2004h>     def getH(self,x,u,E):
+[?2004l[?2004h>         # Factor the exact turning-point zero before evaluating the radicand.
+[?2004l[?2004h>         ar=self.a*u
+[?2004l[?2004h>         c6=4*u**6/E;c12=4*u**12/E
+[?2004l[?2004h>         ss=np.ones_like(x)
+[?2004l[?2004h>         sums={}
+[?2004l[?2004h>         for k in range(1,12):
+[?2004l[?2004h>             ss=ss*x+1
+[?2004l[?2004h>             if k in (3,4,5,9,10,11): sums[k]=ss.copy()
+[?2004l[?2004h>         return self.d**2*(1+x)+2*self.d*ar*x+x*x*(c12*(self.d**2*sums[9]+2*self.d*ar*sums[10]+ar*ar*sums[11])-c6*(self.d**2*sums[3]+2*self.d*ar*sums[4]+ar*ar*sums[5]))
+[?2004l[?2004h>     def theta_rule(self,u,E,uc,bc,n,inner):
+[?2004l[?2004h>         self.anglecalls+=len(u)
+[?2004l[?2004h>         q,w=gauss(n);q=q[None,:];w=w[None,:]
+[?2004l[?2004h>         ur=u[:,None];bsq=np.maximum(0,self.B(ur,E));b=np.sqrt(bsq)
+[?2004l[?2004h>         if inner and uc is not None:
+[?2004l[?2004h>             rc=self.a+self.d/uc
+[?2004l[?2004h>             beta=self.d/(uc**2*rc)*self.Hp(uc)/E
+[?2004l[?2004h>             delta=np.maximum((bc-bsq)/rc**2,1e-30)
+[?2004l[?2004h>             h=np.sqrt(delta/beta)
+[?2004l[?2004h>             # Left of the former barrier maximum.
+[?2004l[?2004h>             S=np.arcsinh(uc/h)
+[?2004l[?2004h>             s=S*q
+[?2004l[?2004h>             v=uc-h*np.sinh(s);x=v/ur
+[?2004l[?2004h>             F=(1-x)*self.getH(x,ur,E)
+[?2004l[?2004h>             jac=h*np.cosh(s)*S
+[?2004l[?2004h>             left=np.sum(w*jac/((self.d+self.a*v)*np.sqrt(np.maximum(F,1e-300))),axis=1)
+[?2004l[?2004h>             # Right side, with the turning-point square root removed as well.
+[?2004l[?2004h>             S=np.arcsinh((ur-uc)/h)
+[?2004l[?2004h>             s=S*(1-q*q)
+[?2004l[?2004h>             gap=2*h*np.cosh((S+s)/2)*np.sinh(S*q*q/2)
+[?2004l[?2004h>             v=ur-gap;x=v/ur
+[?2004l[?2004h>             F=gap/ur*self.getH(x,ur,E)
+[?2004l[?2004h>             jac=2*S*q*h*np.cosh(s)
+[?2004l[?2004h>             right=np.sum(w*jac/((self.d+self.a*v)*np.sqrt(np.maximum(F,1e-300))),axis=1)
+[?2004l[?2004h>             return (b[:,0]*self.d)*(left+right)
+[?2004l[?2004h>         H1=self.getH(np.ones_like(ur),ur,E)
+[?2004l[?2004h>         Hnear=self.getH(np.full_like(ur,1-1e-5),ur,E)
+[?2004l[?2004h>         slope=np.abs((Hnear-H1)/1e-5)
+[?2004l[?2004h>         h=np.sqrt(np.maximum(H1,1e-28)/(np.maximum(H1,1e-28)+slope))
+[?2004l[?2004h>         S=np.arcsinh(1/h)
+[?2004l[?2004h>         s=S*q;t=h*np.sinh(s)
+[?2004l[?2004h>         x=1-t*t
+[?2004l[?2004h>         H=self.getH(x,ur,E)
+[?2004l[?2004h>         jac=h*np.cosh(s)*S
+[?2004l[?2004h>         v=2*b*self.d*ur*np.sum(w*jac/((self.d+self.a*ur*x)*np.sqrt(np.maximum(H,1e-300))),axis=1)[:,None]
+[?2004l[?2004h>         return v[:,0]
+[?2004l[?2004h>     def theta(self,u,E,uc,bc,inner):
+[?2004l[?2004h>         old=self.theta_rule(u,E,uc,bc,24,inner)
+[?2004l[?2004h>         new=self.theta_rule(u,E,uc,bc,48,inner)
+[?2004l[?2004h>         err=np.abs(new-old)
+[?2004l[?2004h>         todo=np.where(err>2e-9)[0]
+[?2004l[?2004h>         n=96
+[?2004l[?2004h>         while len(todo) and n<=1536:
+[?2004l[?2004h>             v=self.theta_rule(u[todo],E,uc,bc,n,inner)
+[?2004l[?2004h>             err=np.abs(v-new[todo])
+[?2004l[?2004h>             new[todo]=v
+[?2004l[?2004h>             todo=todo[err>2e-9]
+[?2004l[?2004h>             n*=2
+[?2004l[?2004h>         return new
+[?2004l[?2004h>     def integrand(self,x,E,uc,bc,ui,u0,inner):
+[?2004l[?2004h>         if uc is None:
+[?2004l[?2004h>             u=u0*x;du=np.full_like(x,u0)
+[?2004l[?2004h>         elif inner:
+[?2004l[?2004h>             u=ui+(u0-ui)*x**3;du=3*(u0-ui)*x*x
+[?2004l[?2004h>         else:
+[?2004l[?2004h>             u=uc*(1-(1-x)**2);du=2*uc*(1-x)
+[?2004l[?2004h>         th=self.theta(u,E,uc,bc,inner)
+[?2004l[?2004h>         delta=2*np.cos(th)**2
+[?2004l[?2004h>         out=np.zeros((len(x),self.L));out[:,1]=delta
+[?2004l[?2004h>         for l in range(1,self.L-1):
+[?2004l[?2004h>             out[:,l+1]=((2*l+1)*(delta+(1-delta)*out[:,l])-l*out[:,l-1])/(l+1)
+[?2004l[?2004h>         return out*(pi*du*self.minusBp(u,E))[:,None]
+[?2004l[?2004h>     def __call__(self,E,n=96):
+[?2004l[?2004h>         self.calls+=1
+[?2004l[?2004h>         u0=((1+np.sqrt(1+E))/2)**(1/6)
+[?2004l[?2004h>         if E<self.ec:
+[?2004l[?2004h>             uc=brentq(lambda u:self.H(u)-E,0,self.um,xtol=1e-15)
+[?2004l[?2004h>             bc=self.B(uc,E)
+[?2004l[?2004h>             uh=brentq(lambda u:self.H(u)-E,self.um,u0,xtol=1e-15)
+[?2004l[?2004h>             ui=brentq(lambda u:self.B(u,E)-bc,uh,u0,xtol=1e-15)
+[?2004l[?2004h>             branches=[False,True]
+[?2004l[?2004h>         else:
+[?2004l[?2004h>             uc=bc=ui=None;branches=[False]
+[?2004l[?2004h>         def rule(n):
+[?2004l[?2004h>             x,w=gauss(n)
+[?2004l[?2004h>             return sum(w@self.integrand(x,E,uc,bc,ui,u0,inner) for inner in branches)
+[?2004l[?2004h>         old=rule(n)
+[?2004l[?2004h>         new=rule(n*2)
+[?2004l[?2004h>         while np.max(np.abs(new[1:]-old[1:])/np.maximum(np.abs(new[1:]),1e-20))>self.tol and n<1536:
+[?2004l[?2004h>             n*=2;old=new;new=rule(n*2)
+[?2004l[?2004h>         return new
+[?2004l[?2004h> 
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>     import time,sys
+[?2004l[?2004h>     a=float(sys.argv[1]) if len(sys.argv)>1 else 0
+[?2004l[?2004h>     sc=Scatter(a)
+[?2004l[?2004h>     print('critical',sc.ec,sc.um)
+[?2004l[?2004h>     for E in [0.001,0.01,0.1,0.5,0.79,0.8,0.81,1,2,10,100,10000]:
+[?2004l[?2004h>         t=time.time();Q=sc(E)
+[?2004l[?2004h>         print(E, Q[1:5],time.time()-t,sc.anglecalls,flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@ed1bf3fd1688:/app# OPENBLAS_NUM_THREADS=1 python3 /app/scatter.py 0
+[?2004lcritical 0.8 0.76472449133173
+0.001 [ 78.47372657  89.07670761 108.36559058 113.37672427] 0.09247159957885742 2864
+0.01 [36.33719404 41.38066803 50.252935   52.64349063] 0.020826101303100586 5697
+0.1 [16.82784211 19.24420002 23.28855955 24.45143325] 0.01761603355407715 8496
+0.5 [ 9.71601726 11.26632547 13.53835026 14.29802375] 0.016628026962280273 11281
+0.79 [ 8.17975668  9.67402722 11.54716419 12.27180029] 0.020162105560302734 14120
+0.8 [ 8.14089614  9.63360155 11.49661973 12.22030427] 0.2471787929534912 27536
+0.81 [ 8.10515281  9.59181053 11.44918919 12.16810473] 0.017733097076416016 34029
+1 [ 7.5377255   8.85666264 10.73747574 11.23445603] 0.003679990768432617 35429
+2 [4.6053634  6.72579559 8.34985574 9.2719986 ] 0.0014750957489013672 36005
+10 [2.6872665  3.17728552 3.50509126 3.79986285] 0.0013782978057861328 36581
+100 [1.86684024 2.21293486 2.40459997 2.53434422] 0.001272439956665039 37157
+10000 [0.88923073 1.07297748 1.18152604 1.25861105] 0.0012769699096679688 37733
+[?2004hroot@ed1bf3fd1688:/app# cat > /app/check_scatter.py <<'PY'
+[?2004l[?2004h> from scatter import *
+[?2004l[?2004h> from scipy.integrate import quad
+[?2004l[?2004h> for a in [0,.5,.8]:
+[?2004l[?2004h>     sc=Scatter(a)
+[?2004l[?2004h>     for E in [.01,.5,sc.ec*.999,sc.ec*1.001,10,1000]:
+[?2004l[?2004h>         u0=((1+np.sqrt(1+E))/2)**(1/6)
+[?2004l[?2004h>         uc=bc=None
+[?2004l[?2004h>         if E<sc.ec:
+[?2004l[?2004h>             uc=brentq(lambda u:sc.H(u)-E,0,sc.um)
+[?2004l[?2004h>             bc=sc.B(uc,E)
+[?2004l[?2004h>             uh=brentq(lambda u:sc.H(u)-E,sc.um,u0)
+[?2004l[?2004h>             ui=brentq(lambda u:sc.B(u,E)-bc,uh,u0)
+[?2004l[?2004h>             us=[uc*.1,uc*.9,uc*.999,ui+(u0-ui)*.001,ui+(u0-ui)*.5]
+[?2004l[?2004h>         else: us=[u0*.1,u0*.5,u0*.8,u0*.99]
+[?2004l[?2004h>         for u in us:
+[?2004l[?2004h>             b=np.sqrt(sc.B(u,E))
+[?2004l[?2004h>             def f(t):
+[?2004l[?2004h>                 x=1-t*t
+[?2004l[?2004h>                 return 2*b*sc.d*u/((sc.d+sc.a*u*x)*np.sqrt(sc.getH(np.array(x),np.array(u),E)))
+[?2004l[?2004h>             ref=quad(f,0,1,epsabs=1e-10,epsrel=1e-10,limit=1000)[0]
+[?2004l[?2004h>             val=sc.theta(np.array([u]),E,uc,bc,uc is not None and u>uc)[0]
+[?2004l[?2004h>             print(a,E,u,val,ref,val-ref,flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@ed1bf3fd1688:/app# OPENBLAS_NUM_THREADS=1 python3 /app/check_scatter.py > /app/check_scatter.log 2>&1; tail -20 /app/check_scatter.log
+[?2004l0.8 0.5 0.5020846027243762 2.8721597067425217 2.8721597067425377 -1.5987211554602254e-14
+0.8 0.5 0.9857250509168822 3.0043995698547046 3.004399569854743 -3.863576125695545e-14
+0.8 0.5 1.0018002330872524 1.0801996211485139 1.0801996211485116 2.220446049250313e-15
+0.8 5.510080164748115 0.0792857448414438 1.57079663299299 1.5707966329929883 1.7763568394002505e-15
+0.8 5.510080164748115 0.7135717035729942 1.9420429510694772 1.9420429510694852 -7.993605777301127e-15
+0.8 5.510080164748115 0.7920645909660236 5.132613052492595 5.132613052492891 -2.957634137601417e-13
+0.8 5.510080164748115 0.8045571887632726 7.473853717951272 7.47385371795102 2.5224267119483557e-13
+0.8 5.510080164748115 0.9523466840054838 1.6615916543988445 1.6615916543988414 3.1086244689504383e-15
+0.8 5.521111356269132 0.11005439102810646 1.5707986153574345 1.5707986153574323 2.220446049250313e-15
+0.8 5.521111356269132 0.5502719551405323 1.6260017328382748 1.626001732838268 6.661338147750939e-15
+0.8 5.521111356269132 0.8804351282248517 2.2188223940091047 2.218822394009117 -1.2434497875801753e-14
+0.8 5.521111356269132 1.0895384711782539 0.4456137043540841 0.44561370435408953 -5.440092820663267e-15
+0.8 10 0.11368043257197913 1.5707978695419134 1.5707978695419111 2.220446049250313e-15
+0.8 10 0.5684021628598956 1.6070682552398738 1.6070682552398665 7.327471962526033e-15
+0.8 10 0.909443460575833 1.7398046242386456 1.7398046242386584 -1.2878587085651816e-14
+0.8 10 1.1254362824625934 0.4168432360840617 0.4168432360840676 -5.88418203051333e-15
+0.8 1000 0.15926373103815747 1.5707964507262597 1.5707964507262568 2.886579864025407e-15
+0.8 1000 0.7963186551907873 1.5727811913542438 1.5727811913542347 9.103828801926284e-15
+0.8 1000 1.2741098483052598 1.3773610323517107 1.3773610323517254 -1.4654943925052066e-14
+0.8 1000 1.5767109372777588 0.35503046354465867 0.35503046354466505 -6.38378239159465e-15
+[?2004hroot@ed1bf3fd1688:/app# cat > /app/driver.py <<'PY'
+[?2004l[?2004h> import os
+[?2004l[?2004h> os.environ['OPENBLAS_NUM_THREADS']='1'
+[?2004l[?2004h> os.environ['OMP_NUM_THREADS']='1'
+[?2004l[?2004h> from scatter import Scatter,gauss
+[?2004l[?2004h> from kernels import solve
+[?2004l[?2004h> import numpy as np,time,sys
+[?2004l[?2004h> 
+[?2004l[?2004h> def calculate(a,T,n=24,N=12,width=.75,tol=1e-7,save=None):
+[?2004l[?2004h>     sc=Scatter(a,N+2,tol)
+[?2004l[?2004h>     lo=np.log(1e-5);hi=np.log(100.)
+[?2004l[?2004h>     edges=list(np.linspace(lo,hi,int(np.ceil((hi-lo)/width))+1))
+[?2004l[?2004h>     crit=np.log(sc.ec/T)
+[?2004l[?2004h>     if lo<crit<hi:
+[?2004l[?2004h>         edges.append(crit)
+[?2004l[?2004h>         # Resolve the weak nonanalyticity at the orbiting critical energy.
+[?2004l[?2004h>         for delta in [.02,.1]:
+[?2004l[?2004h>             if lo<crit-delta<hi: edges.append(crit-delta)
+[?2004l[?2004h>             if lo<crit+delta<hi: edges.append(crit+delta)
+[?2004l[?2004h>     edges=np.unique(edges)
+[?2004l[?2004h>     x,w=gauss(n)
+[?2004l[?2004h>     z=[];weights=[]
+[?2004l[?2004h>     for l,r in zip(edges[:-1],edges[1:]):
+[?2004l[?2004h>         zz=np.exp(l+(r-l)*x)
+[?2004l[?2004h>         z.extend(zz);weights.extend(w*(r-l)*zz**2*np.exp(-zz))
+[?2004l[?2004h>     z=np.array(z);weights=np.array(weights)
+[?2004l[?2004h>     t=time.time()
+[?2004l[?2004h>     Q=[]
+[?2004l[?2004h>     for i,zz in enumerate(z):
+[?2004l[?2004h>         Q.append(sc(T*zz))
+[?2004l[?2004h>         if i%100==0: print('progress',i,len(z),time.time()-t,file=sys.stderr,flush=True)
+[?2004l[?2004h>     Q=np.array(Q)
+[?2004l[?2004h>     if save: np.savez(save,z=z,weights=weights,Q=Q,T=T,a=a)
+[?2004l[?2004h>     print('scattering time',time.time()-t,sc.anglecalls,file=sys.stderr)
+[?2004l[?2004h>     values=solve(T,z,weights,Q,N)
+[?2004l[?2004h>     print('total time',time.time()-t,file=sys.stderr)
+[?2004l[?2004h>     return values
+[?2004l[?2004h> if __name__=='__main__':
+[?2004l[?2004h>     a,T=map(float,sys.argv[1:3]);n=int(sys.argv[3]) if len(sys.argv)>3 else 24
+[?2004l[?2004h>     print(calculate(a,T,n,save=f'/app/data_{a}_{T}_{n}.npz'))
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@ed1bf3fd1688:/app# OPENBLAS_NUM_THREADS=1 python3 /app/driver.py 0 1 16 > /app/run01.log 2>&1 &
+[?2004l[1] 242
+[?2004hroot@ed1bf3fd1688:/app# OPENBLAS_NUM_THREADS=1 python3 /app/driver.py 0.8 0.1 16 > /app/run80.log 2>&1 &
+[?2004l[2] 243
+[?2004hroot@ed1bf3fd1688:/app# wait; tail -16 /app/run01.log; tail -16 /app/run80.log
+[?2004l^C
+[2]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/driver.py 0.8 0.1 16 > /app/run80.log 2>&1
+[?2004hroot@ed1bf3fd1688:/app# tail -20 /app/run01.log; tail -20 /app/run80.log; ps -eo pid,etime,time,args | grep '[p]ython3 /app/driver'
+[?2004lprogress 0 432 0.19062399864196777
+progress 100 432 9.579060077667236
+progress 200 432 17.463114261627197
+progress 300 432 24.414794206619263
+progress 400 432 24.916353464126587
+scattering time 24.95959210395813 2077721
+progress 0 432 0.3183259963989258
+progress 100 432 8.560505628585815
+progress 200 432 11.38759183883667
+progress 300 432 14.244746208190918
+progress 400 432 16.284503698349
+scattering time 16.433616876602173 1363650
+total time 17.61492085456848
+[[0.03864956 0.1436425  0.05040828]
+ [0.03866841 0.14562788 0.05044325]
+ [0.03867037 0.14577359 0.05044748]
+ [0.03867065 0.1457922  0.05044818]
+ [0.03867071 0.1457954  0.05044832]
+ [0.03867072 0.14579607 0.05044835]
+ [0.03867072 0.14579623 0.05044836]
+ [0.03867072 0.14579627 0.05044837]
+ [0.03867072 0.14579628 0.05044837]
+ [0.03867072 0.14579629 0.05044837]
+ [0.03867072 0.14579629 0.05044837]]
+bash: ps: command not found
+[?2004hroot@ed1bf3fd1688:/app# tail -20 /app/run01.log; jobs
+[?2004lprogress 0 432 0.19062399864196777
+progress 100 432 9.579060077667236
+progress 200 432 17.463114261627197
+progress 300 432 24.414794206619263
+progress 400 432 24.916353464126587
+scattering time 24.95959210395813 2077721
+total time 27.129583597183228
+[[0.11066669 0.41499658 0.14694585]
+ [0.11067062 0.41500202 0.14695295]
+ [0.11067062 0.41503397 0.14695322]
+ [0.11067068 0.415034   0.14695323]
+ [0.11067071 0.4150348  0.14695325]
+ [0.11067071 0.4150352  0.14695325]
+ [0.11067071 0.41503528 0.14695325]
+ [0.11067071 0.4150353  0.14695325]
+ [0.11067071 0.4150353  0.14695325]
+ [0.11067071 0.4150353  0.14695325]
+ [0.11067071 0.4150353  0.14695325]]
+[1]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/driver.py 0 1 16 > /app/run01.log 2>&1
+[?2004hroot@ed1bf3fd1688:/app# OPENBLAS_NUM_THREADS=1 python3 /app/driver.py 0 1 32 > /app/run01_32.log 2>&1 &
+[?2004l[1] 308
+[?2004hroot@ed1bf3fd1688:/app# OPENBLAS_NUM_THREADS=1 python3 /app/driver.py 0.8 0.1 32 > /app/run80_32.log 2>&1 &
+[?2004l[2] 309
+[?2004hroot@ed1bf3fd1688:/app# ls -lh /app/data*; tail -4 /app/run01_32.log; tail -4 /app/run80_32.log
+[?2004l-rw-r--r-- 1 root root 56K Oct 29 08:41 /app/data_0.0_1.0_16.npz
+-rw-r--r-- 1 root root 56K Oct 29 08:40 /app/data_0.8_0.1_16.npz
+[?2004hroot@ed1bf3fd1688:/app# tail -4 /app/run01_32.log; tail -4 /app/run80_32.log
+[?2004lprogress 600 864 35.72392511367798
+progress 700 864 36.45953416824341
+progress 800 864 36.587615728378296
+scattering time 36.68265914916992 4146155
+[2]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/driver.py 0.8 0.1 32 > /app/run80_32.log 2>&1
+ [0.03867072 0.14579627 0.05044837]
+ [0.03867072 0.14579628 0.05044837]
+ [0.03867072 0.14579629 0.05044837]
+ [0.03867072 0.14579629 0.05044837]]
+[?2004hroot@ed1bf3fd1688:/app# OPENBLAS_NUM_THREADS=1 python3 /app/driver.py 0 500 24 > /app/run0500.log 2>&1 &
+[?2004l[2] 344
+[?2004hroot@ed1bf3fd1688:/app# OPENBLAS_NUM_THREADS=1 python3 /app/driver.py 0.8 500 24 > /app/run8500.log 2>&1 &
+[?2004l[3] 345
+[?2004hroot@ed1bf3fd1688:/app# tail -15 /app/run01_32.log; tail -15 /app/run0500.log; tail -15 /app/run8500.log
+[?2004lprogress 700 864 36.45953416824341
+progress 800 864 36.587615728378296
+scattering time 36.68265914916992 4146155
+total time 39.227442264556885
+[[0.11066669 0.41499658 0.14694585]
+ [0.11067062 0.41500202 0.14695295]
+ [0.11067062 0.41503397 0.14695322]
+ [0.11067068 0.415034   0.14695323]
+ [0.11067071 0.4150348  0.14695325]
+ [0.11067071 0.4150352  0.14695325]
+ [0.11067071 0.41503528 0.14695325]
+ [0.11067071 0.4150353  0.14695325]
+ [0.11067071 0.4150353  0.14695325]
+ [0.11067071 0.4150353  0.14695325]
+ [0.11067071 0.4150353  0.14695325]]
+[1]   Done                    OPENBLAS_NUM_THREADS=1 python3 /app/driver.py 0 1 32 > /app/run01_32.log 2>&1
+[2]-  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/driver.py 0 500 24 > /app/run0500.log 2>&1
+[3]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/driver.py 0.8 500 24 > /app/run8500.log 2>&1
+progress 500 648 14.809354066848755
+progress 600 648 14.998187065124512
+scattering time 15.08775281906128 1959517
+total time 17.19139552116394
+[[ 8.73347614 32.52509149 11.93276562]
+ [ 8.73666409 32.87188955 11.93848134]
+ [ 8.73698751 32.89670842 11.93915118]
+ [ 8.73703425 32.89982741 11.93925984]
+ [ 8.73704275 32.90035617 11.93928154]
+ [ 8.73704458 32.90046506 11.93928656]
+ [ 8.73704502 32.90049087 11.93928787]
+ [ 8.73704515 32.90049769 11.93928824]
+ [ 8.73704518 32.90049966 11.93928835]
+ [ 8.73704519 32.90050027 11.93928839]
+ [ 8.7370452  32.90050047 11.9392884 ]]
+progress 500 648 9.66404390335083
+progress 600 648 9.88877534866333
+scattering time 9.997915506362915 1225249
+total time 12.089483737945557
+[[ 4.56568319 16.89318986  5.61411107]
+ [ 4.5697175  17.24253018  5.62106073]
+ [ 4.57020044 17.27340853  5.62203373]
+ [ 4.57028096 17.27793476  5.62221745]
+ [ 4.57029765 17.27881161  5.62225953]
+ [ 4.5703017  17.27901565  5.6222706 ]
+ [ 4.57030281 17.27906987  5.62227383]
+ [ 4.57030314 17.27908583  5.62227486]
+ [ 4.57030325 17.27909092  5.62227521]
+ [ 4.57030328 17.27909266  5.62227533]
+ [ 4.5703033  17.27909329  5.62227538]]
+[?2004hroot@ed1bf3fd1688:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+[?2004l[?2004h> import numpy as np
+[?2004l[?2004h> from kernels import solve
+[?2004l[?2004h> from scipy.special import roots_genlaguerre
+[?2004l[?2004h> for a,T in [(0.,1.),(.8,.1)]:
+[?2004l[?2004h>     results=[]
+[?2004l[?2004h>     for n in [16,32]:
+[?2004l[?2004h>         data=np.load(f'/app/data_{a}_{T}_{n}.npz')
+[?2004l[?2004h>         r=solve(T,data['z'],data['weights'],data['Q'],12)[-1]
+[?2004l[?2004h>         results.append(r)
+[?2004l[?2004h>         print(a,T,n,r)
+[?2004l[?2004h>     print('relative quadrature change',results[1]/results[0]-1)
+[?2004l[?2004h> z,w=roots_genlaguerre(80,1)
+[?2004l[?2004h> print('hard sphere N16',solve(1,z,w,np.full((len(z),18),np.pi),16)[-6:])
+[?2004l[?2004h> PY
+[?2004l0.0 1.0 16 [0.11067071 0.4150353  0.14695325]
+0.0 1.0 32 [0.11067071 0.4150353  0.14695325]
+relative quadrature change [-8.06864464e-10 -8.01463229e-10 -6.17098039e-10]
+0.8 0.1 16 [0.03867072 0.14579629 0.05044837]
+0.8 0.1 32 [0.03867072 0.14579629 0.05044837]
+relative quadrature change [-3.44169138e-15 -3.44169138e-15  1.11022302e-15]
+hard sphere N16 [[0.17913618 0.67783285 0.21558116]
+ [0.17913618 0.67783288 0.21558116]
+ [0.17913618 0.67783289 0.21558117]
+ [0.17913618 0.6778329  0.21558117]
+ [0.17913618 0.6778329  0.21558117]
+ [0.17913618 0.6778329  0.21558117]]
+[?2004hroot@ed1bf3fd1688:/app# OPENBLAS_NUM_THREADS=1 python3 /app/driver.py 0 0.1 24 > /app/run00low.log 2>&1 &
+[?2004l[1] 398
+[?2004hroot@ed1bf3fd1688:/app# OPENBLAS_NUM_THREADS=1 python3 /app/driver.py 0.45 0.7 24 > /app/runmid.log 2>&1 &
+[?2004l[2] 399
+[?2004hroot@ed1bf3fd1688:/app# cat > /app/compare.py <<'PY'
+[?2004l[?2004h> import os
+[?2004l[?2004h> os.environ['OPENBLAS_NUM_THREADS']='1'
+[?2004l[?2004h> from kernels import solve
+[?2004l[?2004h> import numpy as np,sys
+[?2004l[?2004h> for name in sys.argv[1:]:
+[?2004l[?2004h>     d=np.load(name);N=d['Q'].shape[1]-2
+[?2004l[?2004h>     r=solve(float(d['T']),d['z'],d['weights'],d['Q'],N)
+[?2004l[?2004h>     print(name,repr(r[-1]),'last relative change',r[-1]/r[-2]-1)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@ed1bf3fd1688:/app# tail -16 /app/run00low.log; tail -16 /app/runmid.log
+[?2004lprogress 400 648 32.883546113967896
+progress 500 648 38.60853672027588
+progress 600 648 41.08846116065979
+scattering time 41.16171169281006 3539053
+total time 43.12739634513855
+[[0.01362134 0.05099308 0.01670411]
+ [0.01362216 0.05112755 0.01670567]
+ [0.01362223 0.05113406 0.0167058 ]
+ [0.01362224 0.05113478 0.01670582]
+ [0.01362224 0.05113487 0.01670582]
+ [0.01362224 0.05113488 0.01670582]
+ [0.01362224 0.05113489 0.01670582]
+ [0.01362224 0.05113489 0.01670582]
+ [0.01362224 0.05113489 0.01670582]
+ [0.01362224 0.05113489 0.01670582]
+ [0.01362224 0.05113489 0.01670582]]
+[1]-  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/driver.py 0 0.1 24 > /app/run00low.log 2>&1
+[2]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/driver.py 0.45 0.7 24 > /app/runmid.log 2>&1
+progress 400 648 21.86549186706543
+progress 500 648 25.498414754867554
+progress 600 648 25.96097493171692
+scattering time 26.055996894836426 2431843
+total time 28.64153552055359
+[[0.09534389 0.35653793 0.12545505]
+ [0.09536337 0.35808958 0.12548377]
+ [0.09536625 0.35824539 0.12548846]
+ [0.09536664 0.35827411 0.1254893 ]
+ [0.09536669 0.3582786  0.12548944]
+ [0.0953667  0.35827923 0.12548947]
+ [0.0953667  0.35827932 0.12548948]
+ [0.0953667  0.35827933 0.12548948]
+ [0.0953667  0.35827934 0.12548948]
+ [0.0953667  0.35827934 0.12548948]
+ [0.0953667  0.35827934 0.12548948]]
+[?2004hroot@ed1bf3fd1688:/app# python3 - <<'PY'
+[?2004l[?2004h> head='''#!/usr/bin/env python3
+[?2004l[?2004h> """Classical dilute-gas transport for the spherical-core Kihara potential.
+[?2004l[?2004h> 
+[?2004l[?2004h> Units: sigma = epsilon = m = k_B = 1.
+[?2004l[?2004h> The linearized collision equations are solved by a converged Sonine-Galerkin
+[?2004l[?2004h> method, not by the first-Sonine transport formulas.  Angular scattering is
+[?2004l[?2004h> computed from the potential itself, including both sides of the orbiting
+[?2004l[?2004h> barrier.  The speed and angular integrations form the full collision brackets.
+[?2004l[?2004h> 
+[?2004l[?2004h> With x = v/sqrt(2T), write x1=C+q, x2=C-q.  C has component variance 1/4
+[?2004l[?2004h> and z=2*q.q is the relative collision energy divided by T.  The vector basis
+[?2004l[?2004h> is x L_k^(3/2)(x.x); the tensor basis is its traceless rank-two counterpart
+[?2004l[?2004h> with L_k^(5/2).  Gaussian averages over C are evaluated analytically using
+[?2004l[?2004h> the Laguerre generating function.  Their Legendre coefficients provide the
+[?2004l[?2004h> collision kernels.  Conserved momentum is projected out of the heat equation.
+[?2004l[?2004h> """
+[?2004l[?2004h> import os
+[?2004l[?2004h> os.environ['OPENBLAS_NUM_THREADS']='1'
+[?2004l[?2004h> os.environ['OMP_NUM_THREADS']='1'
+[?2004l[?2004h> '''
+[?2004l[?2004h> ks=open('/app/kernels.py').read().split("if __name__=='__main__':")[0]
+[?2004l[?2004h> ss=open('/app/scatter.py').read().split("if __name__=='__main__':")[0]
+[?2004l[?2004h> ds=open('/app/driver.py').read().split("if __name__=='__main__':")[0]
+[?2004l[?2004h> ds=ds[ds.index('def calculate'):]
+[?2004l[?2004h> ds=ds.replace('n=24,N=12','n=32,N=16').replace('tol=1e-7','tol=3e-8')
+[?2004l[?2004h> # The standalone program never saves quadrature files or prints diagnostics.
+[?2004l[?2004h> ds=ds.replace("        if i%100==0: print('progress',i,len(z),time.time()-t,file=sys.stderr,flush=True)\n",'')
+[?2004l[?2004h> ds=ds.replace("    if save: np.savez(save,z=z,weights=weights,Q=Q,T=T,a=a)\n",'')
+[?2004l[?2004h> ds=ds.replace("    print('scattering time',time.time()-t,sc.anglecalls,file=sys.stderr)\n",'').replace("    print('total time',time.time()-t,file=sys.stderr)\n",'')
+[?2004l[?2004h> foot='''\nif __name__ == '__main__':
+[?2004l[?2004h>     import sys, json
+[?2004l[?2004h>     A,T=map(float,sys.argv[1:3])
+[?2004l[?2004h>     result=calculate(A,T)[-1]
+[?2004l[?2004h>     print(json.dumps(dict(zip(('viscosity','thermal_conductivity','self_diffusion'),map(float,result))),allow_nan=False,separators=(',',':')))
+[?2004l[?2004h> '''
+[?2004l[?2004h> open('/app/output/transport.py','w').write(head+ks+'\n'+ss+'\nimport time\n'+ds+foot)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@ed1bf3fd1688:/app# cd /app/output; env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 transport.py 0.31 470 > /app/finaltest.json 2> /app/finaltest.err &
+[?2004l[1] 428
+[?2004hroot@ed1bf3fd1688:/app/output# cat /app/finaltest.json; cat /app/finaltest.err; ls -lh /app/output/transport.py; command -v time; jobs
+[?2004l{"viscosity":6.365015086682436,"thermal_conductivity":24.008995537053366,"self_diffusion":8.322665673133466}
+[1]+  Done                    env -i HOME=/tmp TMPDIR=/tmp PATH="$PATH" LANG=C python3 transport.py 0.31 470 > /app/finaltest.json 2> /app/finaltest.err
+-rw-r--r-- 1 root root 9.1K Oct 29 08:44 /app/output/transport.py
+time
+[?2004hroot@ed1bf3fd1688:/app/output# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py'
+[?2004l[?2004h> s=open(p).read().replace('if E<self.ec:', 'if E<self.ec*(1-1e-12):')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@ed1bf3fd1688:/app/output# cat > /app/test_final.py <<'PY'
+[?2004l[?2004h> import importlib.util, sys, time, resource
+[?2004l[?2004h> spec=importlib.util.spec_from_file_location('transport','/app/output/transport.py')
+[?2004l[?2004h> m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+[?2004l[?2004h> a,T=map(float,sys.argv[1:3]);t=time.time()
+[?2004l[?2004h> r=m.calculate(a,T)
+[?2004l[?2004h> print('result',repr(r[-1]),'N12 to N16 relative',r[-1]/r[-5]-1)
+[?2004l[?2004h> print('seconds',time.time()-t,'peak KiB',resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+[?2004l[?2004h> if len(sys.argv)>3:
+[?2004l[?2004h>     import numpy as np
+[?2004l[?2004h>     from kernels import solve
+[?2004l[?2004h>     d=np.load(sys.argv[3]);old=solve(T,d['z'],d['weights'],d['Q'],12)[-1]
+[?2004l[?2004h>     print('compared with old',r[-1]/old-1)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@ed1bf3fd1688:/app/output# cd /app
+[?2004l[?2004hroot@ed1bf3fd1688:/app# OPENBLAS_NUM_THREADS=1 python3 /app/test_final.py 0 0.1 /app/data_0.0_0.1_24.npz > /app/verifylow.log 2>&1 &
+[?2004l[1] 458
+[?2004hroot@ed1bf3fd1688:/app# OPENBLAS_NUM_THREADS=1 python3 /app/test_final.py 0.8 500 /app/data_0.8_500.0_24.npz > /app/verifyhigh.log 2>&1 &
+[?2004l[2] 459
+[?2004hroot@ed1bf3fd1688:/app# cat /app/verifylow.log; cat /app/verifyhigh.log; sed -n '1,300p' /app/output/transport.py
+[?2004l[2]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/test_final.py 0.8 500 /app/data_0.8_500.0_24.npz > /app/verifyhigh.log 2>&1
+result array([ 4.57030331, 17.27909368,  5.62227541]) N12 to N16 relative [1.86681492e-09 2.25633856e-08 5.57497115e-09]
+seconds 32.988529205322266 peak KiB 353132
+compared with old [1.86681559e-09 2.25633865e-08 5.57497271e-09]
+#!/usr/bin/env python3
+"""Classical dilute-gas transport for the spherical-core Kihara potential.
+
+Units: sigma = epsilon = m = k_B = 1.
+The linearized collision equations are solved by a converged Sonine-Galerkin
+method, not by the first-Sonine transport formulas.  Angular scattering is
+computed from the potential itself, including both sides of the orbiting
+barrier.  The speed and angular integrations form the full collision brackets.
+
+With x = v/sqrt(2T), write x1=C+q, x2=C-q.  C has component variance 1/4
+and z=2*q.q is the relative collision energy divided by T.  The vector basis
+is x L_k^(3/2)(x.x); the tensor basis is its traceless rank-two counterpart
+with L_k^(5/2).  Gaussian averages over C are evaluated analytically using
+the Laguerre generating function.  Their Legendre coefficients provide the
+collision kernels.  Conserved momentum is projected out of the heat equation.
+"""
+import os
+os.environ['OPENBLAS_NUM_THREADS']='1'
+os.environ['OMP_NUM_THREADS']='1'
+import numpy as np
+from scipy.special import eval_genlaguerre, gammaln, roots_genlaguerre
+from math import comb, factorial, pi
+
+def cmul(a):
+    b=np.zeros_like(a)
+    for l in range(a.shape[-1]-1):
+        b[...,l+1]+=a[...,l]*(l+1)/(2*l+1)
+    for l in range(1,a.shape[-1]):
+        b[...,l-1]+=a[...,l]*l/(2*l+1)
+    return b
+
+def base(z,N,nu,L):
+    z=np.asarray(z)
+    out=np.zeros((len(z),N,N,L))
+    for i in range(N):
+        for j in range(N):
+            for k in range(min(i,j)+1):
+                p=i+j-2*k
+                v=(z/2)**k/factorial(k)*comb(p,i-k)/2**p*eval_genlaguerre(p,nu+k-1,z)
+                for l in range(min(k,L-1)+1):
+                    c=(2*l+1)*2**k*factorial(k)**2/(factorial(k-l)*factorial(k+l+1))
+                    out[:,i,j,l]+=c*v
+    return out
+
+R={(0,0):(0,4),(1,0):(-2,-2),(0,1):(-2,-2),(1,1):(2,2)}
+def polymul(a,b):
+    out={}
+    for (i,j),v in a.items():
+        for (k,l),w in b.items():
+            key=i+k,j+l
+            val=np.convolve(v,w)
+            if key not in out: out[key]=np.zeros(len(val))
+            if len(out[key])<len(val): out[key]=np.pad(out[key],(0,len(val)-len(out[key])))
+            out[key][:len(val)]+=val
+    return out
+
+def mult(f,poly):
+    out=np.zeros_like(f)
+    N=f.shape[1]
+    for (i,j),coef in poly.items():
+        if i>=N or j>=N: continue
+        v=f[:,:N-i,:N-j,:]
+        for c in coef:
+            if c: out[:,i:,j:,:]+=c*v
+            v=cmul(v)
+    return out
+
+def kernels(z,N):
+    z=np.asarray(z); L=N+2
+    f25=base(z,N,2.5,L)
+    f35=base(z,N,3.5,L)
+    f45=base(z,N,4.5,L)
+    f55=base(z,N,5.5,L)
+    zz=z[:,None,None,None]
+    vec=.75*f25+zz/8*mult(f35,R)
+    ten=zz**2/96*mult(f55,polymul(R,R))-zz**2/12*mult(f35,{(0,0):(1,0,-1)})+5*zz/24*mult(f45,R)+5/8*f35
+    return vec,ten
+
+def solve(T,z,weights,Q,N=9):
+    vec,ten=kernels(z,N)
+    w=weights*4*np.sqrt(T/pi)
+    even=np.arange(Q.shape[1])%2==0
+    even[0]=False
+    allq=Q.copy();allq[:,0]=0
+    qe=Q*even
+    bd=np.einsum('zijl,zl,z->ij',vec,allq,w)/3
+    bh=np.einsum('zijl,zl,z->ij',vec,qe,w)*2/3
+    bv=np.einsum('zijl,zl,z->ij',ten,qe,w)/5
+    results=[]
+    for n in range(2,N+1):
+        def inv_entry(b,k,start=0):
+            b=b[start:n,start:n];k-=start
+            s=np.sqrt(np.maximum(np.diag(b),1e-300))
+            mat=b/s[:,None]/s[None,:]
+            rhs=np.zeros(n-start);rhs[k]=1/s[k]
+            return np.linalg.solve(mat,rhs)[k]/s[k]
+        results.append((T/4*inv_entry(bv,0),25*T/8*inv_entry(bh,1,1),T/2*inv_entry(bd,0)))
+    return np.array(results)
+
+
+import numpy as np
+from scipy.special import roots_legendre
+from scipy.optimize import brentq
+from math import pi
+from functools import lru_cache
+
+@lru_cache(None)
+def gauss(n):
+    x,w=roots_legendre(n)
+    return (x+1)/2,w/2
+
+class Scatter:
+    def __init__(self,a,L=11,tol=1e-7):
+        self.a=a;self.d=1-a;self.L=L;self.tol=tol
+        ad=a/self.d
+        self.um=brentq(lambda u:4-20*u**6+7*ad*u-26*ad*u**7,0,1,xtol=1e-15)
+        self.ec=self.H(self.um)
+        self.calls=0;self.anglecalls=0
+    def H(self,u):
+        ad=self.a/self.d
+        return 8*u**6-20*u**12+12*ad*u**7-24*ad*u**13
+    def Hp(self,u):
+        ad=self.a/self.d
+        return 48*u**5-240*u**11+84*ad*u**6-312*ad*u**12
+    def B(self,u,E):
+        return (self.a+self.d/u)**2*(1+4*(u**6-u**12)/E)
+    def minusBp(self,u,E):
+        return 2*self.d*(self.a+self.d/u)/u**2*(1-self.H(u)/E)
+    def getH(self,x,u,E):
+        # Factor the exact turning-point zero before evaluating the radicand.
+        ar=self.a*u
+        c6=4*u**6/E;c12=4*u**12/E
+        ss=np.ones_like(x)
+        sums={}
+        for k in range(1,12):
+            ss=ss*x+1
+            if k in (3,4,5,9,10,11): sums[k]=ss.copy()
+        return self.d**2*(1+x)+2*self.d*ar*x+x*x*(c12*(self.d**2*sums[9]+2*self.d*ar*sums[10]+ar*ar*sums[11])-c6*(self.d**2*sums[3]+2*self.d*ar*sums[4]+ar*ar*sums[5]))
+    def theta_rule(self,u,E,uc,bc,n,inner):
+        self.anglecalls+=len(u)
+        q,w=gauss(n);q=q[None,:];w=w[None,:]
+        ur=u[:,None];bsq=np.maximum(0,self.B(ur,E));b=np.sqrt(bsq)
+        if inner and uc is not None:
+            rc=self.a+self.d/uc
+            beta=self.d/(uc**2*rc)*self.Hp(uc)/E
+            delta=np.maximum((bc-bsq)/rc**2,1e-30)
+            h=np.sqrt(delta/beta)
+            # Left of the former barrier maximum.
+            S=np.arcsinh(uc/h)
+            s=S*q
+            v=uc-h*np.sinh(s);x=v/ur
+            F=(1-x)*self.getH(x,ur,E)
+            jac=h*np.cosh(s)*S
+            left=np.sum(w*jac/((self.d+self.a*v)*np.sqrt(np.maximum(F,1e-300))),axis=1)
+            # Right side, with the turning-point square root removed as well.
+            S=np.arcsinh((ur-uc)/h)
+            s=S*(1-q*q)
+            gap=2*h*np.cosh((S+s)/2)*np.sinh(S*q*q/2)
+            v=ur-gap;x=v/ur
+            F=gap/ur*self.getH(x,ur,E)
+            jac=2*S*q*h*np.cosh(s)
+            right=np.sum(w*jac/((self.d+self.a*v)*np.sqrt(np.maximum(F,1e-300))),axis=1)
+            return (b[:,0]*self.d)*(left+right)
+        H1=self.getH(np.ones_like(ur),ur,E)
+        Hnear=self.getH(np.full_like(ur,1-1e-5),ur,E)
+        slope=np.abs((Hnear-H1)/1e-5)
+        h=np.sqrt(np.maximum(H1,1e-28)/(np.maximum(H1,1e-28)+slope))
+        S=np.arcsinh(1/h)
+        s=S*q;t=h*np.sinh(s)
+        x=1-t*t
+        H=self.getH(x,ur,E)
+        jac=h*np.cosh(s)*S
+        v=2*b*self.d*ur*np.sum(w*jac/((self.d+self.a*ur*x)*np.sqrt(np.maximum(H,1e-300))),axis=1)[:,None]
+        return v[:,0]
+    def theta(self,u,E,uc,bc,inner):
+        old=self.theta_rule(u,E,uc,bc,24,inner)
+        new=self.theta_rule(u,E,uc,bc,48,inner)
+        err=np.abs(new-old)
+        todo=np.where(err>2e-9)[0]
+        n=96
+        while len(todo) and n<=1536:
+            v=self.theta_rule(u[todo],E,uc,bc,n,inner)
+            err=np.abs(v-new[todo])
+            new[todo]=v
+            todo=todo[err>2e-9]
+            n*=2
+        return new
+    def integrand(self,x,E,uc,bc,ui,u0,inner):
+        if uc is None:
+            u=u0*x;du=np.full_like(x,u0)
+        elif inner:
+            u=ui+(u0-ui)*x**3;du=3*(u0-ui)*x*x
+        else:
+            u=uc*(1-(1-x)**2);du=2*uc*(1-x)
+        th=self.theta(u,E,uc,bc,inner)
+        delta=2*np.cos(th)**2
+        out=np.zeros((len(x),self.L));out[:,1]=delta
+        for l in range(1,self.L-1):
+            out[:,l+1]=((2*l+1)*(delta+(1-delta)*out[:,l])-l*out[:,l-1])/(l+1)
+        return out*(pi*du*self.minusBp(u,E))[:,None]
+    def __call__(self,E,n=96):
+        self.calls+=1
+        u0=((1+np.sqrt(1+E))/2)**(1/6)
+        if E<self.ec*(1-1e-12):
+            uc=brentq(lambda u:self.H(u)-E,0,self.um,xtol=1e-15)
+            bc=self.B(uc,E)
+            uh=brentq(lambda u:self.H(u)-E,self.um,u0,xtol=1e-15)
+            ui=brentq(lambda u:self.B(u,E)-bc,uh,u0,xtol=1e-15)
+            branches=[False,True]
+        else:
+            uc=bc=ui=None;branches=[False]
+        def rule(n):
+            x,w=gauss(n)
+            return sum(w@self.integrand(x,E,uc,bc,ui,u0,inner) for inner in branches)
+        old=rule(n)
+        new=rule(n*2)
+        while np.max(np.abs(new[1:]-old[1:])/np.maximum(np.abs(new[1:]),1e-20))>self.tol and n<1536:
+            n*=2;old=new;new=rule(n*2)
+        return new
+
+
+import time
+def calculate(a,T,n=32,N=16,width=.75,tol=3e-8,save=None):
+    sc=Scatter(a,N+2,tol)
+    lo=np.log(1e-5);hi=np.log(100.)
+    edges=list(np.linspace(lo,hi,int(np.ceil((hi-lo)/width))+1))
+    crit=np.log(sc.ec/T)
+    if lo<crit<hi:
+        edges.append(crit)
+        # Resolve the weak nonanalyticity at the orbiting critical energy.
+        for delta in [.02,.1]:
+            if lo<crit-delta<hi: edges.append(crit-delta)
+            if lo<crit+delta<hi: edges.append(crit+delta)
+    edges=np.unique(edges)
+    x,w=gauss(n)
+    z=[];weights=[]
+    for l,r in zip(edges[:-1],edges[1:]):
+        zz=np.exp(l+(r-l)*x)
+        z.extend(zz);weights.extend(w*(r-l)*zz**2*np.exp(-zz))
+    z=np.array(z);weights=np.array(weights)
+    t=time.time()
+    Q=[]
+    for i,zz in enumerate(z):
+        Q.append(sc(T*zz))
+    Q=np.array(Q)
+    values=solve(T,z,weights,Q,N)
+    return values
+
+if __name__ == '__main__':
+    import sys, json
+    A,T=map(float,sys.argv[1:3])
+    result=calculate(A,T)[-1]
+    print(json.dumps(dict(zip(('viscosity','thermal_conductivity','self_diffusion'),map(float,result))),allow_nan=False,separators=(',',':')))
+[?2004hroot@ed1bf3fd1688:/app# cat /app/verifylow.log; jobs
+[?2004lresult array([0.01362224, 0.05113489, 0.01670582]) N12 to N16 relative [4.16777723e-12 7.30076000e-11 1.30453426e-11]
+seconds 66.20861983299255 peak KiB 378112
+compared with old [1.56361368e-10 2.18323803e-10 1.45328194e-11]
+[1]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/test_final.py 0 0.1 /app/data_0.0_0.1_24.npz > /app/verifylow.log 2>&1
+[?2004hroot@ed1bf3fd1688:/app# cat > /app/extra_checks.py <<'PY'
+[?2004l[?2004h> import importlib.util,time,sys
+[?2004l[?2004h> spec=importlib.util.spec_from_file_location('transport','/app/output/transport.py')
+[?2004l[?2004h> m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+[?2004l[?2004h> if sys.argv[1]=='strict':
+[?2004l[?2004h>     a,T=.45,.7
+[?2004l[?2004h>     t=time.time();r=m.calculate(a,T,n=48,N=16,width=.4,tol=2e-9)
+[?2004l[?2004h>     print(a,T,r[-1], 'basis change',r[-1]/r[-5]-1,'seconds',time.time()-t,flush=True)
+[?2004l[?2004h>     import numpy as np
+[?2004l[?2004h>     from kernels import solve
+[?2004l[?2004h>     d=np.load('/app/data_0.45_0.7_24.npz');old=solve(T,d['z'],d['weights'],d['Q'],12)[-1]
+[?2004l[?2004h>     print('strict comparison',r[-1]/old-1,flush=True)
+[?2004l[?2004h> else:
+[?2004l[?2004h>     for a,T in [(0.02,.13),(.2,.4),(.7,2),(.8,1.8),(.4,12)]:
+[?2004l[?2004h>         t=time.time();r=m.calculate(a,T,n=24,N=16)
+[?2004l[?2004h>         print(a,T,r[-1], 'basis change',r[-1]/r[-5]-1,'seconds',time.time()-t,flush=True)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@ed1bf3fd1688:/app# OPENBLAS_NUM_THREADS=1 python3 /app/extra_checks.py strict > /app/strict.log 2>&1 &
+[?2004l[1] 501
+[?2004hroot@ed1bf3fd1688:/app# OPENBLAS_NUM_THREADS=1 python3 /app/extra_checks.py other > /app/extra.log 2>&1 &
+[?2004l[2] 502
+[?2004hroot@ed1bf3fd1688:/app# python3 - <<'PY'
+[?2004l[?2004h> import json,stat
+[?2004l[?2004h> p='/app/output/transport.py'
+[?2004l[?2004h> print('regular',stat.S_ISREG(__import__('os').lstat(p).st_mode))
+[?2004l[?2004h> r=json.load(open('/app/finaltest.json'))
+[?2004l[?2004h> assert set(r)=={'viscosity','thermal_conductivity','self_diffusion'}
+[?2004l[?2004h> assert all(type(v) in (int,float) and v>0 for v in r.values())
+[?2004l[?2004h> print('output format passed')
+[?2004l[?2004h> PY
+[?2004lregular True
+output format passed
+[?2004hroot@ed1bf3fd1688:/app# cat /app/strict.log; cat /app/extra.log; jobs
+[?2004l[1]-  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/extra_checks.py strict > /app/strict.log 2>&1 &
+[2]+  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/extra_checks.py other > /app/extra.log 2>&1 &
+[?2004hroot@ed1bf3fd1688:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py'
+[?2004l[?2004h> s=open(p).read().replace('from scipy.special import eval_genlaguerre, gammaln, roots_genlaguerre','from scipy.special import eval_genlaguerre').replace('\nimport time\ndef calculate(a,T,n=32,N=16,width=.75,tol=3e-8,save=None):','\ndef calculate(a,T,n=32,N=16,width=.75,tol=3e-8):').replace('    t=time.time()\n','')
+[?2004l[?2004h> s=s.replace('    bd=np.einsum', '    # Tagged-particle bracket: 1/2 of the squared single-particle jump.\n    bd=np.einsum').replace('    bh=np.einsum', '    # Identical-particle brackets: 1/4 of the squared pair jump.\n    bh=np.einsum')
+[?2004l[?2004h> open(p,'w').write(s)
+[?2004l[?2004h> PY
+[?2004l[?2004hroot@ed1bf3fd1688:/app# rm -rf /app/output/__pycache__
+[?2004l[?2004hroot@ed1bf3fd1688:/app# ls -la /app/output
+[?2004ltotal 24
+drwxr-xr-x 1 root root 4096 Oct 29 08:48 .
+drwxr-xr-x 1 root root 4096 Oct 29 08:47 ..
+-rw-r--r-- 1 root root 9376 Oct 29 08:48 transport.py
+[?2004hroot@ed1bf3fd1688:/app# cat /app/strict.log; cat /app/extra.log; jobs
+[?2004l0.02 0.13 [0.0172711  0.06483605 0.02132469] basis change [3.85647070e-12 8.65201244e-11 1.52198254e-11] seconds 51.94120454788208
+0.2 0.4 [0.05081597 0.19076875 0.06659897] basis change [2.38566944e-11 4.16503498e-10 4.32063274e-11] seconds 27.669145107269287
+[1]-  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/extra_checks.py strict > /app/strict.log 2>&1 &
+[2]+  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/extra_checks.py other > /app/extra.log 2>&1 &
+[?2004hroot@ed1bf3fd1688:/app# python3 - <<'PY'
+[?2004l[?2004h> p='/app/output/transport.py'
+[?2004l[?2004h> compile(open(p).read(),p,'exec')
+[?2004l[?2004h> print('syntax passed')
+[?2004l[?2004h> PY
+[?2004lsyntax passed
+[?2004hroot@ed1bf3fd1688:/app# cat /app/strict.log; cat /app/extra.log; jobs
+[?2004l0.02 0.13 [0.0172711  0.06483605 0.02132469] basis change [3.85647070e-12 8.65201244e-11 1.52198254e-11] seconds 51.94120454788208
+0.2 0.4 [0.05081597 0.19076875 0.06659897] basis change [2.38566944e-11 4.16503498e-10 4.32063274e-11] seconds 27.669145107269287
+0.7 2 [0.22483878 0.84684553 0.28471341] basis change [3.72998965e-10 5.15735898e-09 1.19465549e-09] seconds 21.990142345428467
+0.8 1.8 [0.2165505  0.81685894 0.2729255 ] basis change [6.54829524e-10 8.56420623e-09 2.08184359e-09] seconds 25.380218982696533
+[1]-  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/extra_checks.py strict > /app/strict.log 2>&1 &
+[2]+  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/extra_checks.py other > /app/extra.log 2>&1 &
+[?2004hroot@ed1bf3fd1688:/app# cat /app/strict.log; tail -3 /app/extra.log; jobs; ls -lh /app/output
+[?2004l[2]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/extra_checks.py other > /app/extra.log 2>&1
+0.7 2 [0.22483878 0.84684553 0.28471341] basis change [3.72998965e-10 5.15735898e-09 1.19465549e-09] seconds 21.990142345428467
+0.8 1.8 [0.2165505  0.81685894 0.2729255 ] basis change [6.54829524e-10 8.56420623e-09 2.08184359e-09] seconds 25.380218982696533
+0.4 12 [0.6959958  2.62540745 0.89366617] basis change [9.80617809e-11 1.54953561e-09 3.23840510e-10] seconds 24.057823181152344
+[1]+  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/extra_checks.py strict > /app/strict.log 2>&1 &
+total 12K
+-rw-r--r-- 1 root root 9.2K Oct 29 08:48 transport.py
+[?2004hroot@ed1bf3fd1688:/app# cat /app/strict.log; jobs
+[?2004l[1]+  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/extra_checks.py strict > /app/strict.log 2>&1 &
+[?2004hroot@ed1bf3fd1688:/app# cat /app/strict.log; jobs
+[?2004l[1]+  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/extra_checks.py strict > /app/strict.log 2>&1 &
+[?2004hroot@ed1bf3fd1688:/app# python3 - <<'PY'
+[?2004l[?2004h> import os,time
+[?2004l[?2004h> p='/proc/501/stat'
+[?2004l[?2004h> if os.path.exists(p):
+[?2004l[?2004h>     s=open(p).read().split()
+[?2004l[?2004h>     print('strict CPU seconds',(int(s[13])+int(s[14]))/os.sysconf('SC_CLK_TCK'))
+[?2004l[?2004h>     print('strict memory',open('/proc/501/status').read().split('VmRSS:')[1].split('\n')[0])
+[?2004l[?2004h> PY
+[?2004lstrict CPU seconds 282.02
+strict memory 	  654804 kB
+[?2004hroot@ed1bf3fd1688:/app# cat /app/strict.log; jobs
+[?2004l[1]+  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/extra_checks.py strict > /app/strict.log 2>&1 &
+[?2004hroot@ed1bf3fd1688:/app# cat /app/strict.log; jobs
+[?2004l0.45 0.7 [0.0953667  0.35827934 0.12548948] basis change [4.58684202e-11 6.74788447e-10 1.33584699e-10] seconds 356.09861302375793
+strict comparison [-4.04671630e-10  2.16966223e-10  1.36641365e-10]
+[1]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/extra_checks.py strict > /app/strict.log 2>&1
+[?2004hroot@ed1bf3fd1688:/app# 

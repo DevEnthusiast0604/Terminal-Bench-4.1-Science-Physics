@@ -1,0 +1,623 @@
+#### step 2 11:55:20
+MSG: Analysis: No data have been inspected yet. The notes should establish the geometry, tracker conventions, and camera time calibration needed to infer true small-amplitude periods.
+Plan: Read the lab notes and inspect the directory contents and representative run and synchronization logs.
+CMD: cat /app/data/NOTES.md
+
+CMD: ls -l /app/data/runs /app/data/sync; head -n 12 /app/data/runs/a1.csv; head -n 12 /app/data/sync/a1.csv
+
+OBS: v
+-rw-r--r-- 1 root root 322566 Oct 27 11:55 a3.csv
+-rw-r--r-- 1 root root 344123 Oct 27 11:55 b1.csv
+-rw-r--r-- 1 root root 348438 Oct 27 11:55 b2.csv
+-rw-r--r-- 1 root root 340914 Oct 27 11:55 b3.csv
+
+/app/data/sync:
+total 24
+-rw-r--r-- 1 root root 932 Oct 27 11:55 a1.csv
+-rw-r--r-- 1 root root 850 Oct 27 11:55 a2.csv
+-rw-r--r-- 1 root root 920 Oct 27 11:55 a3.csv
+-rw-r--r-- 1 root root 905 Oct 27 11:55 b1.csv
+-rw-r--r-- 1 root root 926 Oct 27 11:55 b2.csv
+-rw-r--r-- 1 root root 888 Oct 27 11:55 b3.csv
+# run: a1
+# tracker: pendulum-track 1.8
+# unit: deg
+# nominal_fps: 240
+frame_counter,theta,tracker_ok
+12040,8.83365,1
+12041,8.83803,1
+12042,8.84345,1
+12043,8.85199,1
+12044,8.83225,1
+12045,8.82784,1
+12046,8.81833,1
+gps_s,frame_counter
+41874,12192
+41875,12433
+41876,12674
+41877,12914
+41878,13155
+41879,13396
+41880,13637
+41881,13877
+41882,14118
+41883,14359
+41884,14600
+root@897e050b18bc:/app#
+
+
+#### step 3 11:55:34
+MSG: Analysis: The true periods require calibrating each camera against its GPS clock-check log, unwrapping 16-bit frame counters, excluding lost-tracker rows, and correcting finite-amplitude and damping effects. The centre-of-mass distances are 0.20011 m from A and 0.79992 m from B.
+Plan: Inspect all six runs and fit preliminary camera clock models to identify counter wraps, dropped frames, clock drift, units, and angle ranges. Check available numerical tools for subsequent dynamical fitting.
+CMD: python3 - <<'PY'
+import numpy as np, scipy, pandas as pd
+print('scipy',scipy.__version__)
+for r in ['a1','a2','a3','b1','b2','b3']:
+ p='/app/data/runs/'+r+'.csv'
+ print('\n',r, ''.join(open(p).readlines()[:4]).strip())
+ d=pd.read_csv(p,comment='#'); s=pd.read_csv('/app/data/sync/'+r+'.csv')
+ unwrap=lambda x: np.r_[float(x[0]),float(x[0])+np.cumsum(np.diff(x.astype(float))%65536)]
+ f=unwrap(d.frame_counter.values); sf=unwrap(s.frame_counter.values); gps=s.gps_s.values.astype(float); gps-=gps[0]
+ print('run:',len(d),'counter range',f[[0,-1]],'steps',np.unique(np.diff(f),return_counts=True),'bad tracker',sum(d.tracker_ok==0),'angle range',d.theta.min(),d.theta.max())
+ print('sync:',len(s),'GPS duration',gps[-1], 'counter range',sf[[0,-1]])
+ for deg in [1,2,3]:
+  coeff=np.polyfit(gps,sf,deg); res=sf-np.polyval(coeff,gps)
+  print('clock',deg,coeff,'resid rms',np.std(res),'range',res.min(),res.max())
+PY
+
+CMD: cat /app/data/sync/a1.csv
+
+OBS: 41877,12914
+41878,13155
+41879,13396
+41880,13637
+41881,13877
+41882,14118
+41883,14359
+41884,14600
+41885,14840
+41886,15081
+41887,15322
+41888,15563
+41889,15803
+41890,16044
+41891,16285
+41892,16526
+41893,16766
+41894,17007
+41895,17248
+41896,17489
+41897,17729
+41898,17970
+41899,18211
+41900,18452
+41901,18692
+41903,19174
+41904,19414
+41905,19655
+41906,19896
+41907,20137
+41908,20377
+41909,20618
+41910,20859
+41911,21100
+41912,21340
+41913,21581
+41914,21822
+41915,22063
+41916,22303
+41917,22544
+41918,22785
+41919,23026
+41920,23266
+41921,23507
+41922,23748
+41923,23989
+41924,24229
+41925,24470
+41926,24711
+41927,24952
+41928,25192
+41930,25674
+41931,25915
+41932,26155
+41933,26396
+41934,26637
+41935,26878
+41936,27118
+41937,27359
+41938,27600
+41940,28081
+41942,28563
+41943,28804
+41944,29044
+41945,29285
+41946,29526
+41947,29766
+41948,30007
+41949,30248
+41950,30489
+41951,30729
+41952,30970
+41953,31211
+root@897e050b18bc:/app#
+
+
+#### step 4 11:55:55
+MSG: Analysis: The first synchronization log is consistent with a frame rate near 240.75 Hz rather than the nominal 240 Hz. SciPy is not installed, so numerical dependencies must be added before fitting.
+Plan: Install SciPy and pandas, then repeat the data diagnostics.
+CMD: python3 -m pip install scipy pandas
+
+CMD: cat > /app/inspect_data.py <<'PY'
+import numpy as np, pandas as pd
+for r in ['a1','a2','a3','b1','b2','b3']:
+ p='/app/data/runs/'+r+'.csv'
+ print('\n',r, ''.join(open(p).readlines()[:4]).strip())
+ d=pd.read_csv(p,comment='#'); s=pd.read_csv('/app/data/sync/'+r+'.csv')
+ unwrap=lambda x: np.r_[float(x[0]),float(x[0])+np.cumsum(np.diff(x.astype(float))%65536)]
+ f=unwrap(d.frame_counter.values); sf=unwrap(s.frame_counter.values); gps=s.gps_s.values.astype(float); gps-=gps[0]
+ print('run:',len(d),'counter range',f[[0,-1]],'steps',np.unique(np.diff(f),return_counts=True),'bad tracker',sum(d.tracker_ok==0),'angle range',d.theta.min(),d.theta.max())
+ print('sync:',len(s),'GPS duration',gps[-1], 'counter range',sf[[0,-1]])
+ for deg in [1,2,3]:
+  coeff=np.polyfit(gps,sf,deg); res=sf-np.polyval(coeff,gps)
+  print('clock',deg,coeff,'resid rms',np.std(res),'range',res.min(),res.max())
+PY
+python3 /app/inspect_data.py
+
+OBS: +04] resid rms 0.2861537663562023 range -0.4670426562806824 0.5014651485835202
+clock 3 [-5.31220556e-07  1.04761921e-04  2.40449795e+02  5.27073090e+04] resid rms 0.2861067661230056 range -0.47241085887071677 0.5043222373642493
+
+ b3 # run: b3
+# tracker: pendulum-track 1.8
+# unit: rad
+# nominal_fps: 240
+run: 19052 counter range [59436. 78487.] steps (array([1.]), array([19051])) bad tracker 708 angle range -0.4123741 0.4580651
+sync: 76 GPS duration 79.0 counter range [59453. 78267.]
+clock 1 [  237.81042928 59466.37298863] resid rms 14.362610069586507 range -28.979730541279423 26.830698738442152
+clock 2 [9.68440077e-04 2.37733395e+02 5.94673842e+04] resid rms 14.355013221217636 range -28.459610328398412 27.34835458350426
+clock 3 [ 9.62750515e-04 -1.12660721e-01  2.41269061e+02  5.94453345e+04] resid rms 10.864268603083032 range -28.58032624423504 26.295210712734843
+root@897e050b18bc:/app#
+
+
+#### step 5 11:56:37
+MSG: Analysis: All runs contain contiguous hardware frame counts, including wraps in a2, b2, and b3, and about 3–4% lost tracking. A1 and b2 have effectively constant camera rates; the other cameras drift substantially, so a single FPS calibration would be inaccurate. The recorded amplitudes also make finite-amplitude corrections important.
+Plan: Construct elapsed-time mappings from each GPS log, extract reliable turning points and zero crossings, and examine amplitude decay and corrected cycle periods. These diagnostics will guide a full small-amplitude period estimate with appropriate damping treatment.
+CMD: cat > /app/reduce.py <<'PY'
+import numpy as np, pandas as pd
+from scipy.interpolate import PchipInterpolator, CubicSpline, UnivariateSpline
+from scipy.signal import find_peaks
+from scipy.special import ellipk
+from scipy.optimize import least_squares
+RUNS=['a1','a2','a3','b1','b2','b3']
+def unwrap(x):
+ x=np.asarray(x,dtype=float)
+ return np.r_[x[0], x[0]+np.cumsum(np.diff(x)%65536)]
+def load(r,method='pchip'):
+ path='/app/data/runs/'+r+'.csv'
+ d=pd.read_csv(path,comment='#'); s=pd.read_csv('/app/data/sync/'+r+'.csv')
+ f=unwrap(d.frame_counter.values); sf=unwrap(s.frame_counter.values)
+ sf+=65536*round((f[0]-sf[0])/65536)
+ gps=s.gps_s.to_numpy(dtype=float); gps-=gps[0]
+ if method=='pchip': clock=PchipInterpolator(sf,gps,extrapolate=True)
+ elif method=='cubic': clock=CubicSpline(sf,gps,extrapolate=True)
+ elif method=='linearfit':
+  co=np.polyfit(sf,gps,1); clock=lambda x:np.polyval(co,x)
+ elif method=='smooth': clock=UnivariateSpline(sf,gps,s=len(sf)*(0.29/240)**2)
+ theta=d.theta.to_numpy()
+ if '# unit: deg' in open(path).read(): theta=np.deg2rad(theta)
+ valid=d.tracker_ok.to_numpy()==1
+ t=clock(f); t-=t[0]
+ return t,theta,valid,f,sf,gps,clock
+
+def extrema(t,y,valid):
+ yi=np.interp(t,t[valid],y[valid]); peaks=[]
+ for sign in [1,-1]:
+  inds=find_peaks(sign*yi,distance=160,prominence=.02)[0]
+  for i in inds:
+   sel=(abs(t-t[i])<.065)&valid
+   dt=t[sel]-t[i]
+   c=np.polyfit(dt,y[sel],3)
+   roots=np.roots(np.polyder(c))
+   roots=[v.real for v in roots if abs(v.imag)<1e-9 and abs(v.real)<.04]
+   if not roots: continue
+   dt0=min(roots,key=abs)
+   peaks.append([t[i]+dt0,np.polyval(c,dt0),sign])
+ return np.array(sorted(peaks))
+
+if __name__=='__main__':
+ for r in RUNS:
+  t,y,v,*_=load(r); p=extrema(t,y,v)
+  centers=(p[:-1,1]+p[1:,1])/2
+  print('\n',r,'center median',np.median(centers),'time range',t[[0,-1]])
+  offset=np.median(centers); amp=abs(p[:,1]-offset)
+  print('extrema first',p[:6], 'last',p[-6:])
+  print('amp log slope',np.polyfit(p[:,0],np.log(amp),1),'amp linear',np.polyfit(p[:,0],amp,1))
+  per=p[2:,0]-p[:-2,0]; a=(amp[:-2]+2*amp[1:-1]+amp[2:])/4
+  corrected=per/(2/np.pi*ellipk(np.sin(a/2)**2))
+  print('corrected mean/std',np.mean(corrected),np.std(corrected),'raw',per.mean())
+  print('by groups',[(np.mean(p[1:-1,0][sl]),np.mean(a[sl]),np.mean(corrected[sl])) for sl in np.array_split(np.arange(len(per)),4)])
+ np.savez('/app/initial.npz',dummy=0)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/reduce.py
+
+CMD: python3 - <<'PY'
+import pandas as pd, numpy as np
+from reduce import unwrap
+for r in ['a2','a3','b1','b3']:
+ s=pd.read_csv('/app/data/sync/'+r+'.csv'); f=unwrap(s.frame_counter); g=s.gps_s.to_numpy(); print(r); print(np.c_[g-g[0],f-f[0],np.r_[0,np.diff(f)/np.diff(g)]])
+PY
+
+OBS: 427 -0.09310965 -1.        ]]
+amp log slope [-0.01697133 -0.88902817] amp linear [-0.00376088  0.3758038 ]
+corrected mean/std 2.0127823757075984 0.2175202418856447 raw 2.0199719699278518
+by groups [(np.float64(11.579833490232756), np.float64(0.34572476700624444), np.float64(2.0602980796229122)), (np.float64(31.602873600902033), np.float64(0.2360
+120549596302), np.float64(1.9615691974381284)), (np.float64(50.85093760908904), np.float64(0.17126213673806756), np.float64(2.06477543502597)), (np.float64(69.9
+2865417821072), np.float64(0.12812438320081312), np.float64(1.9619859642215243))]
+root@897e050b18bc:/app# python3 - <<'PY'
+> import pandas as pd, numpy as np
+> from reduce import unwrap
+> for r in ['a2','a3','b1','b3']:
+>  s=pd.read_csv('/app/data/sync/'+r+'.csv'); f=unwrap(s.frame_counter); g=s.gps_s.to_numpy(); print(r); print(np.c_[g-g[0],f-f[0],np.r_[0,np.diff(f)/np.diff(g)
+]])
+> PY
+
+
+
+#### step 6 11:57:06
+MSG: Analysis: Preliminary finite-amplitude-corrected periods are about 1.816 s for A and 1.962 s for B. Some turning points were missed during tracking losses, so averaging those peak intervals is not reliable. A fit to the entire valid angle record will avoid this problem and estimate damping and camera-roll offsets directly.
+Plan: Fit the nonlinear physical-pendulum equation to each run using GPS-calibrated times, allowing linear and quadratic velocity damping. Compare residuals and derived periods, and inspect the clock-drift diagnostics.
+CMD: cat > /app/fit_ode.py <<'PY'
+from reduce import *
+from scipy.integrate import solve_ivp
+import json, time, sys
+
+def fit(r,method='pchip',damp='quad'):
+ t,y,valid,*_=load(r,method)
+ # Reduce computation while retaining samples across the entire run.
+ inds=np.arange(len(t))[valid][::5]; tx=t[inds]; yy=y[inds]
+ T=1.8163 if r[0]=='a' else 1.9618
+ off=(np.max(y)+np.min(y))/2
+ # Parameters: period, roll offset, initial angle, initial velocity, linear drag, quadratic drag, Coulomb friction.
+ p0=np.array([T,off,y[0]-off,0.,.022,.02,0.])
+ free=[0,1,2,3,4]+([5] if damp in ['quad','both'] else [])+([6] if damp in ['dry','both'] else [])
+ def model(q,full=False):
+  p=p0.copy(); p[free]=q
+  period,offset,a,v,c1,c2,c0=p
+  omega2=(2*np.pi/period)**2
+  def fun(t,z):
+   th,vel=z
+   return [vel,-omega2*np.sin(th)-c1*vel-c2*vel*abs(vel)-c0*np.sign(vel)]
+  tt=t if full else tx
+  sol=solve_ivp(fun,[0,t[-1]],[a,v],t_eval=tt,rtol=2e-8,atol=2e-10,max_step=.08)
+  return sol.y[0]+offset
+ calls=0
+ def residual(q):
+  nonlocal calls
+  calls+=1
+  return model(q)-yy
+ start=time.time()
+ opt=least_squares(residual,p0[free],diff_step=1e-4,x_scale='jac',ftol=2e-9,xtol=2e-9,gtol=2e-9)
+ p=p0.copy(); p[free]=opt.x
+ res=model(opt.x,True)-y
+ print(r,method,damp,'params',p,'rms',np.std(res[valid]),'calls',calls,'secs',time.time()-start,flush=True)
+ print('rms blocks', [np.std(res[ix][valid[ix]]) for ix in np.array_split(np.arange(len(t)),8)],flush=True)
+ np.savez('/app/fit_'+r+'_'+method+'_'+damp+'.npz',params=p,res=res,t=t,y=y,valid=valid)
+ return p
+if __name__=='__main__':
+ for r in sys.argv[1:] or RUNS: fit(r)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/fit_ode.py a1 b2 > /app/fit.log 2>&1 &
+
+CMD: tail -n 20 /app/fit.log
+
+OBS: rtol=2e-8,atol=2e-10,max_step=.08)
+>   return sol.y[0]+offset
+>  calls=0
+>  def residual(q):
+>   nonlocal calls
+>   calls+=1
+>   return model(q)-yy
+>  start=time.time()
+>  opt=least_squares(residual,p0[free],diff_step=1e-4,x_scale='jac',ftol=2e-9,xtol=2e-9,gtol=2e-9)
+>  p=p0.copy(); p[free]=opt.x
+>  res=model(opt.x,True)-y
+>  print(r,method,damp,'params',p,'rms',np.std(res[valid]),'calls',calls,'secs',time.time()-start,flush=True)
+>  print('rms blocks', [np.std(res[ix][valid[ix]]) for ix in np.array_split(np.arange(len(t)),8)],flush=True)
+>  np.savez('/app/fit_'+r+'_'+method+'_'+damp+'.npz',params=p,res=res,t=t,y=y,valid=valid)
+>  return p
+> if __name__=='__main__':
+>  for r in sys.argv[1:] or RUNS: fit(r)
+> PY
+root@897e050b18bc:/app# OPENBLAS_NUM_THREADS=1 python3 /app/fit_ode.py a1 b2 > /app/fit.log 2>&1 &
+[1] 454
+root@897e050b18bc:/app# tail -n 20 /app/fit.log
+root@897e050b18bc:/app#
+
+
+#### step 7 11:57:32
+MSG: Analysis: The synchronization differences reveal abrupt frame-count deficits rather than smooth oscillator drift in several runs. Interpolating through those deficits can distort the inferred swing phase. The clock needs piecewise calibration, with special treatment of intervals containing delivery interruptions.
+Plan: Identify synchronization discontinuities and fit constant-rate clock segments. Inspect the ongoing dynamical fits, then replace interpolated clocks with piecewise affine clocks and exclude ambiguous transition intervals.
+CMD: cat /app/fit.log; ps -o pid,etime,pcpu,args -p 454
+python3 - <<'PY'
+from reduce import *
+for r in RUNS:
+ t,y,v,f,sf,gps,c=load(r); rate=np.diff(sf)/np.diff(gps); med=np.median(rate)
+ cuts=np.where(abs(rate-med)>2)[0]+1
+ print('\n',r,'median fps',med,'anomalies',[(gps[i-1],gps[i],rate[i-1]) for i in cuts])
+ for ix in np.split(np.arange(len(sf)),cuts):
+  co=np.polyfit(gps[ix],sf[ix],1); res=sf[ix]-np.polyval(co,gps[ix])
+  print('segment',gps[ix[0]],gps[ix[-1]],'fps',co[0],'offset',co[1], 'rms',np.std(res),'range',res.min(),res.max())
+ diff=np.diff(y); big=np.argsort(abs(diff))[-8:]
+ print('angle jumps',[(int(f[i]),round(t[i],3),round(diff[i],5),bool(v[i] and v[i+1])) for i in sorted(big)])
+PY
+
+OBS: ), np.float64(0.0004150155557045818), np.float64(0.0004061826650710707)]
+[1]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/fit_ode.py a1 b2 > /app/fit.log 2>&1
+bash: ps: command not found
+root@897e050b18bc:/app# python3 - <<'PY'
+> from reduce import *
+> for r in RUNS:
+>  t,y,v,f,sf,gps,c=load(r); rate=np.diff(sf)/np.diff(gps); med=np.median(rate)
+>  cuts=np.where(abs(rate-med)>2)[0]+1
+>  print('\n',r,'median fps',med,'anomalies',[(gps[i-1],gps[i],rate[i-1]) for i in cuts])
+>  for ix in np.split(np.arange(len(sf)),cuts):
+>   co=np.polyfit(gps[ix],sf[ix],1); res=sf[ix]-np.polyval(co,gps[ix])
+>   print('segment',gps[ix[0]],gps[ix[-1]],'fps',co[0],'offset',co[1], 'rms',np.std(res),'range',res.min(),res.max())
+>  diff=np.diff(y); big=np.argsort(abs(diff))[-8:]
+>  print('angle jumps',[(int(f[i]),round(t[i],3),round(diff[i],5),bool(v[i] and v[i+1])) for i in sorted(big)])
+> PY
+
+
+
+#### step 8 11:57:40
+MSG: Analysis: The nonlinear fits to the two constant-clock runs have sub-milliradian residuals and recover consistent damping coefficients near 0.022 s⁻¹ linear drag and 0.020 quadratic drag. Their periods are approximately 1.8163023 s and 1.9617778 s. The remaining runs need their clock interruptions resolved.
+Plan: Retrieve the segment diagnostics and run full-record fits on the four remaining runs to localize errors around clock interruptions.
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/fit_ode.py a2 a3 b1 b3 > /app/fit_other.log 2>&1 &
+
+CMD: cat /app/fit_other.log
+
+OBS: 9613125 offset 59453.24845197766 rms 0.2914359568917739 range -0.4909474345186027 0.48040293452504557
+segment 39.0 79.0 fps 238.87006548692074 offset 59396.338159008104 rms 0.28185338916239555 range -0.49110591954377014 0.497387881288887
+angle jumps [(59624, np.float64(0.787), np.float64(-0.09842), False), (60970, np.float64(6.423), np.float64(-0.05493), False), (61415, np.float64(8.285), np.flo
+at64(-0.11381), False), (63631, np.float64(17.561), np.float64(0.05676), False), (64850, np.float64(22.665), np.float64(-0.05109), False), (69427, np.float64(42
+.063), np.float64(-0.0548), False), (71533, np.float64(50.879), np.float64(0.05988), False), (73160, np.float64(57.69), np.float64(-0.05294), False)]
+root@897e050b18bc:/app# OPENBLAS_NUM_THREADS=1 python3 /app/fit_ode.py a2 a3 b1 b3 > /app/fit_other.log 2>&1 &
+[1] 627
+root@897e050b18bc:/app# cat /app/fit_other.log
+root@897e050b18bc:/app#
+
+
+#### step 9 11:58:08
+MSG: Analysis: Each affected run has one delivery interruption: approximately 14 missing frame intervals in a2, 41 in a3, 52 in b1, and 57 in b3. Away from the interruption, each camera has a constant rate. Thus the correct elapsed-time model is a constant-rate clock with a discrete time jump, not a smoothly drifting clock.
+Plan: Add a piecewise clock model using the GPS logs and integer interruption sizes. Exclude the synchronization interval containing each interruption, then refit all runs with the nonlinear damped-pendulum model.
+CMD: python3 - <<'PY'
+p='/app/reduce.py'
+s=open(p).read().replace("if method=='pchip': clock=", "if method=='piecewise':\n  rate0=np.median(np.diff(sf)/np.diff(gps)); cuts=np.where(abs(np.diff(sf)/np.diff(gps)-rate0)>2)[0]+1\n  missing=np.zeros(len(sf)); gaps=[]\n  for i in cuts:\n   n=round(rate0*(gps[i]-gps[i-1])-(sf[i]-sf[i-1]))\n   missing[i:]+=n; gaps.append((sf[i-1],sf[i],n))\n  rate,intercept=np.polyfit(gps,sf+missing,1)\n  def clock(x):\n   x=np.asarray(x); corrected=x.copy()\n   for lo,hi,n in gaps: corrected+=n*(x>(lo+hi)/2)\n   return (corrected-intercept)/rate\n  print(r,'calibrated fps',rate,'gaps',gaps,flush=True)\n elif method=='pchip': clock=")
+s=s.replace('t=clock(f); t-=t[0]', "if method=='piecewise':\n  for lo,hi,n in gaps: valid &= (f<lo-12)|(f>hi+12)\n t=clock(f); t-=t[0]")
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/piecewise.log 2>&1 &
+from fit_ode import fit, RUNS
+for r in RUNS: fit(r,'piecewise')
+PY
+
+CMD: cat /app/fit_other.log; cat /app/piecewise.log
+
+OBS: .02131246
+  0.        ] rms 0.0032062430581824065 calls 28 secs 4.438405752182007
+rms blocks [np.float64(0.0008520729879119706), np.float64(0.0006702661929429993), np.float64(0.008685562802885294), np.float64(0.0005321502148395894), np.float6
+4(0.00044990621465617833), np.float64(0.0004474637185672445), np.float64(0.0004105398274713608), np.float64(0.00039045667199425285)]
+b3 pchip quad params [ 1.96178104  0.01795819  0.44057775 -0.00509139  0.02180659  0.02075624
+  0.        ] rms 0.002357674026746412 calls 28 secs 4.361055374145508
+rms blocks [np.float64(0.000968845337671968), np.float64(0.000961225907108751), np.float64(0.0009054607712740303), np.float64(0.006241155587457441), np.float64(
+0.0006687486119575165), np.float64(0.0005528442692834886), np.float64(0.0005175051444292784), np.float64(0.00046617699836476017)]
+a1 calibrated fps 240.7435431243993 gaps []
+root@897e050b18bc:/app#
+
+
+#### step 10 11:58:23
+MSG: Analysis: The interpolated-clock fits already agree to roughly 3×10⁻⁵ relative in period, but their residuals increase around interruptions. The piecewise clock should remove this bias. The b1 interruption spans two GPS seconds, so its integer deficit must be determined from fitted segment offsets rather than the rounded median frame rate.
+Plan: Determine each interruption size using a regression with separate pre- and post-interruption offsets, then repeat the piecewise fits. Check residuals and consistency before computing gravity and radius of gyration.
+CMD: cat /app/piecewise.log
+python3 - <<'PY'
+p='/app/reduce.py'; s=open(p).read(); s=s.replace('missing=np.zeros(len(sf)); gaps=[]', 'design=np.column_stack([gps,np.ones(len(gps))]+[(np.arange(len(sf))>=i).astype(float) for i in cuts])\n  coef=np.linalg.lstsq(design,sf,rcond=None)[0]\n  missing=np.zeros(len(sf)); gaps=[]')
+s=s.replace('n=round(rate0*(gps[i]-gps[i-1])-(sf[i]-sf[i-1]))','n=round(-coef[2+list(cuts).index(i)])')
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/piecewise2.log 2>&1 &
+from fit_ode import fit, RUNS
+for r in RUNS: fit(r,'piecewise')
+PY
+
+OBS: 5562997631), np.floa
+t64(0.00035277627271303766), np.float64(0.0003512924467791764), np.float64(0.0003483969036640821), np.float64(0.0003483333919129307)]
+a3 calibrated fps 241.031073964107 gaps [(np.float64(38426.0), np.float64(38626.0), 41)]
+root@897e050b18bc:/app# python3 - <<'PY'
+> p='/app/reduce.py'; s=open(p).read(); s=s.replace('missing=np.zeros(len(sf)); gaps=[]', 'design=np.column_stack([gps,np.ones(len(gps))]+[(np.arange(len(sf))>=
+i).astype(float) for i in cuts])\n  coef=np.linalg.lstsq(design,sf,rcond=None)[0]\n  missing=np.zeros(len(sf)); gaps=[]')
+> s=s.replace('n=round(rate0*(gps[i]-gps[i-1])-(sf[i]-sf[i-1]))','n=round(-coef[2+list(cuts).index(i)])')
+> open(p,'w').write(s)
+> PY
+root@897e050b18bc:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/piecewise2.log 2>&1 &
+> from fit_ode import fit, RUNS
+> for r in RUNS: fit(r,'piecewise')
+> PY
+[2] 683
+root@897e050b18bc:/app#
+
+
+#### step 11 11:58:37
+MSG: Analysis: The corrected piecewise fits now have residuals near 0.00035 rad, consistent with measurement noise, and recover release-from-rest initial velocities. This supports both the timing model and the linear-plus-quadratic damping model.
+Plan: Allow the remaining fits to finish, inspect their results, and calculate gravity and the centre-of-mass radius of gyration from the two pivot periods using the measured unequal centre-of-mass distances.
+CMD: cat /app/piecewise2.log; tail -n 15 /app/piecewise.log
+
+CMD: python3 - <<'PY'
+import numpy as np
+ha=.20011; hb=1.00003-ha
+Ta=1.81630; Tb=1.96178
+g=4*np.pi**2*(ha**2-hb**2)/(ha*Ta**2-hb*Tb**2)
+k=np.sqrt(g*ha*Ta**2/(4*np.pi**2)-ha**2)
+print('preliminary g',g,'radius',k)
+PY
+
+OBS: 320041425186834)]
+b2 calibrated fps 240.45506972747978 gaps []
+b2 piecewise quad params [ 1.96177651e+00  6.09927798e-03  2.99981694e-01 -1.08258264e-04
+  2.22190275e-02  2.00000749e-02  0.00000000e+00] rms 0.00035181319214190815 calls 28 secs 4.492595672607422
+rms blocks [np.float64(0.0003508798590640877), np.float64(0.00034809788378237504), np.float64(0.0003537520727532905), np.float64(0.0003513993683995779), np.floa
+t64(0.0003544637861610441), np.float64(0.00035198939779733303), np.float64(0.00035292086986205354), np.float64(0.00035059997314512687)]
+b3 calibrated fps 238.87140671556827 gaps [(np.float64(68530.0), np.float64(68712.0), 57)]
+root@897e050b18bc:/app# python3 - <<'PY'
+> import numpy as np
+> ha=.20011; hb=1.00003-ha
+> Ta=1.81630; Tb=1.96178
+> g=4*np.pi**2*(ha**2-hb**2)/(ha*Ta**2-hb*Tb**2)
+> k=np.sqrt(g*ha*Ta**2/(4*np.pi**2)-ha**2)
+> print('preliminary g',g,'radius',k)
+> PY
+
+
+
+#### step 12 11:58:59
+MSG: Analysis: The inferred gravity is near 9.802 m/s² and the radius of gyration is near 0.3520 m. Most fitted residuals match tracker noise. The revised synchronization regression will resolve b1's interruption size more accurately; all other run periods are already tightly consistent.
+Plan: Wait briefly for the revised fits, then inspect all six period estimates and residuals before writing the final JSON.
+CMD: 
+CMD: cat /app/piecewise2.log
+python3 - <<'PY'
+import numpy as np
+from reduce import RUNS
+for r in RUNS:
+ d=np.load('/app/fit_'+r+'_piecewise_quad.npz')
+ print(r,'T0',d['params'][0],'rms',np.std(d['res'][d['valid']]))
+PY
+
+OBS: 5708432199745 calls 35 secs 5.519928693771362
+rms blocks [np.float64(0.00035652954170048765), np.float64(0.0003480473884028573), np.float64(0.0003495670468343894), np.float64(0.0003406629624439002), np.floa
+t64(0.00035801157300114164), np.float64(0.00034105379583214987), np.float64(0.00034780294779947435), np.float64(0.0003437107425170921)]
+[1]-  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/piecewise.log 2>&1
+from fit_ode import fit, RUNS
+for r in RUNS: fit(r,'piecewise')
+PY
+
+[2]+  Done                    OPENBLAS_NUM_THREADS=1 python3 - <<'PY' > /app/piecewise2.log 2>&1
+from fit_ode import fit, RUNS
+for r in RUNS: fit(r,'piecewise')
+PY
+
+root@897e050b18bc:/app# python3 - <<'PY'
+> import numpy as np
+> from reduce import RUNS
+> for r in RUNS:
+>  d=np.load('/app/fit_'+r+'_piecewise_quad.npz')
+>  print(r,'T0',d['params'][0],'rms',np.std(d['res'][d['valid']]))
+> PY
+
+
+
+#### step 13 11:59:19
+MSG: Analysis: All six piecewise-clock nonlinear fits now have noise-level residuals near 0.00035 rad. Their undamped infinitesimal-amplitude periods agree closely within each pivot group. The preliminary gravity calculation is 9.79169 m/s² (correcting the earlier rough statement), and the radius of gyration is about 0.35170 m.
+Plan: Average the three independent period estimates for each knife edge. Use T² = 4π²(k²+h²)/(gh) at both edges to solve for gravity and radius of gyration, write the required JSON, and validate its structure and numerical values.
+CMD: mkdir -p /app/output
+python3 - <<'PY'
+import json, numpy as np
+from reduce import RUNS
+periods={r:float(np.load('/app/fit_'+r+'_piecewise_quad.npz')['params'][0]) for r in RUNS}
+Ta=float(np.mean([periods[r] for r in RUNS if r.startswith('a')]))
+Tb=float(np.mean([periods[r] for r in RUNS if r.startswith('b')]))
+ha=0.20011; hb=1.00003-ha
+g=float(4*np.pi**2*(ha**2-hb**2)/(ha*Ta**2-hb*Tb**2))
+k=float(np.sqrt(g*ha*Ta**2/(4*np.pi**2)-ha**2))
+result={'g_m_s2':g,'small_amplitude_period_s':{'a':Ta,'b':Tb},'radius_of_gyration_m':k,'run_periods_s':periods}
+with open('/app/output/result.json','w') as f: json.dump(result,f,indent=2,allow_nan=False); f.write('\n')
+print(json.dumps(result,indent=2))
+assert set(result)=={'g_m_s2','small_amplitude_period_s','radius_of_gyration_m','run_periods_s'}
+assert set(result['small_amplitude_period_s'])=={'a','b'}
+assert set(result['run_periods_s'])==set(RUNS)
+assert all(np.isfinite(x) and x>0 for x in [g,k,Ta,Tb,*periods.values()])
+print('Validation passed.')
+PY
+
+OBS: ecewise_quad.npz')['params'][0]) for r in RUNS}
+> Ta=float(np.mean([periods[r] for r in RUNS if r.startswith('a')]))
+> Tb=float(np.mean([periods[r] for r in RUNS if r.startswith('b')]))
+> ha=0.20011; hb=1.00003-ha
+> g=float(4*np.pi**2*(ha**2-hb**2)/(ha*Ta**2-hb*Tb**2))
+> k=float(np.sqrt(g*ha*Ta**2/(4*np.pi**2)-ha**2))
+> result={'g_m_s2':g,'small_amplitude_period_s':{'a':Ta,'b':Tb},'radius_of_gyration_m':k,'run_periods_s':periods}
+> with open('/app/output/result.json','w') as f: json.dump(result,f,indent=2,allow_nan=False); f.write('\n')
+> print(json.dumps(result,indent=2))
+> assert set(result)=={'g_m_s2','small_amplitude_period_s','radius_of_gyration_m','run_periods_s'}
+> assert set(result['small_amplitude_period_s'])=={'a','b'}
+> assert set(result['run_periods_s'])==set(RUNS)
+> assert all(np.isfinite(x) and x>0 for x in [g,k,Ta,Tb,*periods.values()])
+> print('Validation passed.')
+> PY
+
+
+
+#### step 14 11:59:23
+MSG: Analysis: The six fitted run periods and the derived pivot periods, gravity, and radius of gyration have been written to the requested output file. The final command's output is still pending.
+Plan: Confirm that the JSON file exists and contains the expected validated results.
+CMD: cat /app/output/result.json
+
+OBS: New Terminal Output:
+
+> PY
+{
+  "g_m_s2": 9.79177610315909,
+  "small_amplitude_period_s": {
+    "a": 1.8162995569714118,
+    "b": 1.9617728245616648
+  },
+  "radius_of_gyration_m": 0.35169941812921335,
+  "run_periods_s": {
+    "a1": 1.8163024475289176,
+    "a2": 1.8162948565863153,
+    "a3": 1.816301366799002,
+    "b1": 1.9617698495435816,
+    "b2": 1.9617765059705596,
+    "b3": 1.961772118170853
+  }
+}
+Validation passed.
+root@897e050b18bc:/app# cat /app/output/result.json
+{
+  "g_m_s2": 9.79177610315909,
+  "small_amplitude_period_s": {
+    "a": 1.8162995569714118,
+    "b": 1.9617728245616648
+  },
+  "radius_of_gyration_m": 0.35169941812921335,
+  "run_periods_s": {
+    "a1": 1.8163024475289176,
+    "a2": 1.8162948565863153,
+    "a3": 1.816301366799002,
+    "b1": 1.9617698495435816,
+    "b2": 1.9617765059705596,
+    "b3": 1.961772118170853
+  }
+}
+root@897e050b18bc:/app#
+
+
+#### step 15 11:59:27
+MSG: Analysis: The requested JSON is present at /app/output/result.json and its structure and numerical values passed validation. GPS clock calibration, counter wraps, delivery interruptions, lost tracking, camera roll, finite amplitude, and damping were accounted for.
+Plan: No further commands are needed.
+CMD: 
+OBS: Current terminal state:
+New Terminal Output:
+
+root@897e050b18bc:/app#
+
+
+Are you sure you want to mark the task as complete? This will trigger your solution to be graded and you won't be able to make any further corrections. If so, include "task_complete": true in your JSON response again.
+
+#### step 16 11:59:30
+MSG: Analysis: The output file has been written and verified with exactly the required members and finite numeric results.
+Plan: Confirm completion and submit the existing result file for grading.
+CMD: 
+OBS: New Terminal Output:
+
+root@897e050b18bc:/app#
+
+

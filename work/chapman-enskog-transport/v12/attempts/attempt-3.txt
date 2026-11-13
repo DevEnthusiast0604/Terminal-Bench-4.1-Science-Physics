@@ -1,0 +1,2894 @@
+#### step 2 05:46:34
+MSG: Analysis: The output directory has not yet been inspected. This task requires both quantum scattering calculations and a converged solution of the linearized binary-mixture Boltzmann equations; a low-order transport approximation would not meet the requested tolerance.
+Plan: Inspect the available environment, then develop the scattering and collision-bracket machinery and validate its normalization and convergence before writing the final standalone program.
+CMD: ls -la /app; mkdir -p /app/output; python3 - <<'PY'
+import numpy, scipy
+print(numpy.__version__,scipy.__version__)
+PY
+which gcc; cat /proc/cpuinfo | head
+
+OBS: New Terminal Output:
+root@1afed5a5c86f:/app# ls -la /app; mkdir -p /app/output; python3 - <<'PY'
+> import numpy, scipy
+> print(numpy.__version__,scipy.__version__)
+> PY
+total 12
+drwxr-xr-x 1 root root 4096 Nov  3 00:51 .
+drwxr-xr-x 1 root root 4096 Nov  5 05:46 ..
+drwxr-xr-x 2 root root 4096 Nov  3 00:51 output
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#### step 3 05:49:09
+MSG: Analysis: I have a numerical formulation for the transport equations: use a converged Sonine-polynomial Galerkin basis, evaluate collision brackets through a two-variable generating function, and solve the coupled diffusion/heat and shear systems. Identical-particle scattering must include internal-state averaging: degeneracies are 1, 9, 6, 6, and 9, with HD fermionic and the other molecules bosonic.
+Plan: Check the compiler and libraries, then build a fast radial scattering solver and the Python collision-bracket implementation. Validate against analytic cross sections and convergence in basis size, radial step, and energy quadrature.
+CMD: 
+which gcc; python3 - <<'PY'
+import numpy, scipy
+print(numpy.__version__, scipy.__version__)
+PY
+ls -la /app/output
+
+OBS:  | head
+processor       : 0
+vendor_id       : GenuineIntel
+cpu family      : 6
+model           : 173
+model name      : Intel(R) Xeon(R) 6975P-C
+stepping        : 1
+microcode       : 0x1000434
+cpu MHz         : 3901.105
+cache size      : 491520 KB
+physical id     : 0
+root@1afed5a5c86f:/app#
+root@1afed5a5c86f:/app# which gcc; python3 - <<'PY'
+> import numpy, scipy
+> print(numpy.__version__, scipy.__version__)
+> PY
+2.3.3 1.18.1
+root@1afed5a5c86f:/app# ls -la /app/output
+total 8
+drwxr-xr-x 2 root root 4096 Nov  3 00:51 .
+drwxr-xr-x 1 root root 4096 Nov  3 00:51 ..
+root@1afed5a5c86f:/app#
+
+
+
+
+
+
+
+
+
+
+
+#### step 4 05:51:39
+MSG: Analysis: The installed NumPy and SciPy versions match the checker environment. No C compiler was found, so the program should use vectorized NumPy/SciPy operations. I have derived the source terms and collision-bracket normalization for diffusion, heat conduction, and viscosity, including the zero-momentum constraint and the heat-flux correction at zero relative species velocity.
+Plan: Implement a direct quadrature collision-bracket solver first and test it with isotropic hard-sphere scattering. This will establish the transport normalization and provide timing estimates before adding the quantum radial solver.
+CMD: cat > /app/testbr.py <<'PY'
+import os
+os.environ['OPENBLAS_NUM_THREADS']='2'
+import numpy as np
+from scipy.special import roots_hermite, roots_genlaguerre, roots_legendre, eval_genlaguerre
+from time import time
+
+def transport(m,x,T,N=5,ne=40,qs=None):
+    # N basis functions in each species, orders 0..N-1
+    M=sum(m); mu=m[0]*m[1]/M
+    gh,wh=roots_hermite(N+2)
+    G=np.array(np.meshgrid(gh,gh,gh,indexing='ij')).reshape(3,-1).T
+    wg=(wh[:,None,None]*wh[None,:,None]*wh[None,None,:]).ravel()/np.pi**1.5
+    ang,wa=roots_legendre(N+2)
+    yy,wy=roots_genlaguerre(ne,1)
+    BV=np.zeros((2*N,2*N)); BT=BV.copy()
+    start=time()
+    for i,j in [(0,0),(0,1),(1,1)]:
+        ma,mb=m[i],m[j]; mass=ma+mb; mur=ma*mb/mass
+        GG=G*np.sqrt(2*T/mass)
+        factor=x[i]*x[j]*(.25 if i==j else .5)*np.sqrt(8*T/(np.pi*mur))
+        for z,y in enumerate(yy):
+            g=np.sqrt(2*T*y/mur)
+            sh=np.array([mb/mass,-ma/mass])*g
+            vi=GG.copy();vi[:,2]+=sh[0]
+            vj=GG.copy();vj[:,2]+=sh[1]
+            vp=np.broadcast_to(GG,(len(ang),)+GG.shape).copy();vp[:,:,0]+=sh[0]*np.sqrt(1-ang**2)[:,None];vp[:,:,2]+=sh[0]*ang[:,None]
+            vq=np.broadcast_to(GG,(len(ang),)+GG.shape).copy();vq[:,:,0]+=sh[1]*np.sqrt(1-ang**2)[:,None];vq[:,:,2]+=sh[1]*ang[:,None]
+            def bases(v,mm):
+                z=mm*np.sum(v*v,axis=-1)/(2*T)
+                vec=[];ten=[]
+                q=np.stack([v[...,0]**2-v[...,1]**2,(2*v[...,2]**2-v[...,0]**2-v[...,1]**2)/np.sqrt(3),2*v[...,0]*v[...,1],2*v[...,0]*v[...,2],2*v[...,1]*v[...,2]],axis=-1)/np.sqrt(2)
+                for n in range(N):
+                    vec.append(v*eval_genlaguerre(n,1.5,z)[...,None])
+                    ten.append(q*eval_genlaguerre(n,2.5,z)[...,None])
+                return np.array(vec),np.array(ten)
+            av,at=bases(vi,ma);bv,bt=bases(vj,mb);pv,pt=bases(vp,ma);qv,qt=bases(vq,mb)
+            dv=np.zeros((2*N,len(ang),len(G),3));dt=np.zeros((2*N,len(ang),len(G),5))
+            dv[i*N:(i+1)*N]+=pv-av[:,None];dv[j*N:(j+1)*N]+=qv-bv[:,None]
+            dt[i*N:(i+1)*N]+=pt-at[:,None];dt[j*N:(j+1)*N]+=qt-bt[:,None]
+            angular=wa*np.pi/2 if qs is None else qs(i,j,z,ang,wa)
+            w=factor*wy[z]*angular[:,None]*wg[None,:]
+            # signed quadrature allowed
+            dv=dv.reshape(2*N,-1);dt=dt.reshape(2*N,-1)
+            BV+=(dv*np.repeat(w.ravel(),3))@dv.T/3
+            BT+=(dt*np.repeat(w.ravel(),5))@dt.T/5
+    sd=np.zeros(2*N);st=sd.copy();sv=sd.copy()
+    sd[0]=T/m[0];sd[N]=-T/m[1]
+    st[1]=-2.5*x[0]*T/m[0];st[N+1]=-2.5*x[1]*T/m[1]
+    sv[0]=2*x[0]*T/m[0];sv[N]=2*x[1]*T/m[1]
+    # eliminate one null momentum mode
+    take=np.arange(1,2*N)
+    vd=np.linalg.solve(BV[np.ix_(take,take)],sd[take]);vt=np.linalg.solve(BV[np.ix_(take,take)],st[take])
+    d=sd[take]@vd;h=sd[take]@vt;t=st[take]@vt
+    eta=T/2*sv@np.linalg.solve(BT,sv)
+    print('time',time()-start,'condition',np.linalg.cond(BV[np.ix_(take,take)]))
+    return eta,t-h*h/d,x[0]*x[1]*d,h/(x[0]*x[1]*d)
+if __name__=='__main__':
+    import sys
+    N=int(sys.argv[1]) if len(sys.argv)>1 else 4
+    print(transport([1,1],[.3,.7],1,N=N,ne=2*N+4))
+    print('hard sphere leading eta,lambda,D:',5/(16*np.sqrt(np.pi)),75/(64*np.sqrt(np.pi)),3/(8*np.sqrt(np.pi)))
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/testbr.py 3
+
+OBS:   N=int(sys.argv[1]) if len(sys.argv)>1 else 4
+>     print(transport([1,1],[.3,.7],1,N=N,ne=2*N+4))
+>     print('hard sphere leading eta,lambda,D:',5/(16*np.sqrt(np.pi)),75/(64*np.sqrt(np.pi)),3/(8*np.sqrt(np.pi)))
+> PY
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/testbr.py 3
+time 0.018772125244140625 condition 22.861895860331906
+(np.float64(0.17910884380219505), np.float64(0.6761860243159373), np.float64(0.21552531238302974), np.float64(-1.4343849880780343e-16))
+hard sphere leading eta,lambda,D: 0.17630924485867386 0.6611596682200269 0.21157109383040862
+root@1afed5a5c86f:/app#
+
+
+#### step 5 05:51:49
+MSG: Analysis: The direct collision brackets reproduce the expected hard-sphere results and the known higher-order corrections. Equal-mass, identical-cross-section mixtures give zero thermal diffusion as required. The direct quadrature is faster than expected, so it may be usable with an energy-interpolation strategy.
+Plan: Measure the cost and convergence at higher Sonine orders. Then implement vectorized Numerov integration for the quantum phase shifts, and use energy-dependent angular transport moments in the bracket calculation.
+CMD: OPENBLAS_NUM_THREADS=2 python3 /app/testbr.py 7; OPENBLAS_NUM_THREADS=2 python3 /app/testbr.py 10
+
+CMD: ls /usr/bin | grep -E 'gcc|clang|cc$|gfortran'; python3 - <<'PY'
+import importlib.util
+for x in ['numba','Cython']:
+ print(x,importlib.util.find_spec(x))
+PY
+
+OBS: New Terminal Output:
+
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/testbr.py 7; OPENBLAS_NUM_THREADS=2 python3 /app/testbr.py 10
+time 0.5003190040588379 condition 145.5000953053973
+(np.float64(0.17913601571220805), np.float64(0.677831013154347), np.float64(0.21558093481344656), np.float64(-6.901471056986643e-17))
+hard sphere leading eta,lambda,D: 0.17630924485867386 0.6611596682200269 0.21157109383040862
+ls /usr/bin | grep -E 'gcc|clang|cc$|gfortran'; python3 - <<'PY'
+import importlib.util
+for x in ['numba','Cython']:
+ print(x,importlib.util.find_spec(x))
+PY
+
+
+
+#### step 6 05:52:23
+MSG: Analysis: The hard-sphere calculation converges smoothly as the polynomial basis grows. The main remaining numerical issue is energy integration: quantum resonances can be narrower than a fixed Gauss-Laguerre mesh resolves. I will separate the polynomial collision brackets from the scattering data, allowing a dense or adaptive energy mesh without repeating the expensive velocity integrals.
+Plan: Build the radial solver and angular cross-section projections. Check phase-shift convergence against step size and matching radius, then construct effective quadrature weights by projecting the energy-dependent cross sections onto Laguerre polynomials.
+CMD: 
+cat > /app/scatter.py <<'PY'
+import numpy as np
+from scipy.special import spherical_jn,spherical_yn, eval_legendre
+from time import time
+
+def phases(E,mu,A,L,h=.003,R=35,lmax=40):
+    E=np.asarray(E); C=8*np.pi**2*mu/L**2
+    k=np.sqrt(C*E)
+    ls=np.arange(lmax+1); ll=ls*(ls+1)
+    # start where potential is very strongly forbidden; irregular contamination dies exponentially
+    r0=A+(1-A)*.66
+    steps=int(np.ceil((R-r0)/h));h=(R-r0)/steps
+    def q(r):
+        s=((1-A)/(r-A))**6
+        return ll[None,:]/r**2+C*(4*s*(s-1)-E[:,None])
+    qm=q(r0);q0=q(r0+h)
+    um=np.zeros((len(E),lmax+1));u=np.ones_like(um)
+    # renormalize periodically to suppress overflow in high partial waves
+    for t in range(1,steps):
+        r=r0+(t+1)*h
+        qp=q(r)
+        up=((2+5*h*h*q0/6)*u-(1-h*h*qm/12)*um)/(1-h*h*qp/12)
+        if t%100==0:
+            norm=np.maximum(np.abs(up),np.abs(u)); norm=np.maximum(norm,1e-100)
+            up/=norm;u/=norm
+        um,u=u,up;qm,q0=q0,qp
+    # Numerov corrected central derivative at R-h, with u at R and R-2h
+    qp=q(R+h)
+    up=((2+5*h*h*q0/6)*u-(1-h*h*qm/12)*um)/(1-h*h*qp/12)
+    deriv=(up-um)/(2*h)-h*(qp*up-qm*um)/12
+    z=k[:,None]*R
+    j=z*spherical_jn(ls[None,:],z);n=z*spherical_yn(ls[None,:],z)
+    jp=k[:,None]*(spherical_jn(ls[None,:],z)+z*spherical_jn(ls[None,:],z,True))
+    np_=k[:,None]*(spherical_yn(ls[None,:],z)+z*spherical_yn(ls[None,:],z,True))
+    return np.arctan2(u*jp-deriv*j,u*np_-deriv*n)
+
+def cross(E,mu,A,L,ang,deg=1,sign=0,**kwargs):
+    d=phases(E,mu,A,L,**kwargs);k=np.sqrt(8*np.pi**2*mu*np.asarray(E))/L
+    l=np.arange(d.shape[1]);pl=np.array([eval_legendre(i,ang) for i in l])
+    amp=(2*l+1)[None,:]*np.exp(1j*d)*np.sin(d)/k[:,None]
+    if sign==0:
+        f=amp@pl;return np.abs(f)**2
+    fe=amp[:,::2]@pl[::2];fo=amp[:,1::2]@pl[1::2]
+    return (1+sign/deg)*np.abs(fe)**2+(1-sign/deg)*np.abs(fo)**2
+
+if __name__=='__main__':
+    t=time(); E=np.geomspace(.001,15,400)
+    a=np.linspace(-1,1,21)
+    for h in [.01,.005,.0025]:
+        d=phases(E,.5,0,2,h=h,R=35,lmax=40)
+        if h==.01: old=d
+        else: print(h,np.max(abs(np.sin(d-old))), np.max(abs(np.sin(d-old)[:,:10])));old=d
+    print('time',time()-t)
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/scatter.py
+
+OBS: sin(d)/k[:,None]
+>     if sign==0:
+>         f=amp@pl;return np.abs(f)**2
+>     fe=amp[:,::2]@pl[::2];fo=amp[:,1::2]@pl[1::2]
+>     return (1+sign/deg)*np.abs(fe)**2+(1-sign/deg)*np.abs(fo)**2
+>
+> if __name__=='__main__':
+>     t=time(); E=np.geomspace(.001,15,400)
+>     a=np.linspace(-1,1,21)
+>     for h in [.01,.005,.0025]:
+>         d=phases(E,.5,0,2,h=h,R=35,lmax=40)
+>         if h==.01: old=d
+>         else: print(h,np.max(abs(np.sin(d-old))), np.max(abs(np.sin(d-old)[:,:10])));old=d
+>     print('time',time()-t)
+> PY
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/scatter.py
+
+
+
+#### step 7 05:52:43
+MSG: Analysis: The higher-order hard-sphere results are stable. The radial solver is now implemented, but its accuracy test is still running. To resolve quantum resonances without excessive collision-bracket work, I will integrate scattering moments on a separate energy mesh and map those moments into effective angular and energy quadrature weights.
+Plan: Read the phase-shift convergence results and test the large-radius truncation. Add the effective-weight construction and compare transport results under energy-mesh and Sonine-order refinement.
+CMD: 
+CMD: cat > /app/checkscatter.py <<'PY'
+from scatter import *
+E=np.array([.001,.01,.05,.1,.2,.5,1.,2.,5.,15.])
+for A,L,mu in [(0,2,.5),(.5,2.8,.5),(0,.8,1.)]:
+ print('parameters',A,L,mu,flush=True)
+ old=None
+ for R in [15,25,40,65]:
+  d=phases(E,mu,A,L,h=.003,R=R,lmax=60)
+  if old is not None: print(R,np.max(abs(np.sin(d-old)),axis=1),flush=True)
+  old=d
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/checkscatter.py
+
+OBS: ,mu,flush=True)
+>  old=None
+>  for R in [15,25,40,65]:
+>   d=phases(E,mu,A,L,h=.003,R=R,lmax=60)
+>   if old is not None: print(R,np.max(abs(np.sin(d-old)),axis=1),flush=True)
+>   old=d
+> PY
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/checkscatter.py
+parameters 0 2 0.5
+25 [9.07000634e-05 3.09410533e-05 1.57491631e-05 1.16198847e-05
+ 8.50041620e-06 5.53956380e-06 4.01921959e-06 1.84459798e-06
+ 8.31153383e-07 8.62376649e-07]
+40 [7.43583016e-06 2.60167843e-06 1.26333237e-06 9.37268124e-07
+ 6.78454619e-07 4.44609682e-07 1.62989311e-07 9.73160295e-08
+ 9.73984562e-08 7.12580412e-07]
+
+
+
+#### step 8 05:53:19
+MSG: Analysis: The radial step error decreases at fourth order as expected. A matching radius near 40–65 sigma is adequate for the important low partial waves, but I will add the analytic long-range tail correction to reduce radius cost and control forward-scattering errors. The collision brackets are polynomial in collision energy and angle after averaging over centre-of-mass velocity, so their scattering dependence can be represented exactly by a finite set of energy/angular moments.
+Plan: Implement moment-based effective quadrature weights, using enough angular and energy orders to integrate every bracket in the selected Sonine basis. Start with composite Gaussian energy integration, then test refinement and resonance handling.
+CMD: 
+CMD: cp /app/testbr.py /app/brackets.py
+python3 - <<'PY'
+p='/app/brackets.py'
+s=open(p).read().replace('roots_legendre(N+2)','roots_legendre(2*N+1)')
+s=s.replace("print('time',time()-start,'condition',np.linalg.cond(BV[np.ix_(take,take)]))", "print('brackets',time()-start,file=__import__('sys').stderr)")
+open(p,'w').write(s)
+PY
+cat > /app/moments.py <<'PY'
+import numpy as np
+from scipy.special import roots_legendre, roots_genlaguerre,eval_genlaguerre,eval_legendre
+from scatter import phases
+from time import time
+
+def energy_grid(T,step=.15,cut=65):
+    # mesh in y=E/T, finer at low energy
+    edges=np.unique(np.r_[0,np.geomspace(1e-5,1,60),np.arange(1,cut,step),cut])
+    z,w=roots_legendre(6)
+    y=((edges[1:]+edges[:-1])[:,None]+(edges[1:]-edges[:-1])[:,None]*z)/2
+    weights=(edges[1:]-edges[:-1])[:,None]*w/2
+    return y.ravel(),weights.ravel()
+
+def weights(T,mu,A,L,N,deg=1,sign=0,step=.15,h=.003,R=35):
+    st=time(); ne=2*N+3;na=2*N+1
+    y,w=energy_grid(T,step)
+    # integration angle grid must integrate amplitude^2 times Legendre of degree 2N
+    E=T*y
+    lmax=int(np.sqrt(8*np.pi**2*mu/L**2*T*65)*1.8+24)
+    z,wz=roots_legendre(lmax+N+2)
+    pl=np.array([eval_legendre(l,z) for l in range(lmax+1)])
+    pz=np.array([eval_legendre(l,z) for l in range(na)])
+    Q=[]
+    for start in range(0,len(y),600):
+        e=E[start:start+600]
+        d=phases(e,mu,A,L,h=h,R=R,lmax=lmax)
+        ls=np.arange(lmax+1)
+        amp=(2*ls+1)[None,:]*np.exp(1j*d)*np.sin(d)/np.sqrt(8*np.pi**2*mu*e[:,None]/L**2)
+        if sign==0:
+            cs=abs(amp@pl)**2
+        else:
+            cs=(1+sign/deg)*abs(amp[:,::2]@pl[::2])**2+(1-sign/deg)*abs(amp[:,1::2]@pl[1::2])**2
+        Q.append(2*np.pi*(cs*wz)@pz.T)
+    Q=np.concatenate(Q)
+    le=np.array([eval_genlaguerre(n,1,y) for n in range(ne)])
+    mom=(le*(w*y*np.exp(-y)))@Q
+    yy,wy=roots_genlaguerre(ne,1);aa,wa=roots_legendre(na)
+    ly=np.array([eval_genlaguerre(n,1,yy)/(n+1) for n in range(ne)])
+    pa=np.array([eval_legendre(n,aa)*(2*n+1)/2 for n in range(na)])
+    effective=ly.T@mom@pa
+    print('scattering',mu,len(y),lmax,time()-st,file=__import__('sys').stderr)
+    return effective*wa
+
+if __name__=='__main__':
+    import sys
+    from brackets import transport
+    N=int(sys.argv[1]);step=float(sys.argv[2]);A=float(sys.argv[3]) if len(sys.argv)>3 else 0
+    m=[1,2];x=[.3,.7];T=.3;L=2
+    ws={}
+    for i,j in [(0,0),(0,1),(1,1)]:
+        mu=m[i]*m[j]/(m[i]+m[j]);deg=[1,6][i] if i==j else 1
+        ws[i,j]=weights(T,mu,A,L,N,deg=deg,sign=int(i==j),step=step)
+    print(transport(m,x,T,N=N,ne=2*N+3,qs=lambda i,j,z,a,w:ws[i,j][z]))
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/moments.py 6 .3
+
+OBS: port__('sys').stderr)
+>     return effective*wa
+>
+> if __name__=='__main__':
+>     import sys
+>     from brackets import transport
+>     N=int(sys.argv[1]);step=float(sys.argv[2]);A=float(sys.argv[3]) if len(sys.argv)>3 else 0
+>     m=[1,2];x=[.3,.7];T=.3;L=2
+>     ws={}
+>     for i,j in [(0,0),(0,1),(1,1)]:
+>         mu=m[i]*m[j]/(m[i]+m[j]);deg=[1,6][i] if i==j else 1
+>         ws[i,j]=weights(T,mu,A,L,N,deg=deg,sign=int(i==j),step=step)
+>     print(transport(m,x,T,N=N,ne=2*N+3,qs=lambda i,j,z,a,w:ws[i,j][z]))
+> PY
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/moments.py 6 .3
+
+
+
+#### step 9 05:53:44
+MSG: Analysis: The moment implementation is running. I identified an important quadrature correction: high-order collision brackets need more centre-of-mass Hermite nodes than the initial test used. I will correct that and exploit reflection symmetry to reduce its cost. The radial tests also show that a fixed radial step is unnecessarily expensive at large distances; a short-range numerical solution followed by a controlled tail correction will be preferable.
+Plan: Correct the velocity quadrature and compare basis convergence. Then evaluate shorter matching radii with tail corrections and choose radial accuracy parameters that work across the full quantum-parameter range.
+CMD: 
+CMD: cp /app/brackets.py /app/brackets_old.py; python3 - <<'PY'
+p='/app/brackets.py';s=open(p).read();s=s.replace('gh,wh=roots_hermite(N+2)','gh,wh=roots_hermite(2*N+1)')
+s=s.replace('G=np.array(np.meshgrid(gh,gh,gh,indexing=\'ij\')).reshape(3,-1).T\n    wg=(wh[:,None,None]*wh[None,:,None]*wh[None,None,:]).ravel()/np.pi**1.5',"gy=gh[N:]; why=wh[N:].copy(); why[1:]*=2\n    G=np.array(np.meshgrid(gh,gy,gh,indexing='ij')).reshape(3,-1).T\n    wg=(wh[:,None,None]*why[None,:,None]*wh[None,None,:]).ravel()/np.pi**1.5")
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/brackets.py 7
+
+OBS: p/brackets_old.py; python3 - <<'PY'
+> p='/app/brackets.py';s=open(p).read();s=s.replace('gh,wh=roots_hermite(N+2)','gh,wh=roots_hermite(2*N+1)')
+> s=s.replace('G=np.array(np.meshgrid(gh,gh,gh,indexing=\'ij\')).reshape(3,-1).T\n    wg=(wh[:,None,None]*wh[None,:,None]*wh[None,None,:]).ravel()/np.pi**1.5',"
+gy=gh[N:]; why=wh[N:].copy(); why[1:]*=2\n    G=np.array(np.meshgrid(gh,gy,gh,indexing='ij')).reshape(3,-1).T\n    wg=(wh[:,None,None]*why[None,:,None]*wh[None,
+None,:]).ravel()/np.pi**1.5")
+> open(p,'w').write(s)
+> PY
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/brackets.py 7
+
+
+
+#### step 10 05:54:12
+MSG: Analysis: The first quantum-mixture result is available. Its magnitude is plausible, but it still needs numerical convergence checks. The corrected centre-of-mass quadrature is running now; this correction matters for higher Sonine terms even when the leading transport coefficients change only slightly.
+Plan: Run corrected calculations at orders 6, 8, and 10, and refine the energy mesh independently. Also check the inner radial boundary, which must be sufficiently deep in the repulsive wall for the most quantum-mechanical cases.
+CMD: 
+CMD: OPENBLAS_NUM_THREADS=2 python3 /app/moments.py 6 .15 > /app/result6.txt 2>/app/log6.txt & OPENBLAS_NUM_THREADS=2 python3 /app/moments.py 8 .15 > /app/result8.txt 2>/app/log8.txt & wait; cat /app/result{6,8}.txt; cat /app/log{6,8}.txt
+
+CMD: cat > /app/innercheck.py <<'PY'
+import inspect
+from scatter import phases
+import numpy as np
+s=inspect.getsource(phases)
+E=np.array([.001,.01,.05,.1,.2,.5,1,2,5,15.])
+for A,L,mu in [(.5,2.8,.5),(0,2.8,.5),(0,.8,1)]:
+ old=None
+ print(A,L,mu,flush=True)
+ for b in [.66,.6,.55,.5]:
+  ns={};exec(s.replace('*.66','*'+str(b)),phases.__globals__,ns)
+  d=ns['phases'](E,mu,A,L,h=.0015,R=30,lmax=25)
+  if old is not None:print(b,np.max(abs(np.sin(d-old)),axis=1),flush=True)
+  old=d
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/innercheck.py
+
+OBS:  wait; cat /app/result{6,8}.txt; cat /app/log{6,8}.txt
+[1] 433
+[2] 434
+cat > /app/innercheck.py <<'PY'
+import inspect
+from scatter import phases
+import numpy as np
+s=inspect.getsource(phases)
+E=np.array([.001,.01,.05,.1,.2,.5,1,2,5,15.])
+for A,L,mu in [(.5,2.8,.5),(0,2.8,.5),(0,.8,1)]:
+ old=None
+ print(A,L,mu,flush=True)
+ for b in [.66,.6,.55,.5]:
+  ns={};exec(s.replace('*.66','*'+str(b)),phases.__globals__,ns)
+  d=ns['phases'](E,mu,A,L,h=.0015,R=30,lmax=25)
+  if old is not None:print(b,np.max(abs(np.sin(d-old)),axis=1),flush=True)
+  old=d
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/innercheck.py
+
+
+
+#### step 11 05:54:32
+MSG: Analysis: The corrected hard-sphere quadrature agrees with the expected limiting values. The quantum order-6/order-8 and inner-boundary tests are still running. I will retain independent convergence checks rather than assume that a fixed low-order approximation is sufficient.
+Plan: Wait for those tests, then use their differences to choose the basis size and radial starting point. Test the sign of thermal diffusion in a classical hard-sphere mixture as an additional normalization check.
+CMD: 
+OBS: New Terminal Output:
+
+OPENBLAS_NUM_THREADS=2 python3 /app/innercheck.py
+
+
+
+#### step 12 05:55:00
+MSG: Analysis: The long-running tests have not returned to the prompt yet. The radial starting-point check is especially important for the narrowest core and largest quantum parameter, where starting too far out can retain an unwanted irregular solution.
+Plan: Allow the tests to finish and inspect the results. No new changes are needed while these measurements are pending.
+CMD: 
+OBS: New Terminal Output:
+
+OPENBLAS_NUM_THREADS=2 python3 /app/innercheck.py
+[1]-  Done                    OPENBLAS_NUM_THREADS=2 python3 /app/moments.py 6 .15 > /app/result6.txt 2> /app/log6.txt
+
+
+
+#### step 13 05:55:28
+MSG: Analysis: One convergence run has completed, while the larger basis calculation is still active. The implementation now handles quantum exchange averaging and the exact heat/diffusion coupling; the remaining work is numerical reliability across the allowed parameter ranges.
+Plan: Inspect the ongoing test results and prepare a more efficient radial solver with a fine step near the potential and a coarser step in the weak tail. This should leave enough runtime for energy-resonance refinement and higher-order transport convergence.
+CMD: 
+OBS:  4.00464555e-11 2.60878094e-11 2.07491263e-11 1.10501885e-11
+ 6.96105955e-12 5.37037081e-12]
+0 0.8 1
+0.6 [6.20592466e-11 2.66683273e-11 1.05919717e-11 1.03107176e-11
+ 4.49307258e-12 3.17793014e-12 2.37099229e-12 1.45572443e-12
+ 7.89368571e-13 4.25215418e-13]
+0.55 [6.89193147e-11 3.70733974e-11 1.59773653e-11 9.50883816e-12
+ 7.68646258e-12 4.72757944e-12 9.36378752e-12 4.16358059e-11
+ 3.98975741e-10 6.16571993e-09]
+0.5 [6.48113785e-11 3.85196330e-11 1.52026725e-11 1.29096733e-11
+ 7.14785869e-12 4.60831373e-12 7.16315895e-12 2.34368636e-11
+ 2.00039540e-10 3.08850689e-09]
+root@1afed5a5c86f:/app#
+
+
+#### step 14 05:55:59
+MSG: Analysis: Order 8 is nearly converged for the first quantum example. The inner-boundary test found a significant error in the initial radial starting point for the largest core and quantum parameter, so that starting point must move deeper into the repulsive wall. I will also replace the long numerical tail by a perturbative tail integration, with convergence tests to verify it.
+Plan: Implement the shorter-range solver with a deep inner boundary and analytic free-wave tail integration. Compare it with long-radius Numerov results and test difficult parameter combinations for energy-resonance and polynomial-order convergence.
+CMD: cp /app/scatter.py /app/scatter_old.py; python3 - <<'PY'
+p='/app/scatter.py';s=open(p).read();s=s.replace('h=.003,R=35','h=.0015,R=12').replace('*.66','*.48')
+s=s.replace("from scipy.special import spherical_jn,spherical_yn, eval_legendre","from scipy.special import spherical_jn,spherical_yn, eval_legendre, roots_legendre")
+s=s.replace('    return np.arctan2(u*jp-deriv*j,u*np_-deriv*n)', '''    # work modulo pi, avoiding spurious sin(pi) in exponentially closed waves
+    numerator=u*jp-deriv*j;denominator=u*np_-deriv*n
+    d=np.arctan(numerator/denominator)
+    d=np.nan_to_num(d)
+    # first-order variable-phase tail; split intervals resolves free-wave oscillations
+    edges=np.r_[R,np.arange(R+1,80,1),80]
+    zz,ww=roots_legendre(8)
+    rr=((edges[1:]+edges[:-1])[:,None]+(edges[1:]-edges[:-1])[:,None]*zz)/2
+    wt=(edges[1:]-edges[:-1])[:,None]*ww/2
+    rr=rr.ravel();wt=wt.ravel()
+    v=4*((1-A)/(rr-A))**6*(((1-A)/(rr-A))**6-1)
+    # integrate separately by energy to avoid an enormous 3D array
+    for i,ki in enumerate(k):
+        zt=ki*rr[:,None]
+        jt=zt*spherical_jn(ls[None,:],zt)
+        nt=zt*spherical_yn(ls[None,:],zt)
+        sn=np.sin(d[i]);co=np.cos(d[i])
+        with np.errstate(over='ignore',invalid='ignore'):
+            fn=co*jt-sn*nt
+        fn=np.nan_to_num(fn,nan=0,posinf=0,neginf=0)
+        d[i]-=C/ki*np.sum((wt*v)[:,None]*fn**2,axis=0)
+    return d''')
+open(p,'w').write(s)
+PY
+cat > /app/tailcheck.py <<'PY'
+import numpy as np
+from scatter import phases
+from scatter_old import phases as old
+E=np.array([.0001,.001,.01,.05,.1,.2,.5,1,2,5,15.])
+for A,L,mu in [(0,2,.5),(.5,2.8,.5),(0,.8,1.)]:
+ print(A,L,mu,flush=True)
+ ref=old(E,mu,A,L,h=.001,R=60,lmax=35)
+ for R in [8,12,18]:
+  d=phases(E,mu,A,L,h=.001,R=R,lmax=35)
+  print(R,np.max(abs(np.sin(d-ref)),axis=1),flush=True)
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/tailcheck.py
+
+OBS: v)[:,None]*fn**2,axis=0)
+>     return d''')
+> open(p,'w').write(s)
+> PY
+root@1afed5a5c86f:/app# cat > /app/tailcheck.py <<'PY'
+> import numpy as np
+> from scatter import phases
+> from scatter_old import phases as old
+> E=np.array([.0001,.001,.01,.05,.1,.2,.5,1,2,5,15.])
+> for A,L,mu in [(0,2,.5),(.5,2.8,.5),(0,.8,1.)]:
+>  print(A,L,mu,flush=True)
+>  ref=old(E,mu,A,L,h=.001,R=60,lmax=35)
+>  for R in [8,12,18]:
+>   d=phases(E,mu,A,L,h=.001,R=R,lmax=35)
+>   print(R,np.max(abs(np.sin(d-ref)),axis=1),flush=True)
+> PY
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/tailcheck.py
+0 2 0.5
+
+
+
+#### step 15 05:56:24
+MSG: Analysis: The first tail-correction tests are pending. I will not rely on the tail approximation unless it demonstrably reproduces the long-radius calculation. Runtime can also be reduced by using a nonuniform energy mesh, with dense sampling where the Boltzmann weight and quantum resonances matter and coarser sampling in the high-energy tail.
+Plan: Inspect the tail tests, compare deep-boundary quantum transport at several basis orders, and benchmark a reduced energy mesh. Preserve enough headroom for automatic convergence refinement in the final program.
+CMD: 
+CMD: sed -i 's/\*\.66/\*\.48/' /app/scatter_old.py
+
+OBS: 2692e-05 1.63465418e-05 1.65867231e-06 2.50563328e-07
+ 1.23656239e-07 2.32320087e-08 8.76560703e-09 4.02316773e-07
+ 3.03738874e-05 1.71019850e-05 2.27875417e-05]
+12 [1.73440343e-06 3.73284243e-07 7.00809917e-08 2.34902150e-08
+ 1.44257773e-08 9.68256683e-09 3.63724840e-09 4.76081826e-08
+ 4.09109243e-06 2.61075729e-06 1.53567934e-05]
+18 [1.05962131e-06 3.73284243e-07 5.10663491e-08 2.04706954e-08
+ 1.40655097e-08 9.65817625e-09 3.67427904e-09 1.38285572e-08
+ 6.27363127e-07 9.92381978e-07 1.29535421e-05]
+root@1afed5a5c86f:/app# sed -i 's/\*\.66/\*\.48/' /app/scatter_old.py
+root@1afed5a5c86f:/app#
+
+
+#### step 16 05:56:47
+MSG: Analysis: The initial tail comparison was contaminated by the old, too-shallow inner boundary in its reference solver. The new solver removes that error. I will rerun the comparison with the corrected reference. I also need to ensure that the tail quadrature resolves high-energy oscillations before using it for production.
+Plan: Benchmark the corrected tail solver, tighten its oscillatory quadrature where necessary, and compare transport at orders 8 and 10. Use the results to decide whether a long-radius Numerov solver is simpler and faster overall.
+CMD: OPENBLAS_NUM_THREADS=2 python3 /app/tailcheck.py > /app/tailresult.txt 2>&1 &
+OPENBLAS_NUM_THREADS=2 python3 - <<'PY'
+from scatter import phases
+import numpy as np,time
+s=time.time();d=phases(np.linspace(.001,20,300),1,0,.8,R=18,h=.001,lmax=60); print('tail time',time.time()-s)
+PY
+
+OBS: New Terminal Output:
+
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/tailcheck.py > /app/tailresult.txt 2>&1 &
+[1] 572
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 - <<'PY'
+> from scatter import phases
+> import numpy as np,time
+> s=time.time();d=phases(np.linspace(.001,20,300),1,0,.8,R=18,h=.001,lmax=60); print('tail time',time.time()-s)
+> PY
+
+
+
+#### step 17 05:57:09
+MSG: Analysis: The perturbative tail implementation may cost more than simply integrating to a larger radius, because evaluating many spherical Bessel functions in the tail is expensive. I will compare timing before committing to it. The corrected deep-boundary reference will also show the actual tail-approximation error.
+Plan: Read the timing and accuracy results, then retain the faster reliable approach. In parallel, improve the energy mesh so expensive high-energy samples are used only where they affect the transport moments.
+CMD: 
+CMD: cat /app/tailresult.txt
+
+OBS: 06 2.50567888e-07
+ 1.23648192e-07 2.32400845e-08 8.76026908e-09 4.02315780e-07
+ 3.03738856e-05 1.71019827e-05 2.27875410e-05]
+12 [1.73437361e-06 3.73303532e-07 7.01157558e-08 2.34728755e-08
+ 1.44254917e-08 9.67316140e-09 3.63191089e-09 4.76100185e-08
+ 4.09109224e-06 2.61075680e-06 1.53567936e-05]
+18 [1.06013868e-06 3.73303532e-07 5.11029706e-08 2.04831696e-08
+ 1.40734159e-08 9.64877082e-09 3.67907564e-09 1.38298650e-08
+ 6.27362940e-07 9.92379684e-07 1.29535414e-05]
+[1]+  Done                    OPENBLAS_NUM_THREADS=2 python3 /app/tailcheck.py > /app/tailresult.txt 2>&1
+root@1afed5a5c86f:/app#
+
+
+#### step 18 05:57:35
+MSG: Analysis: The long-radius Numerov method is faster and more straightforward than the explicit tail correction, so I will use it with a deep inner boundary and a sufficiently fine radial step. The first mixture converges well by order 8, but difficult quantum resonances need independent energy-integration checks.
+Plan: Switch back to the validated long-radius solver, reduce unnecessary high-energy sampling, and test difficult cases at orders 8 and 10. Add automatic energy refinement where scattering phases change rapidly.
+CMD: cp /app/scatter.py /app/scatter_tail.py; cp /app/scatter_old.py /app/scatter.py
+sed -i 's/h=.003,R=35/h=.0015,R=40/' /app/scatter.py
+python3 - <<'PY'
+p='/app/moments.py';s=open(p).read().replace('h=.003,R=35','h=.0015,R=40')
+s=s.replace("edges=np.unique(np.r_[0,np.geomspace(1e-5,1,60),np.arange(1,cut,step),cut])", "edges=np.unique(np.r_[0,np.geomspace(1e-6,1,70),np.arange(1,8,step),np.arange(8,20,step*3),np.arange(20,cut,1.5),cut])")
+open(p,'w').write(s)
+PY
+cat > /app/case.py <<'PY'
+from moments import weights
+from brackets import transport
+import sys
+N=int(sys.argv[1]);step=float(sys.argv[2]);A,L,T=map(float,sys.argv[3:6]);m=[1,2];x=[.3,.7]
+ws={}
+for i,j in [(0,0),(0,1),(1,1)]:
+ mu=m[i]*m[j]/(m[i]+m[j]);deg=[1,6][i] if i==j else 1
+ ws[i,j]=weights(T,mu,A,L,N,deg=deg,sign=int(i==j),step=step)
+print(transport(m,x,T,N=N,ne=2*N+3,qs=lambda i,j,z,a,w:ws[i,j][z]))
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/case.py 8 .2 .5 2.8 .2 > /app/c1.txt 2>/app/cl1.txt & OPENBLAS_NUM_THREADS=2 python3 /app/case.py 10 .2 .5 2.8 .2 > /app/c2.txt 2>/app/cl2.txt & wait; cat /app/c{1,2}.txt; cat /app/cl{1,2}.txt
+
+OBS: N=int(sys.argv[1]);step=float(sys.argv[2]);A,L,T=map(float,sys.argv[3:6]);m=[1,2];x=[.3,.7]
+> ws={}
+> for i,j in [(0,0),(0,1),(1,1)]:
+>  mu=m[i]*m[j]/(m[i]+m[j]);deg=[1,6][i] if i==j else 1
+>  ws[i,j]=weights(T,mu,A,L,N,deg=deg,sign=int(i==j),step=step)
+> print(transport(m,x,T,N=N,ne=2*N+3,qs=lambda i,j,z,a,w:ws[i,j][z]))
+> PY
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/case.py 8 .2 .5 2.8 .2 > /app/c1.txt 2>/app/cl1.txt & OPENBLAS_NUM_THREADS=2 python3 /app/case.py 10
+ .2 .5 2.8 .2 > /app/c2.txt 2>/app/cl2.txt & wait; cat /app/c{1,2}.txt; cat /app/cl{1,2}.txt
+[1] 626
+[2] 627
+
+
+
+#### step 19 05:58:04
+MSG: Analysis: The extreme high-quantum/core case is being tested at two polynomial orders. I will also verify exchange symmetry and species-order invariance: reversing species must leave viscosity, thermal conductivity, and diffusion unchanged while reversing the thermal diffusion factor.
+Plan: Wait for the convergence runs, then test a low-quantum case with stronger resonances. Refine the energy integration only where it is needed, and reuse the same scattering moments when increasing the transport basis.
+CMD: 
+OBS: New Terminal Output:
+
+[2] 627
+[1]-  Done                    OPENBLAS_NUM_THREADS=2 python3 /app/case.py 8 .2 .5 2.8 .2 > /app/c1.txt 2> /app/cl1.txt
+
+
+
+#### step 20 05:58:37
+MSG: Analysis: The order-8 run has completed. The order-10 calculation is still active. For energy integration I will use the continuous phase information from the real radial solution, not just the cross section, to detect narrow resonances that a coarse cross-section mesh could otherwise miss.
+Plan: Inspect the basis-convergence result, then implement adaptive energy panels. Compare low- and high-order Gaussian rules on each panel and add resonance-focused subdivisions where the radial phase changes rapidly.
+CMD: 
+OBS: New Terminal Output:
+
+[1]-  Done                    OPENBLAS_NUM_THREADS=2 python3 /app/case.py 8 .2 .5 2.8 .2 > /app/c1.txt 2> /app/cl1.txt
+
+
+
+#### step 21 05:59:06
+MSG: Analysis: The larger transport-basis run is taking longer than scattering, so the final program should compute one sufficiently large collision matrix and assess convergence using its principal submatrices rather than recomputing brackets for every basis size.
+Plan: Read the pending result and modify the transport solver to report lower-order solutions from the same matrix. This will provide inexpensive convergence checks while keeping runtime below the checker limit.
+CMD: 
+OBS: 07810413845786507), np.float64(0.1664800005842804), np.float64(0.07233337752689963), np.float64(-0.14275232222991294))
+(np.float64(0.07810414258115599), np.float64(0.16648016301057947), np.float64(0.07233343106384549), np.float64(-0.14275446164939065))
+scattering 0.5 930 38 6.155405282974243
+scattering 0.6666666666666666 930 40 6.38358473777771
+scattering 1.0 930 44 7.040570974349976
+brackets 8.314099073410034
+scattering 0.5 930 38 6.342048645019531
+scattering 0.6666666666666666 930 40 6.672414064407349
+scattering 1.0 930 44 7.037587642669678
+brackets 60.12047982215881
+root@1afed5a5c86f:/app#
+
+
+#### step 22 05:59:31
+MSG: Analysis: The extreme-case comparison shows that order 8 is close but not comfortably within tolerance for thermal diffusion; order 10 is preferable. The scattering calculation is much cheaper than the largest collision matrix, so I will reuse a single matrix for several convergence estimates. The next key test is energy integration in the low-quantum regime, where narrow shape resonances can occur.
+Plan: Run a low-quantum case with two energy meshes, verify the classical thermal-diffusion sign, and add submatrix-based basis convergence. Then optimize bracket accumulation to support a higher basis order if a case needs it.
+CMD: OPENBLAS_NUM_THREADS=2 python3 /app/case.py 8 .2 0 .8 .2 > /app/low1.txt 2>/app/lowl1.txt & OPENBLAS_NUM_THREADS=2 python3 /app/case.py 8 .1 0 .8 .2 > /app/low2.txt 2>/app/lowl2.txt & wait; cat /app/low{1,2}.txt; cat /app/lowl{1,2}.txt
+
+CMD: OPENBLAS_NUM_THREADS=2 python3 - <<'PY'
+from brackets import transport
+print(transport([1,2],[.3,.7],.3,N=6,ne=15))
+PY
+
+OBS: New Terminal Output:
+
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/case.py 8 .2 0 .8 .2 > /app/low1.txt 2>/app/lowl1.txt & OPENBLAS_NUM_THREADS=2 python3 /app/case.py
+8 .1 0 .8 .2 > /app/low2.txt 2>/app/lowl2.txt & wait; cat /app/low{1,2}.txt; cat /app/lowl{1,2}.txt
+[1] 706
+[2] 707
+OPENBLAS_NUM_THREADS=2 python3 - <<'PY'
+from brackets import transport
+print(transport([1,2],[.3,.7],.3,N=6,ne=15))
+PY
+
+
+
+#### step 23 06:00:01
+MSG: Analysis: The low-quantum energy-mesh comparison is running. The transport equations use the required zero-relative-velocity heat conductivity rather than the uncoupled heat response, and the diffusion/thermal-diffusion normalization has been checked algebraically. I will test the expected species-order symmetry numerically as well.
+Plan: Read the energy-convergence results, then implement adaptive scattering integration and a single high-order collision matrix with lower-order convergence checks. Use tighter radial steps in the low-quantum cases.
+CMD: 
+OBS: New Terminal Output:
+
+PY
+
+
+
+#### step 24 06:00:32
+MSG: Analysis: The remaining reliability issue is narrow quantum resonances. A coarse mesh can miss a peak in the cross section, but the signed radial solution also changes phase by approximately pi across such a resonance. I will use that phase information to flag energy panels for subdivision, along with ordinary quadrature-error estimates.
+Plan: Inspect the pending low-quantum results, then build adaptive Gaussian energy integration that follows phase jumps and integrates the required scattering moments. Retain dense initial sampling at low energy to avoid losing closely spaced resonances.
+CMD: 
+OBS: New Terminal Output:
+
+PY
+[1]-  Done                    OPENBLAS_NUM_THREADS=2 python3 /app/case.py 8 .2 0 .8 .2 > /app/low1.txt 2> /app/lowl1.txt
+
+
+
+#### step 25 06:01:08
+MSG: Analysis: The low-quantum test is still active. The final energy integrator will use both cross-section quadrature error and unwrapped phase changes; this should catch narrow resonances that ordinary Gaussian quadrature alone could miss.
+Plan: Wait for the current comparison, then implement the adaptive panels and validate against a substantially finer fixed mesh. Keep the tested direct collision-bracket formulation, with a high-order matrix and inexpensive submatrix convergence checks.
+CMD: 
+OBS: ring 0.6666666666666666 1260 82 20.773099899291992
+/app/scatter.py:33: RuntimeWarning: invalid value encountered in add
+  np_=k[:,None]*(spherical_yn(ls[None,:],z)+z*spherical_yn(ls[None,:],z,True))
+scattering 1.0 1260 96 24.477680921554565
+brackets 9.40054726600647
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 - <<'PY'
+> from brackets import transport
+> print(transport([1,2],[.3,.7],.3,N=6,ne=15))
+> PY
+brackets 0.9517960548400879
+(np.float64(0.12772720866261753), np.float64(0.27994035210601176), np.float64(0.10375466214167925), np.float64(-0.287888893958289))
+root@1afed5a5c86f:/app#
+
+
+#### step 26 06:01:43
+MSG: Analysis: The low-quantum test exposed numerical overflow in spherical Neumann functions for very high partial waves at tiny collision energies. Those waves have vanishing physical phase shifts, so I will safely set their numerically unrepresentable shifts to zero and rerun the test. The classical hard-sphere test gives the expected sign for light-versus-heavy thermal diffusion.
+Plan: Fix the high-partial-wave overflow, improve velocity-quadrature efficiency using collision-plane reflection symmetry, and add basis-convergence estimates from one collision matrix. Then rerun the difficult quantum cases.
+CMD: python3 - <<'PY'
+p='/app/scatter.py';s=open(p).read().replace('return np.arctan2(u*jp-deriv*j,u*np_-deriv*n)', 'return np.nan_to_num(np.arctan2(u*jp-deriv*j,u*np_-deriv*n),nan=0.0)')
+open(p,'w').write(s)
+p='/app/brackets.py';s=open(p).read();s=s.replace("np.meshgrid(gh,gy,gh,indexing='ij')", "np.meshgrid(gy,gy,gh,indexing='ij')").replace('wh[:,None,None]*why[None,:,None]*wh[None,None,:]', 'why[:,None,None]*why[None,:,None]*wh[None,None,:]')
+a=s.index('            vi=GG.copy()');b=s.index('            def bases',a)
+s=s[:a]+'''            ss=np.sqrt((1-ang)/2);cc=np.sqrt((1+ang)/2)
+            vi=np.broadcast_to(GG,(len(ang),)+GG.shape).copy();vi[:,:,0]-=sh[0]*ss[:,None];vi[:,:,2]+=sh[0]*cc[:,None]
+            vj=np.broadcast_to(GG,(len(ang),)+GG.shape).copy();vj[:,:,0]-=sh[1]*ss[:,None];vj[:,:,2]+=sh[1]*cc[:,None]
+            vp=np.broadcast_to(GG,(len(ang),)+GG.shape).copy();vp[:,:,0]+=sh[0]*ss[:,None];vp[:,:,2]+=sh[0]*cc[:,None]
+            vq=np.broadcast_to(GG,(len(ang),)+GG.shape).copy();vq[:,:,0]+=sh[1]*ss[:,None];vq[:,:,2]+=sh[1]*cc[:,None]
+'''+s[b:]
+s=s.replace('pv-av[:,None]','pv-av').replace('qv-bv[:,None]','qv-bv').replace('pt-at[:,None]','pt-at').replace('qt-bt[:,None]','qt-bt')
+a=s.index('    sd=np.zeros');b=s.index("if __name__",a)
+s=s[:a]+'''    def solve(n):
+        ix=np.r_[np.arange(n),np.arange(N,N+n)]
+        bv=BV[np.ix_(ix,ix)];bt=BT[np.ix_(ix,ix)]
+        sd=np.zeros(2*n);st=sd.copy();sv=sd.copy()
+        sd[0]=T/m[0];sd[n]=-T/m[1]
+        st[1]=-2.5*x[0]*T/m[0];st[n+1]=-2.5*x[1]*T/m[1]
+        sv[0]=2*x[0]*T/m[0];sv[n]=2*x[1]*T/m[1]
+        vd=np.linalg.solve(bv[1:,1:],sd[1:]);vt=np.linalg.solve(bv[1:,1:],st[1:])
+        d=sd[1:]@vd;h=sd[1:]@vt;t=st[1:]@vt
+        eta=T/2*sv@np.linalg.solve(bt,sv)
+        return np.array([eta,t-h*h/d,x[0]*x[1]*d,h/(x[0]*x[1]*d)])
+    results=[solve(n) for n in range(4,N+1)]
+    print('brackets',time()-start, 'convergence',results,file=__import__('sys').stderr)
+    transport.history=results
+    return results[-1]
+'''+s[b:]
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/brackets.py 8
+OPENBLAS_NUM_THREADS=2 python3 /app/case.py 10 .15 0 .8 .2 > /app/low3.txt 2>/app/lowl3.txt
+
+OBS:         sv[0]=2*x[0]*T/m[0];sv[n]=2*x[1]*T/m[1]
+>         vd=np.linalg.solve(bv[1:,1:],sd[1:]);vt=np.linalg.solve(bv[1:,1:],st[1:])
+>         d=sd[1:]@vd;h=sd[1:]@vt;t=st[1:]@vt
+>         eta=T/2*sv@np.linalg.solve(bt,sv)
+>         return np.array([eta,t-h*h/d,x[0]*x[1]*d,h/(x[0]*x[1]*d)])
+>     results=[solve(n) for n in range(4,N+1)]
+>     print('brackets',time()-start, 'convergence',results,file=__import__('sys').stderr)
+>     transport.history=results
+>     return results[-1]
+> '''+s[b:]
+> open(p,'w').write(s)
+> PY
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/brackets.py 8
+
+
+
+#### step 27 06:02:13
+MSG: Analysis: The overflow fix and symmetry-reduced collision quadrature are now in place. The revised solver computes transport coefficients at several lower Sonine orders from the same matrix, giving a direct convergence history without repeating the expensive bracket integrals.
+Plan: Verify the revised quadrature against hard-sphere values, then inspect the low-quantum convergence history. Implement adaptive energy integration using phase jumps and Gaussian-rule differences, and test it against a fine fixed mesh.
+CMD: 
+OBS: 896702e-16]), array([ 1.79135075e-01,  6.77777557e-01,  2
+.15578342e-01, -1.45282085e-16]), array([ 1.79135891e-01,  6.77819095e-01,  2.15580373e-01, -1.20987808e-16]), array([ 1.79136094e-01,  6.77828995e-01,  2.15580
+920e-01, -1.27323749e-16]), array([ 1.79136151e-01,  6.77831684e-01,  2.15581084e-01, -1.14377208e-16])]
+[ 1.79136151e-01  6.77831684e-01  2.15581084e-01 -1.14377208e-16]
+hard sphere leading eta,lambda,D: 0.17630924485867386 0.6611596682200269 0.21157109383040862
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/case.py 10 .15 0 .8 .2 > /app/low3.txt 2>/app/lowl3.txt
+
+
+
+#### step 28 06:02:52
+MSG: Analysis: The reflection-reduced collision quadrature reproduces the hard-sphere convergence sequence and zero thermal diffusion for equal-mass identical-cross-section mixtures. The low-quantum run is now using the corrected scattering solver. I will add adaptive energy integration next, so narrow resonances are treated explicitly rather than trusted to a fixed mesh.
+Plan: Build adaptive energy panels with high- and low-order Gaussian rules and phase-jump detection. Validate their scattering moments against a fine mesh, then use those moments with the existing high-order transport matrix.
+CMD: cat > /app/adaptive.py <<'PY'
+import numpy as np
+from scipy.special import roots_legendre,eval_legendre,eval_genlaguerre,roots_genlaguerre
+from scatter import phases
+from time import time
+
+def scattering_moments(T,mu,A,L,N=11,tol=2e-8,h=.0015,R=40):
+    ne=2*N+3;na=2*N+1;cut=85.
+    lmax=int(np.sqrt(8*np.pi**2*mu/L**2*T*65)*1.8+24)
+    za,wza=roots_legendre(lmax+N+2)
+    pl=np.array([eval_legendre(l,za) for l in range(lmax+1)])
+    pz=np.array([eval_legendre(l,za) for l in range(na)])
+    ls=np.arange(lmax+1); C=8*np.pi**2*mu/L**2
+    zl,wl=roots_legendre(4);zh,wh=roots_legendre(8)
+    zz=np.r_[zl,zh];ww=np.r_[-wl,wh]
+    edges=np.unique(np.r_[1e-8,np.geomspace(1e-6,1,70),np.arange(1,8,.15),np.arange(8,20,.45),np.arange(20,cut,1.5),cut])
+    panels=np.stack([edges[:-1],edges[1:]],axis=1)
+    total=np.zeros((3,ne,na));count=0;level=0;starttime=time()
+    while len(panels):
+        new=[]
+        for start in range(0,len(panels),35):
+            pp=panels[start:start+35];mid=pp.mean(axis=1);half=np.diff(pp,axis=1).ravel()/2
+            yy=mid[:,None]+half[:,None]*zz
+            y=yy.ravel();d=phases(y*T,mu,A,L,h=h,R=R,lmax=lmax);count+=len(y)
+            amp=(2*ls+1)[None,:]*np.exp(1j*d)*np.sin(d)/np.sqrt(C*T*y[:,None])
+            fe=amp[:,::2]@pl[::2];fo=amp[:,1::2]@pl[1::2]
+            qe=(2*np.pi*(abs(fe)**2*wza)@pz.T).reshape(len(pp),len(zz),na)
+            qo=(2*np.pi*(abs(fo)**2*wza)@pz.T).reshape(len(pp),len(zz),na)
+            qc=(4*np.pi*((fe*fo.conj()).real*wza)@pz.T).reshape(len(pp),len(zz),na)
+            qs=np.array([qe,qo,qc])
+            le=np.array([eval_genlaguerre(n,1,yy) for n in range(ne)])/(np.arange(ne)+1)[:,None,None]
+            integrand=np.einsum('nap,bapk->banpk',le,qs)
+            weight=yy*np.exp(-yy)*half[:,None]
+            hi=np.einsum('banpk,ap,p->bank',integrand[:,:, :,4:,:],weight[:,4:],wh)
+            lo=np.einsum('banpk,ap,p->bank',integrand[:,:,:,:4,:],weight[:,:4],wl)
+            # ensure both low and high Sonine moments are accurate
+            err=np.max(np.abs(hi-lo),axis=(0,2,3))
+            scale=np.maximum(np.max(np.abs(hi),axis=(0,2,3)),.03*(pp[:,1]-pp[:,0]))
+            refine=err>tol*scale
+            # arctan2 phases retain a pi jump through even very narrow shape resonances
+            order=np.argsort(zz);dd=d.reshape(len(pp),len(zz),lmax+1)[:,order]
+            diff=np.diff(dd,axis=1);diff=(diff+np.pi)%(2*np.pi)-np.pi
+            jump=np.max(abs(diff),axis=(1,2))
+            refine|=(jump>.35)&(pp[:,0]<30)&(pp[:,1]-pp[:,0]>1e-7)
+            refine&=(pp[:,1]-pp[:,0]>2e-9)
+            if level>18:refine[:]=False
+            total+=hi[:,~refine].sum(axis=1)
+            if np.any(refine):
+                p=pp[refine];md=p.mean(axis=1)
+                new.extend(np.stack([p[:,0],md],axis=1));new.extend(np.stack([md,p[:,1]],axis=1))
+        panels=np.asarray(new);level+=1
+        print('adaptive',mu,level,count,len(panels),time()-starttime,file=__import__('sys').stderr)
+    return total
+
+def effective_weights(mom,N,deg=1,sign=0):
+    ne=2*N+3;na=2*N+1
+    if sign==0:q=mom[0]+mom[1]+mom[2]
+    else:q=(1+sign/deg)*mom[0]+(1-sign/deg)*mom[1]
+    q=q[:ne,:na]*(np.arange(ne)+1)[:,None]
+    yy,wy=roots_genlaguerre(ne,1);aa,wa=roots_legendre(na)
+    ly=np.array([eval_genlaguerre(n,1,yy)/(n+1) for n in range(ne)])
+    pa=np.array([eval_legendre(n,aa)*(2*n+1)/2 for n in range(na)])
+    return (ly.T@q@pa)*wa
+
+if __name__=='__main__':
+    import sys
+    T,mu,A,L=map(float,sys.argv[1:5]);N=10
+    mom=scattering_moments(T,mu,A,L,N)
+    np.save('/app/amom.npy',mom)
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/adaptive.py .2 1 0 .8 > /app/al.txt 2>&1
+
+OBS: na=2*N+1
+    if sign==0:q=mom[0]+mom[1]+mom[2]
+    else:q=(1+sign/deg)*mom[0]+(1-sign/deg)*mom[1]
+    q=q[:ne,:na]*(np.arange(ne)+1)[:,None]
+    yy,wy=roots_genlaguerre(ne,1);aa,wa=roots_legendre(na)
+    ly=np.array([eval_genlaguerre(n,1,yy)/(n+1) for n in range(ne)])
+    pa=np.array([eval_legendre(n,aa)*(2*n+1)/2 for n in range(na)])
+    return (ly.T@q@pa)*wa
+
+if __name__=='__main__':
+    import sys
+    T,mu,A,L=map(float,sys.argv[1:5]);N=10
+    mom=scattering_moments(T,mu,A,L,N)
+    np.save('/app/amom.npy',mom)
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/adaptive.py .2 1 0 .8 > /app/al.txt 2>&1
+
+
+
+#### step 29 06:03:10
+MSG: Analysis: The fixed-mesh low-quantum run is still completing, and the adaptive integrator has been queued behind it. The adaptive implementation computes even-wave, odd-wave, and interference moments separately, allowing the same scattering calculation to serve distinguishable and identical-species collisions with the correct internal-state weights.
+Plan: Inspect the fixed-mesh convergence history and adaptive runtime. Correct any numerical issues revealed by those tests, then assemble the standalone program and test it under a restricted environment similar to the checker.
+CMD: 
+OBS: New Terminal Output:
+
+OPENBLAS_NUM_THREADS=2 python3 /app/adaptive.py .2 1 0 .8 > /app/al.txt 2>&1
+
+
+
+#### step 30 06:03:32
+MSG: Analysis: The two pending tests will establish whether the adaptive energy mesh is practical within the runtime budget. The largest fixed transport matrix also supplies a convergence history, so I can determine whether order 10 is sufficient or a larger basis is necessary.
+Plan: Wait briefly, then inspect both logs. If phase-based refinement is being triggered by negligible high partial waves, restrict that trigger to physically contributing waves while retaining cross-section quadrature checks for all waves.
+CMD: 
+OBS:     else:q=(1+sign/deg)*mom[0]+(1-sign/deg)*mom[1]
+>     q=q[:ne,:na]*(np.arange(ne)+1)[:,None]
+>     yy,wy=roots_genlaguerre(ne,1);aa,wa=roots_legendre(na)
+>     ly=np.array([eval_genlaguerre(n,1,yy)/(n+1) for n in range(ne)])
+>     pa=np.array([eval_legendre(n,aa)*(2*n+1)/2 for n in range(na)])
+>     return (ly.T@q@pa)*wa
+>
+> if __name__=='__main__':
+>     import sys
+>     T,mu,A,L=map(float,sys.argv[1:5]);N=10
+>     mom=scattering_moments(T,mu,A,L,N)
+>     np.save('/app/amom.npy',mom)
+> PY
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/adaptive.py .2 1 0 .8 > /app/al.txt 2>&1
+
+
+
+#### step 31 06:03:53
+MSG: Analysis: The revised fixed-mesh calculation has finished, and the adaptive test is now running. I will inspect their logs to identify both the energy-quadrature error and any remaining polynomial-basis error before selecting production tolerances.
+Plan: Read the results and adaptive refinement progress. If they are stable, assemble a standalone prototype and run representative mixtures, including equal-mass pairs with different exchange statistics.
+CMD: cat /app/low3.txt; tail -8 /app/lowl3.txt; tail -8 /app/al.txt
+
+OBS: New Terminal Output:
+
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/adaptive.py .2 1 0 .8 > /app/al.txt 2>&1
+cat /app/low3.txt; tail -8 /app/lowl3.txt; tail -8 /app/al.txt
+
+
+
+#### step 32 06:04:23
+MSG: Analysis: The adaptive run is still in the foreground, so the queued log inspection has not executed yet. Its refinement cost must be measured before enabling it in the final program. The transport matrix now provides all lower-order convergence estimates from one calculation.
+Plan: Wait for the adaptive test, then inspect its refinement count and the fixed-mesh result. If adaptive refinement is too aggressive, adjust the absolute error floor and remove phase triggers from numerically closed waves.
+CMD: 
+OBS: New Terminal Output:
+
+cat /app/low3.txt; tail -8 /app/lowl3.txt; tail -8 /app/al.txt
+
+
+
+#### step 33 06:04:33
+MSG: Analysis: The adaptive test is taking long enough that I need to inspect its progress while it runs. I will background it temporarily and read the logs rather than wait without visibility.
+Plan: Suspend and background the adaptive test, inspect its refinement history, and check the completed fixed-mesh calculation. This will reveal whether the integrator is over-refining.
+CMD: C-z
+CMD: bg; cat /app/low3.txt; tail -10 /app/lowl3.txt; tail -12 /app/al.txt; ps -eo pid,etime,pcpu,rss,args | grep python
+
+OBS: .03118717,  0.06914015,  0.02618423, -0.10849686]), array([ 0.03118717,  0.0691402 ,  0.02618427, -0.1085006 ])]
+/app/scatter.py:33: RuntimeWarning: invalid value encountered in add
+  np_=k[:,None]*(spherical_yn(ls[None,:],z)+z*spherical_yn(ls[None,:],z,True))
+adaptive 1.0 1 2256 46 40.50841736793518
+adaptive 1.0 2 2808 40 50.755444049835205
+adaptive 1.0 3 3288 30 60.33247637748718
+adaptive 1.0 4 3648 20 66.5467095375061
+adaptive 1.0 5 3888 22 70.53346037864685
+adaptive 1.0 6 4152 20 75.07466650009155
+adaptive 1.0 7 4392 16 79.06261777877808
+bash: ps: command not found
+root@1afed5a5c86f:/app#
+
+
+#### step 34 06:05:17
+MSG: Analysis: The adaptive integrator is behaving reasonably: only a small number of low-energy panels need repeated subdivision. The low-quantum transport history shows that thermal diffusion converges more slowly than viscosity, so a larger basis is needed there. I will reduce scattering cost by using energy-dependent partial-wave cutoffs rather than the largest cutoff for every energy.
+Plan: Compare adaptive and fixed-mesh moments, optimize partial-wave batching, and test order 12 transport. Verify radial step and matching-radius errors independently so they remain below the requested tolerance.
+CMD: tail -8 /app/al.txt; ls -l /app/amom.npy
+cat > /app/compare_mom.py <<'PY'
+import numpy as np
+from adaptive import effective_weights
+from moments import weights
+N=10
+mom=np.load('/app/amom.npy')
+a=effective_weights(mom,N,6,1)
+b=weights(.2,1,0,.8,N,6,1,step=.025)
+from scipy.special import roots_genlaguerre
+_,w=roots_genlaguerre(2*N+3,1)
+print('effective diff',np.max(abs((a-b)*w[:,None])))
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/compare_mom.py > /app/cm.txt 2>&1 &
+
+OBS:  /app/al.txt 2>&1
+-rw-r--r-- 1 root root 11720 Nov  5 06:04 /app/amom.npy
+root@1afed5a5c86f:/app# cat > /app/compare_mom.py <<'PY'
+> import numpy as np
+> from adaptive import effective_weights
+> from moments import weights
+> N=10
+> mom=np.load('/app/amom.npy')
+> a=effective_weights(mom,N,6,1)
+> b=weights(.2,1,0,.8,N,6,1,step=.025)
+> from scipy.special import roots_genlaguerre
+> _,w=roots_genlaguerre(2*N+3,1)
+> print('effective diff',np.max(abs((a-b)*w[:,None])))
+> PY
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/compare_mom.py > /app/cm.txt 2>&1 &
+[1] 961
+root@1afed5a5c86f:/app#
+
+
+#### step 35 06:05:45
+MSG: Analysis: The adaptive energy integration completed in about 92 seconds for the most demanding reduced mass in the low-quantum test, resolving a few narrow resonances. The main optimization opportunity is radial integration: most low-energy samples do not need the full high-energy partial-wave cutoff. I will batch samples by energy and use a cutoff appropriate to each batch.
+Plan: Implement energy-dependent partial-wave cutoffs and compare the resulting moments with the full-cutoff calculation. Test order 12 transport and tighten the radial step in low-quantum cases.
+CMD: cp /app/adaptive.py /app/adaptive_old.py
+python3 - <<'PY'
+p='/app/adaptive.py';s=open(p).read();s=s.replace("y=yy.ravel();d=phases(y*T,mu,A,L,h=h,R=R,lmax=lmax);count+=len(y)",'''y=yy.ravel();d=np.zeros((len(y),lmax+1))
+            # centrifugal barrier and van der Waals tail determine the useful cutoff
+            perm=np.argsort(y)
+            for off in range(0,len(y),140):
+                ix=perm[off:off+140];emax=T*np.max(y[ix])
+                lm=min(lmax,int(np.sqrt(C*emax)*1.8+18))
+                d[ix,:lm+1]=phases(y[ix]*T,mu,A,L,h=h,R=R,lmax=lm)
+            count+=len(y)''')
+open(p,'w').write(s)
+PY
+cat > /app/runadaptive.py <<'PY'
+from adaptive import scattering_moments,effective_weights
+from brackets import transport
+import sys,numpy as np,time
+A,L,T=map(float,sys.argv[1:4]);N=int(sys.argv[4]);m=[1,2];x=[.3,.7]
+ws={}
+for i,j in [(0,0),(0,1),(1,1)]:
+ mu=m[i]*m[j]/(m[i]+m[j]);deg=[1,6][i] if i==j else 1
+ mom=scattering_moments(T,mu,A,L,N,h=.001 if L<1.2 else .0015)
+ np.save('/app/mom'+str(i)+str(j)+'.npy',mom)
+ ws[i,j]=effective_weights(mom,N,deg, int(i==j))
+print(transport(m,x,T,N=N,ne=2*N+3,qs=lambda i,j,z,a,w:ws[i,j][z]))
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/runadaptive.py 0 .8 .2 12 > /app/ra.txt 2>/app/ral.txt &
+
+OBS: ort transport
+> import sys,numpy as np,time
+> A,L,T=map(float,sys.argv[1:4]);N=int(sys.argv[4]);m=[1,2];x=[.3,.7]
+> ws={}
+> for i,j in [(0,0),(0,1),(1,1)]:
+>  mu=m[i]*m[j]/(m[i]+m[j]);deg=[1,6][i] if i==j else 1
+>  mom=scattering_moments(T,mu,A,L,N,h=.001 if L<1.2 else .0015)
+>  np.save('/app/mom'+str(i)+str(j)+'.npy',mom)
+>  ws[i,j]=effective_weights(mom,N,deg, int(i==j))
+> print(transport(m,x,T,N=N,ne=2*N+3,qs=lambda i,j,z,a,w:ws[i,j][z]))
+> PY
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/runadaptive.py 0 .8 .2 12 > /app/ra.txt 2>/app/ral.txt &
+[2] 985
+root@1afed5a5c86f:/app#
+
+
+#### step 36 06:06:11
+MSG: Analysis: The adaptive low-quantum run is now using energy-dependent partial-wave cutoffs and a finer radial step. It will provide both a high-order transport result and reusable scattering moments. I will check that cutoff optimization does not change the transport moments appreciably.
+Plan: Inspect the adaptive progress and fine-mesh comparison. Separately compare radial step sizes and matching radii through scattering transport moments, rather than only phase shifts, to quantify their effect on the requested outputs.
+CMD: tail -10 /app/ral.txt; cat /app/cm.txt; ls -l /app/mom*.npy
+cat > /app/radialtest.py <<'PY'
+import numpy as np
+from scatter import phases
+from scipy.special import roots_legendre,eval_legendre
+E=np.geomspace(.001,15,200);a,w=roots_legendre(100)
+for A,L,mu in [(0,.8,1),(0,2.8,.5),(.5,2.8,.5)]:
+ print('case',A,L,mu,flush=True)
+ vals=[]
+ for h,R in [(.002,40),(.001,40),(.0005,40),(.001,60)]:
+  d=phases(E,mu,A,L,h=h,R=R,lmax=70)
+  ls=np.arange(d.shape[1]);amp=(2*ls+1)*np.exp(1j*d)*np.sin(d)/np.sqrt(8*np.pi**2*mu*E[:,None]/L**2)
+  f=amp@np.array([eval_legendre(l,a) for l in ls]);q=2*np.pi*(abs(f)**2*w)@np.array([1-a,1-a*a]).T
+  if vals:print(h,R,np.max(abs(q-vals[-1])/np.maximum(abs(q),.01),axis=0),flush=True)
+  vals.append(q)
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/radialtest.py > /app/rt.txt 2>&1 &
+
+OBS: .5,2.8,.5)]:
+>  print('case',A,L,mu,flush=True)
+>  vals=[]
+>  for h,R in [(.002,40),(.001,40),(.0005,40),(.001,60)]:
+>   d=phases(E,mu,A,L,h=h,R=R,lmax=70)
+>   ls=np.arange(d.shape[1]);amp=(2*ls+1)*np.exp(1j*d)*np.sin(d)/np.sqrt(8*np.pi**2*mu*E[:,None]/L**2)
+>   f=amp@np.array([eval_legendre(l,a) for l in ls]);q=2*np.pi*(abs(f)**2*w)@np.array([1-a,1-a*a]).T
+>   if vals:print(h,R,np.max(abs(q-vals[-1])/np.maximum(abs(q),.01),axis=0),flush=True)
+>   vals.append(q)
+> PY
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/radialtest.py > /app/rt.txt 2>&1 &
+[3] 1010
+root@1afed5a5c86f:/app#
+
+
+#### step 37 06:06:34
+MSG: Analysis: The optimized adaptive and radial-accuracy tests are running. I will use their results to choose a production radial step and basis order. The current collision quadrature is deliberately conservative; reducing its angular work may provide additional runtime headroom once the polynomial degree has been verified.
+Plan: Inspect the test logs, confirm adaptive-versus-fine-mesh agreement, and benchmark high-order brackets. Then assemble the standalone script with deterministic convergence checks and no external files or packages.
+CMD: tail -12 /app/ral.txt; cat /app/cm.txt; cat /app/rt.txt; jobs
+
+OBS: mpare_mom.py > /app/cm.txt 2>&1
+/app/scatter.py:33: RuntimeWarning: invalid value encountered in add
+  np_=k[:,None]*(spherical_yn(ls[None,:],z)+z*spherical_yn(ls[None,:],z,True))
+scattering 1 3240 96 68.29222893714905
+effective diff 0.001130088121163596
+case 0 0.8 1
+0.001 40 [1.61630971e-05 2.16369608e-05]
+0.0005 40 [1.00968430e-06 1.35164924e-06]
+[2]-  Running                 OPENBLAS_NUM_THREADS=2 python3 /app/runadaptive.py 0 .8 .2 12 > /app/ra.txt 2> /app/ral.txt &
+[3]+  Running                 OPENBLAS_NUM_THREADS=2 python3 /app/radialtest.py > /app/rt.txt 2>&1 &
+root@1afed5a5c86f:/app#
+
+
+#### step 38 06:07:00
+MSG: Analysis: The radial test shows that a step of 0.001 sigma is accurate to roughly the part-per-million level for the tested low-quantum cross-section moments. The adaptive energy integration differs detectably from a fine fixed mesh, consistent with narrow resonances requiring explicit refinement. I will validate the adaptive result with a second tolerance and inspect the high-order transport convergence before finalizing.
+Plan: Let the order-12 adaptive transport run finish, check its convergence history, and compare matching-radius effects. Then test the adaptive moment integrator at a looser and tighter tolerance to establish a safe production tolerance.
+CMD: tail -15 /app/ral.txt; cat /app/rt.txt; ls -lh /app/mom*.npy; jobs
+
+OBS: 75
+case 0 0.8 1
+0.001 40 [1.61630971e-05 2.16369608e-05]
+0.0005 40 [1.00968430e-06 1.35164924e-06]
+0.001 60 [1.62922976e-06 2.17071178e-06]
+case 0 2.8 0.5
+0.001 40 [3.94177117e-09 2.81670393e-09]
+0.0005 40 [4.02692635e-08 3.99691034e-08]
+0.001 60 [7.75887031e-07 9.51436874e-07]
+case 0.5 2.8 0.5
+-rw-r--r-- 1 root root 16K Nov  5 06:06 /app/mom00.npy
+[2]-  Running                 OPENBLAS_NUM_THREADS=2 python3 /app/runadaptive.py 0 .8 .2 12 > /app/ra.txt 2> /app/ral.txt &
+[3]+  Running                 OPENBLAS_NUM_THREADS=2 python3 /app/radialtest.py > /app/rt.txt 2>&1 &
+root@1afed5a5c86f:/app#
+
+
+#### step 39 06:07:23
+MSG: Analysis: The matching-radius tests show sub-part-per-million effects for the important scattering moments, and the fine radial step is adequate. The adaptive integration is resolving a small number of narrow resonances without excessive global refinement. The remaining test is the order-12 collision matrix, which will reveal whether thermal diffusion has converged sufficiently.
+Plan: Inspect the completed radial tests and ongoing high-order run. Once its scattering moments are available, reuse them to compare several mixture compositions and species orderings without repeating radial integration.
+CMD: tail -12 /app/ral.txt; cat /app/rt.txt; jobs
+
+CMD: cat > /app/checkreuse.py <<'PY'
+from adaptive import effective_weights
+from brackets import transport
+import numpy as np,sys
+N=int(sys.argv[1]);x=float(sys.argv[2]) if len(sys.argv)>2 else .3
+ws={}
+for i,j in [(0,0),(0,1),(1,1)]:
+ ws[i,j]=effective_weights(np.load('/app/mom'+str(i)+str(j)+'.npy'),N,[1,6][i] if i==j else 1,int(i==j))
+print(transport([1,2],[x,1-x],.2,N=N,ne=2*N+3,qs=lambda i,j,z,a,w:ws[i,j][z]))
+PY
+
+OBS: unning                 OPENBLAS_NUM_THREADS=2 python3 /app/runadaptive.py 0 .8 .2 12 > /app/ra.txt 2> /app/ral.txt &
+root@1afed5a5c86f:/app# cat > /app/checkreuse.py <<'PY'
+> from adaptive import effective_weights
+> from brackets import transport
+> import numpy as np,sys
+> N=int(sys.argv[1]);x=float(sys.argv[2]) if len(sys.argv)>2 else .3
+> ws={}
+> for i,j in [(0,0),(0,1),(1,1)]:
+>  ws[i,j]=effective_weights(np.load('/app/mom'+str(i)+str(j)+'.npy'),N,[1,6][i] if i==j else 1,int(i==j))
+> print(transport([1,2],[x,1-x],.2,N=N,ne=2*N+3,qs=lambda i,j,z,a,w:ws[i,j][z]))
+> PY
+root@1afed5a5c86f:/app#
+
+
+#### step 40 06:07:52
+MSG: Analysis: The radial accuracy checks are satisfactory at the chosen fine step and matching radius. The adaptive low-quantum transport run is progressing normally. I will now assemble a standalone prototype and test species symmetry and runtime, while using the remaining convergence tests to choose the final polynomial order.
+Plan: Combine the validated modules into one file, add species masses, internal degeneracies, and Bose/Fermi signs, and provide the required JSON interface. Run representative equal-mass and unequal-mass cases, then adjust basis convergence handling if needed.
+CMD: cat > /app/assemble.py <<'PY'
+parts=['''#!/usr/bin/env python3
+"""Quantum dilute-mixture transport in units sigma=epsilon=m=k_B=1.
+The Navier--Stokes integral equations are solved by successively converged
+Sonine Galerkin systems. Collision brackets use exact Gaussian integration
+of the velocity polynomials and adaptive quantum scattering moments.
+"""
+import os
+os.environ['OPENBLAS_NUM_THREADS']='2'
+os.environ['OMP_NUM_THREADS']='2'
+import sys,json,time
+''']
+for file in ['scatter','adaptive','brackets']:
+ s=open('/app/'+file+'.py').read().split("if __name__")[0]
+ s=s.replace('from scatter import phases\n','')
+ parts.append(s)
+parts.append('''
+def main():
+    s1,s2=sys.argv[1:3]
+    A,L,X,T=map(float,sys.argv[3:7])
+    species={'pH2':(1.,1,1),'oH2':(1.,9,1),'HD':(1.5,6,-1),'oD2':(2.,6,1),'pD2':(2.,9,1)}
+    sp=[species[s1],species[s2]];m=[p[0] for p in sp];x=[X,1-X]
+    N=12
+    moms={};ws={}
+    for i,j in [(0,0),(0,1),(1,1)]:
+        mu=m[i]*m[j]/(m[i]+m[j])
+        if mu not in moms:
+            moms[mu]=scattering_moments(T,mu,A,L,N,h=.001 if L<1.4 else .0015)
+        ws[i,j]=effective_weights(moms[mu],N,sp[i][1],sp[i][2] if i==j else 0)
+    out=transport(m,x,T,N=N,ne=2*N+3,qs=lambda i,j,z,a,w:ws[i,j][z])
+    print(json.dumps(dict(zip(['viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'],map(float,out)))))
+if __name__=='__main__':
+    main()
+''')
+open('/app/output/transport.py','w').write('\n'.join(parts))
+PY
+python3 /app/assemble.py
+OPENBLAS_NUM_THREADS=2 python3 /app/output/transport.py pH2 oH2 .35 2 .25 .4 > /app/equal.txt 2>/app/eql.txt &
+tail -12 /app/ral.txt; jobs
+
+OBS: 4488 8 56.83703136444092
+adaptive 0.6666666666666666 16 4584 12 57.83345985412598
+adaptive 0.6666666666666666 17 4728 14 59.602312326431274
+adaptive 0.6666666666666666 18 4896 24 61.80642819404602
+adaptive 0.6666666666666666 19 5184 38 65.31766200065613
+adaptive 0.6666666666666666 20 5640 0 70.38898921012878
+[2]-  Running                 OPENBLAS_NUM_THREADS=2 python3 /app/runadaptive.py 0 .8 .2 12 > /app/ra.txt 2> /app/ral.txt &
+[3]+  Running                 OPENBLAS_NUM_THREADS=2 python3 /app/output/transport.py pH2 oH2 .35 2 .25 .4 > /app/equal.txt 2> /app/eql.txt &
+root@1afed5a5c86f:/app#
+
+
+#### step 41 06:08:16
+MSG: Analysis: The standalone prototype is now written. It includes all five species, their internal degeneracies, and the correct exchange signs, and emits only the requested JSON object. High-order adaptive and equal-mass tests are still running. A few very narrow energy panels are reaching the refinement limit, so I will check whether those are physical resonances or numerical phase noise.
+Plan: Inspect the prototype result and order-12 convergence history, then compare selected adaptive moments at different tolerances and radial steps. Improve the refinement stopping rule if it is reacting to numerical noise at negligible energy widths.
+CMD: tail -12 /app/ral.txt; tail -8 /app/eql.txt; cat /app/equal.txt; cat /app/ra.txt; jobs
+
+CMD: OPENBLAS_NUM_THREADS=2 python3 - <<'PY' > /app/ahalf.txt 2>&1 &
+from adaptive import scattering_moments
+import numpy as np
+mom=scattering_moments(.2,.5,0,.8,12,tol=1e-7,h=.0007,R=50)
+np.save('/app/momhalf.npy',mom)
+PY
+
+OBS: 0508423
+adaptive 0.5 3 2496 0 18.651840448379517
+[2]-  Running                 OPENBLAS_NUM_THREADS=2 python3 /app/runadaptive.py 0 .8 .2 12 > /app/ra.txt 2> /app/ral.txt &
+[3]+  Running                 OPENBLAS_NUM_THREADS=2 python3 /app/output/transport.py pH2 oH2 .35 2 .25 .4 > /app/equal.txt 2> /app/eql.txt &
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 - <<'PY' > /app/ahalf.txt 2>&1 &
+> from adaptive import scattering_moments
+> import numpy as np
+> mom=scattering_moments(.2,.5,0,.8,12,tol=1e-7,h=.0007,R=50)
+> np.save('/app/momhalf.npy',mom)
+> PY
+[4] 1134
+root@1afed5a5c86f:/app#
+
+
+#### step 42 06:08:39
+MSG: Analysis: The prototype has completed its equal-mass scattering integration. I am waiting for the high-order collision matrices and the independent radial/moment comparison. The most expensive part is now the velocity-polynomial bracket quadrature, so I will investigate reducing its angular quadrature without changing the represented collision brackets.
+Plan: Inspect the pending results and test the angular polynomial degree numerically. If the brackets need fewer angular moments than the conservative implementation uses, reduce the quadrature size and verify unchanged transport values.
+CMD: tail -10 /app/ral.txt; tail -8 /app/eql.txt; cat /app/equal.txt; cat /app/ra.txt; tail -6 /app/ahalf.txt; jobs
+
+OBS:  17.921470880508423
+adaptive 0.5 3 2496 0 18.651840448379517
+[2]   Running                 OPENBLAS_NUM_THREADS=2 python3 /app/runadaptive.py 0 .8 .2 12 > /app/ra.txt 2> /app/ral.txt &
+[3]-  Running                 OPENBLAS_NUM_THREADS=2 python3 /app/output/transport.py pH2 oH2 .35 2 .25 .4 > /app/equal.txt 2> /app/eql.txt &
+[4]+  Running                 OPENBLAS_NUM_THREADS=2 python3 - <<'PY' > /app/ahalf.txt 2>&1
+from adaptive import scattering_moments
+import numpy as np
+mom=scattering_moments(.2,.5,0,.8,12,tol=1e-7,h=.0007,R=50)
+np.save('/app/momhalf.npy',mom)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 43 06:09:01
+MSG: Analysis: The collision-bracket angular dependence has a lower polynomial degree than the initial conservative implementation assumed: order-N vector/tensor Sonine bases require angular moments only through roughly N+1. I will test this reduction against the existing implementation; if confirmed, it will substantially reduce high-order matrix cost.
+Plan: Build a reduced-angular-quadrature version, compare its transport results with the full version using the same scattering moments, and inspect the pending high-order convergence results.
+CMD: cp /app/brackets.py /app/brackets_full.py; cp /app/adaptive.py /app/adaptive_full.py
+sed -i 's/roots_legendre(2\*N+1)/roots_legendre(N+2)/' /app/brackets.py
+python3 - <<'PY'
+p='/app/adaptive.py';s=open(p).read().replace('na=2*N+1','na=N+2');open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/brackets.py 8 > /app/bshort.txt 2>&1 &
+tail -6 /app/eql.txt; tail -6 /app/ral.txt; cat /app/equal.txt
+
+OBS: pp# OPENBLAS_NUM_THREADS=2 python3 /app/brackets.py 8 > /app/bshort.txt 2>&1 &
+[5] 1188
+root@1afed5a5c86f:/app# tail -6 /app/eql.txt; tail -6 /app/ral.txt; cat /app/equal.txt
+adaptive 0.5 1 2256 14 16.45296859741211
+adaptive 0.5 2 2424 6 17.921470880508423
+adaptive 0.5 3 2496 0 18.651840448379517
+adaptive 0.6666666666666666 19 5184 38 65.31766200065613
+adaptive 0.6666666666666666 20 5640 0 70.38898921012878
+adaptive 1.0 1 2256 58 41.84019422531128
+adaptive 1.0 2 2952 42 54.987656354904175
+adaptive 1.0 3 3456 30 63.88640880584717
+adaptive 1.0 4 3816 22 70.25076484680176
+root@1afed5a5c86f:/app#
+
+
+#### step 44 06:09:22
+MSG: Analysis: The reduced angular quadrature is being checked. The high-order prototype is still running its collision matrix, so this optimization is important for runtime headroom. The scattering calculation already resolves the difficult low-energy resonances adaptively.
+Plan: Compare the reduced quadrature with the conservative version, then reuse the completed scattering moments for order-10/order-12 transport checks. If the lower angular degree is confirmed, use the reduced implementation in the final standalone program.
+CMD: cat /app/bshort.txt; tail -6 /app/ral.txt; tail -6 /app/eql.txt; cat /app/equal.txt; tail -6 /app/ahalf.txt; jobs
+
+OBS:  17.921470880508423
+adaptive 0.5 3 2496 0 18.651840448379517
+[2]   Running                 OPENBLAS_NUM_THREADS=2 python3 /app/runadaptive.py 0 .8 .2 12 > /app/ra.txt 2> /app/ral.txt &
+[3]-  Running                 OPENBLAS_NUM_THREADS=2 python3 /app/output/transport.py pH2 oH2 .35 2 .25 .4 > /app/equal.txt 2> /app/eql.txt &
+[4]+  Running                 OPENBLAS_NUM_THREADS=2 python3 - <<'PY' > /app/ahalf.txt 2>&1
+from adaptive import scattering_moments
+import numpy as np
+mom=scattering_moments(.2,.5,0,.8,12,tol=1e-7,h=.0007,R=50)
+np.save('/app/momhalf.npy',mom)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 45 06:09:48
+MSG: Analysis: The reduced angular quadrature reproduces the hard-sphere results to numerical precision. The order-12 direct velocity quadrature is still costly, so I will replace its three-dimensional Gaussian integration with an analytic Gaussian generating-function evaluation. This preserves the same collision brackets while making higher-order convergence checks much cheaper.
+Plan: Derive and implement the two-variable Laguerre generating function for vector and traceless-tensor collision brackets. Compare its matrices and transport values against the already-tested direct quadrature, then use it to reach higher polynomial orders within the runtime budget.
+CMD: tail -6 /app/ral.txt; tail -6 /app/eql.txt; tail -6 /app/ahalf.txt; cat /app/equal.txt; cat /app/ra.txt; ls -l /app/mom*.npy
+
+OBS: e 1.0 8 4800 14 91.14148569107056
+adaptive 1.0 9 4968 12 94.68412208557129
+adaptive 1.0 10 5112 8 98.38310813903809
+adaptive 1.0 11 5208 8 100.45462679862976
+adaptive 1.0 12 5304 8 102.2374210357666
+adaptive 1.0 13 5400 0 104.17510485649109
+adaptive 0.5 1 2256 14 16.45296859741211
+adaptive 0.5 2 2424 6 17.921470880508423
+adaptive 0.5 3 2496 0 18.651840448379517
+adaptive 0.5 1 2256 38 89.19734954833984
+-rw-r--r-- 1 root root 16328 Nov  5 06:06 /app/mom00.npy
+-rw-r--r-- 1 root root 16328 Nov  5 06:07 /app/mom01.npy
+-rw-r--r-- 1 root root 16328 Nov  5 06:09 /app/mom11.npy
+root@1afed5a5c86f:/app#
+
+
+#### step 46 06:11:11
+MSG: Analysis: The high-order scattering moments are available. I have derived an analytic Gaussian generating function for the collision brackets, which removes the expensive centre-of-mass velocity quadrature entirely. It uses real bivariate power-series recurrences, so the Sonine coefficients are obtained directly without unstable finite differences or FFT coefficient extraction.
+Plan: Implement the generating-function brackets and compare them against the validated direct quadrature using hard-sphere and quantum scattering data. If they agree, use the faster implementation to converge transport through substantially higher polynomial orders.
+CMD: cat > /app/genbr.py <<'PY'
+import numpy as np
+from scipy.special import roots_genlaguerre,roots_legendre
+from time import time
+
+def series(N,f,g,j,a,b,c,p,y):
+    # F^-p exp[-y (a z+b w+c zw)/F], F=1+f z+g w+j zw
+    shape=np.broadcast_shapes(np.shape(y),np.shape(c));y=np.broadcast_to(y,shape);c=np.broadcast_to(c,shape)
+    out=np.zeros((N,N)+shape);out[0,0]=1
+    # F^2 derivative coefficients
+    D={(0,0):1,(1,0):2*f,(0,1):2*g,(2,0):f*f,(0,2):g*g,(1,1):2*j+2*f*g,(2,1):2*f*j,(1,2):2*g*j,(2,2):j*j}
+    R={(0,0):-p*f-y*a,(1,0):-p*f*f,(0,1):-p*(j+g*f)-y*(c+a*g-b*f),(1,1):-2*p*f*j,(0,2):-p*g*j-y*(c*g-b*j),(1,2):-p*j*j}
+    for m in range(N-1):
+        rhs=(-p*g-y*b)*out[0,m]
+        if m:rhs-=p*g*g*out[0,m-1]
+        rhs-=2*g*m*out[0,m]
+        if m>1:rhs-=g*g*(m-1)*out[0,m-1]
+        out[0,m+1]=rhs/(m+1)
+    for n in range(N-1):
+        for m in range(N):
+            rhs=np.zeros(shape)
+            for (i,k),v in R.items():
+                if n>=i and m>=k:rhs+=v*out[n-i,m-k]
+            for (i,k),v in D.items():
+                if (i,k)==(0,0):continue
+                ni=n-i+1;mi=m-k
+                if ni>=1 and mi>=0:rhs-=v*ni*out[ni,mi]
+            out[n+1,m]=rhs/(n+1)
+    return out
+
+def mulpoly(S,P):
+    out=np.zeros_like(S);N=S.shape[0]
+    for (i,j),v in P.items():
+        out[i:,j:]+=S[:N-i,:N-j]*v
+    return out
+
+def gaussian_kernel(N,ma,mb,mass,T,sa,sb,y,cos):
+    # sa and sb are velocity shifts per sqrt(y)
+    d=T/mass;P=ma/mass;Q=mb/mass;qa=ma/(2*T);qb=mb/(2*T)
+    s2=sa*sa;t2=sb*sb;st=sa*sb*cos
+    U2=(1-Q)**2*s2+Q**2*t2+2*Q*(1-Q)*st
+    V2=(1-P)**2*t2+P**2*s2+2*P*(1-P)*st
+    sV=(1-P)*st+P*s2;tU=(1-Q)*st+Q*t2
+    UV=((1-Q)*(1-P)+P*Q)*st+P*(1-Q)*s2+Q*(1-P)*t2
+    AB={(0,0):st*y,(1,0):-sV*y,(0,1):-tU*y,(1,1):UV*y}
+    A2={(0,0):s2*y,(0,1):-2*((1-Q)*s2+Q*st)*y,(0,2):U2*y}
+    B2={(0,0):t2*y,(1,0):-2*((1-P)*t2+P*st)*y,(2,0):V2*y}
+    tensor={}
+    for (i,j),v in AB.items():
+        for (k,l),w in AB.items():tensor[i+k,j+l]=tensor.get((i+k,j+l),0)+v*w
+    for (i,j),v in A2.items():
+        for (k,l),w in B2.items():tensor[i+k,j+l]=tensor.get((i+k,j+l),0)-v*w/3
+    a=qa*s2;b=qb*t2;c=-qa*(1-Q)*s2-qb*(1-P)*t2-4*d*qa*qb*st
+    args=(N,P-1,Q-1,1-P-Q,a,b,c)
+    G25=series(*args,2.5,y);G35=series(*args,3.5,y)
+    vec=mulpoly(G35,AB)+3*d*G25
+    G45=series(*args,4.5,y);G55=series(*args,5.5,y)
+    ten=mulpoly(G55,tensor)+(20/3)*d*mulpoly(G45,AB)+10*d*d*G35
+    return vec,ten
+
+def transport(m,x,T,N=10,ne=None,qs=None):
+    if ne is None:ne=2*N+3
+    yy,wy=roots_genlaguerre(ne,1);ang,wa=roots_legendre(N+2)
+    y=yy[:,None];cos=ang[None,:]
+    BV=np.zeros((2*N,2*N));BT=BV.copy();start=time()
+    for i,j in [(0,0),(0,1),(1,1)]:
+        mass=m[i]+m[j];mu=m[i]*m[j]/mass
+        shifts=[m[j]/mass,-m[i]/mass];sp=[i,j]
+        factor=x[i]*x[j]*(.25 if i==j else .5)*np.sqrt(8*T/(np.pi*mu))
+        ww=np.broadcast_to(wa*np.pi/2,(ne,len(ang))).copy() if qs is None else np.array([qs(i,j,z,ang,wa) for z in range(ne)])
+        ww=ww*wy[:,None]*factor
+        for a,b in [(0,0),(0,1),(1,1)]:
+            sa=shifts[a]*np.sqrt(2*T/mu);sb=shifts[b]*np.sqrt(2*T/mu)
+            v0,t0=gaussian_kernel(N,m[sp[a]],m[sp[b]],mass,T,sa,sb,y,np.ones_like(cos))
+            vc,tc=gaussian_kernel(N,m[sp[a]],m[sp[b]],mass,T,sa,sb,y,cos)
+            v=2*np.sum((v0-vc)*ww,axis=(-1,-2))/3
+            t=2*np.sum((t0-tc)*ww,axis=(-1,-2))/5
+            ia=sp[a]*N;ib=sp[b]*N
+            BV[ia:ia+N,ib:ib+N]+=v;BT[ia:ia+N,ib:ib+N]+=t
+            if a!=b:
+                BV[ib:ib+N,ia:ia+N]+=v.T;BT[ib:ib+N,ia:ia+N]+=t.T
+    BV=(BV+BV.T)/2;BT=(BT+BT.T)/2
+    def solve(n):
+        ix=np.r_[np.arange(n),np.arange(N,N+n)]
+        bv=BV[np.ix_(ix,ix)];bt=BT[np.ix_(ix,ix)]
+        sd=np.zeros(2*n);st=sd.copy();sv=sd.copy()
+        sd[0]=T/m[0];sd[n]=-T/m[1]
+        st[1]=-2.5*x[0]*T/m[0];st[n+1]=-2.5*x[1]*T/m[1]
+        sv[0]=2*x[0]*T/m[0];sv[n]=2*x[1]*T/m[1]
+        vd=np.linalg.solve(bv[1:,1:],sd[1:]);vt=np.linalg.solve(bv[1:,1:],st[1:])
+        d=sd[1:]@vd;h=sd[1:]@vt;t=st[1:]@vt
+        eta=T/2*sv@np.linalg.solve(bt,sv)
+        return np.array([eta,t-h*h/d,x[0]*x[1]*d,h/(x[0]*x[1]*d)])
+    results=[solve(n) for n in range(4,N+1)]
+    print('generating brackets',time()-start,'convergence',results,file=__import__('sys').stderr)
+    transport.history=results
+    return results[-1]
+
+if __name__=='__main__':
+    import sys
+    print(transport([1,2],[.3,.7],.3,N=int(sys.argv[1])))
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/genbr.py 8 > /app/g8.txt 2>&1 & OPENBLAS_NUM_THREADS=2 python3 - <<'PY' > /app/direct8.txt 2>&1 &
+from brackets import transport
+print(transport([1,2],[.3,.7],.3,N=8,ne=19))
+PY
+cat /app/ra.txt; tail -6 /app/ral.txt; cat /app/equal.txt; tail -6 /app/eql.txt
+
+OBS: from brackets import transport
+> print(transport([1,2],[.3,.7],.3,N=8,ne=19))
+> PY
+[4] 1253
+[5] 1254
+root@1afed5a5c86f:/app# cat /app/ra.txt; tail -6 /app/ral.txt; cat /app/equal.txt; tail -6 /app/eql.txt
+adaptive 1.0 8 4800 14 91.14148569107056
+adaptive 1.0 9 4968 12 94.68412208557129
+adaptive 1.0 10 5112 8 98.38310813903809
+adaptive 1.0 11 5208 8 100.45462679862976
+adaptive 1.0 12 5304 8 102.2374210357666
+adaptive 1.0 13 5400 0 104.17510485649109
+adaptive 0.5 1 2256 14 16.45296859741211
+adaptive 0.5 2 2424 6 17.921470880508423
+adaptive 0.5 3 2496 0 18.651840448379517
+root@1afed5a5c86f:/app#
+
+
+#### step 47 06:11:29
+MSG: Analysis: The analytic generating-function bracket implementation is now being compared with the direct Gaussian velocity quadrature. It should reduce high-order transport calculations from minutes to seconds while preserving the same Sonine-Galerkin equations. The scattering moments from the demanding test are already available for cross-validation.
+Plan: Inspect the analytic-versus-direct comparison, fix any recurrence or normalization discrepancies, and then compute quantum transport at higher orders using the reusable scattering moments. Validate the final convergence criterion before rebuilding the standalone script.
+CMD: cat /app/g8.txt; cat /app/direct8.txt; cat /app/ra.txt; cat /app/equal.txt; tail -5 /app/ahalf.txt; jobs
+
+OBS: .10375728, -0.28797621])]
+[ 0.12772743  0.27994897  0.10375728 -0.28797621]
+{"viscosity": 0.09657272053286725, "thermal_conductivity": 0.36434179815251005, "binary_diffusion": 0.12882339140723886, "thermal_diffusion_factor": 0.000546113
+7982276783}
+adaptive 0.5 4 3192 14 122.2137360572815
+adaptive 0.5 5 3360 8 128.74692225456238
+adaptive 0.5 6 3456 6 132.9106273651123
+adaptive 0.5 7 3528 4 135.93534064292908
+adaptive 0.5 8 3576 0 138.1078188419342
+[2]+  Running                 OPENBLAS_NUM_THREADS=2 python3 /app/runadaptive.py 0 .8 .2 12 > /app/ra.txt 2> /app/ral.txt &
+root@1afed5a5c86f:/app#
+
+
+#### step 48 06:11:46
+MSG: Analysis: The generating-function brackets agree with the direct velocity quadrature throughout the hard-sphere convergence history, and they are much faster. The standalone equal-mass test also produced finite, plausible values. I will now validate the analytic brackets with quantum scattering moments and use the speedup to converge beyond order 12.
+Plan: Compare quantum transport from the generating-function and direct implementations using the same moments. Check the independent radial-step/matching-radius moment comparison, then increase the available scattering-moment order and test higher-order convergence.
+CMD: OPENBLAS_NUM_THREADS=2 python3 - <<'PY' > /app/qgen.txt 2>&1 &
+import numpy as np
+from adaptive import effective_weights
+from genbr import transport
+N=12
+ws={}
+for i,j in [(0,0),(0,1),(1,1)]:
+ ws[i,j]=effective_weights(np.load('/app/mom'+str(i)+str(j)+'.npy'),N,[1,6][i] if i==j else 1,int(i==j))
+print(transport([1,2],[.3,.7],.2,N=N,qs=lambda i,j,z,a,w:ws[i,j][z]))
+a=np.load('/app/mom00.npy');b=np.load('/app/momhalf.npy');print('moment radial independent error',np.max(abs(a-b)),np.max(abs(a-b)/np.maximum(abs(a),.01)))
+PY
+cat /app/ra.txt; tail -5 /app/ral.txt; tail -5 /app/eql.txt
+
+OBS: 18.651840448379517
+brackets 186.88316464424133 convergence [array([0.09657185, 0.36428098, 0.12882008, 0.00050059]), array([0.09657256, 0.36433194, 0.12882274, 0.00053087]), array
+([0.09657268, 0.36433973, 0.12882324, 0.00054124]), array([0.09657271, 0.36434123, 0.12882335, 0.00054455]), array([0.09657272, 0.3643416 , 0.12882338, 0.000545
+6 ]), array([0.09657272, 0.36434172, 0.12882339, 0.00054594]), array([0.09657272, 0.36434177, 0.12882339, 0.00054605]), array([0.09657272, 0.36434179, 0.1288233
+9, 0.0005461 ]), array([0.09657272, 0.3643418 , 0.12882339, 0.00054611])]
+root@1afed5a5c86f:/app#
+
+
+#### step 49 06:12:05
+MSG: Analysis: The quantum order-12 direct calculation has converged well, and adaptive resonance integration changes the low-quantum result significantly compared with a fixed mesh. This confirms that explicit resonance handling is necessary. The generating-function method is now being checked against that quantum result and an independent finer radial calculation.
+Plan: Inspect the quantum analytic-bracket comparison, test numerical stability at higher polynomial orders, and rebuild the standalone script with the fast brackets. Use a larger moment basis so convergence can be assessed and extended cheaply within each run.
+CMD: cat /app/qgen.txt; OPENBLAS_NUM_THREADS=2 python3 /app/genbr.py 20 > /app/g20.txt 2>&1 &
+python3 - <<'PY'
+p='/app/assemble.py';s=open(p).read().replace("'scatter','adaptive','brackets'","'scatter','adaptive','genbr'").replace('N=12','N=18')
+open(p,'w').write(s)
+p='/app/adaptive.py';s=open(p).read().replace('cut=85.','cut=max(85.,4*N+20.)')
+open(p,'w').write(s)
+PY
+python3 /app/assemble.py
+python3 /app/output/transport.py pH2 oD2 0 .8 .3 .2 > /app/final_low.txt 2>/app/final_lowl.txt &
+
+OBS: pendent error',np.max(abs(a-b)),np.max(abs(a-b)/np.maximum(abs(a),.01)))
+PY
+
+[1] 1329
+root@1afed5a5c86f:/app# python3 - <<'PY'
+> p='/app/assemble.py';s=open(p).read().replace("'scatter','adaptive','brackets'","'scatter','adaptive','genbr'").replace('N=12','N=18')
+> open(p,'w').write(s)
+> p='/app/adaptive.py';s=open(p).read().replace('cut=85.','cut=max(85.,4*N+20.)')
+> open(p,'w').write(s)
+> PY
+root@1afed5a5c86f:/app# python3 /app/assemble.py
+root@1afed5a5c86f:/app# python3 /app/output/transport.py pH2 oD2 0 .8 .3 .2 > /app/final_low.txt 2>/app/final_lowl.txt &
+[2] 1333
+root@1afed5a5c86f:/app#
+
+
+#### step 50 06:12:28
+MSG: Analysis: The generating-function brackets reproduce the quantum direct-quadrature result to numerical precision and are much faster. However, the independent scattering-moment comparison showed a discrepancy larger than the expected radial error. I need to resolve that before treating the program as accurate; it may indicate an energy panel missing a narrow resonance.
+Plan: Locate the discrepant moments and measure their effect on transport. Compare adaptive integration at identical radial settings but different tolerances, then inspect the resonance panels responsible for any difference.
+CMD: cat /app/g20.txt; tail -5 /app/final_lowl.txt
+OPENBLAS_NUM_THREADS=2 python3 - <<'PY'
+import numpy as np
+from adaptive import effective_weights
+from genbr import transport
+a=np.load('/app/mom00.npy');b=np.load('/app/momhalf.npy')
+for k in range(3):
+ print(k,'low entries',a[k,:5,:5],b[k,:5,:5], 'largest',np.unravel_index(np.argmax(abs(a[k]-b[k])),a[k].shape))
+for use in [a,b]:
+ N=12;ws={}
+ for i,j in [(0,0),(0,1),(1,1)]:
+  mom=use if i==j==0 else np.load('/app/mom'+str(i)+str(j)+'.npy')
+  ws[i,j]=effective_weights(mom,N,[1,6][i] if i==j else 1,int(i==j))
+ print(transport([1,2],[.3,.7],.2,N=N,qs=lambda i,j,z,a,w:ws[i,j][z]))
+PY
+
+OBS: 11152,  0.02613756, -0.10685399]), array([ 0.03117941,  0.06911502,  0.02613758, -
+0.10687485]), array([ 0.03117947,  0.06911531,  0.02613788, -0.10688106]), array([ 0.03117951,  0.06911579,  0.02613826, -0.10691123]), array([ 0.03117952,  0.0
+6911609,  0.02613851, -0.10693298]), array([ 0.03117953,  0.06911623,  0.02613862, -0.10694319]), array([ 0.03117953,  0.06911628,  0.02613866, -0.10694685]), a
+rray([ 0.03117953,  0.0691163 ,  0.02613867, -0.10694784]), array([ 0.03117953,  0.0691163 ,  0.02613867, -0.106948  ])]
+[ 0.03117953  0.0691163   0.02613867 -0.106948  ]
+root@1afed5a5c86f:/app#
+
+
+#### step 51 06:12:55
+MSG: Analysis: The apparent scattering-moment discrepancy is confined mainly to high angular moments that do not enter the tested transport basis. Replacing the scattering data with the independent finer radial calculation changes the transport outputs only by about one part in ten million. The generating-function implementation also agrees with direct quantum brackets, so the faster standalone version is ready for broader convergence tests.
+Plan: Check the order-18 standalone result against the validated order-12 result. Then test extreme temperature/core/quantum combinations and species reversal under a restricted environment, monitoring runtime and convergence histories.
+CMD: tail -10 /app/final_lowl.txt; cat /app/final_low.txt; jobs
+python3 /app/output/transport.py HD pD2 0.5 2.8 0.05 0.2 > /app/extreme.txt 2>/app/extremel.txt &
+python3 /app/output/transport.py oD2 pD2 0 0.8 0.95 0.6 > /app/hot.txt 2>/app/hotl.txt &
+
+OBS: 0.5 4 3504 14 43.752832889556885
+adaptive 0.5 5 3672 12 45.71724057197571
+adaptive 0.5 6 3816 6 47.58515930175781
+adaptive 0.5 7 3888 6 48.449286699295044
+adaptive 0.5 8 3960 0 49.26051998138428
+[2]+  Running                 python3 /app/output/transport.py pH2 oD2 0 .8 .3 .2 > /app/final_low.txt 2> /app/final_lowl.txt &
+root@1afed5a5c86f:/app# python3 /app/output/transport.py HD pD2 0.5 2.8 0.05 0.2 > /app/extreme.txt 2>/app/extremel.txt &
+[3] 1379
+root@1afed5a5c86f:/app# python3 /app/output/transport.py oD2 pD2 0 0.8 0.95 0.6 > /app/hot.txt 2>/app/hotl.txt &
+[4] 1380
+root@1afed5a5c86f:/app#
+
+
+#### step 52 06:13:18
+MSG: Analysis: The independent scattering calculation confirms that the transport outputs are stable despite differences in unused high angular moments. The order-18 standalone calculation and two endpoint cases are now running. These tests will check both convergence and the runtime budget across the parameter range.
+Plan: Inspect their progress and final convergence histories. Verify species reversal with the fast bracket implementation, then add an explicit convergence-selection rule and finalize the standalone file.
+CMD: tail -8 /app/final_lowl.txt; tail -8 /app/extremel.txt; tail -8 /app/hotl.txt; cat /app/{final_low,extreme,hot}.txt; jobs
+
+CMD: OPENBLAS_NUM_THREADS=2 python3 - <<'PY'
+from genbr import transport
+import numpy as np
+v=transport([1,2],[.3,.7],.3,N=16)
+w=transport([2,1],[.7,.3],.3,N=16)
+print('reversal',v,w,v-w*np.array([1,1,1,-1]))
+PY
+
+OBS:          python3 /app/output/transport.py pH2 oD2 0 .8 .3 .2 > /app/final_low.txt 2> /app/final_lowl.txt &
+[3]-  Running                 python3 /app/output/transport.py HD pD2 0.5 2.8 0.05 0.2 > /app/extreme.txt 2> /app/extremel.txt &
+[4]+  Running                 python3 /app/output/transport.py oD2 pD2 0 0.8 0.95 0.6 > /app/hot.txt 2> /app/hotl.txt &
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 - <<'PY'
+> from genbr import transport
+> import numpy as np
+> v=transport([1,2],[.3,.7],.3,N=16)
+> w=transport([2,1],[.7,.3],.3,N=16)
+> print('reversal',v,w,v-w*np.array([1,1,1,-1]))
+> PY
+
+
+
+#### step 53 06:13:34
+MSG: Analysis: The species-reversal check is running alongside the endpoint tests. The analytic bracket formulation is fast enough to support higher-order convergence, but I will also monitor numerical conditioning at large Sonine orders and avoid using terms beyond the stable convergence plateau.
+Plan: Read the pending results, inspect convergence histories, and choose a safe stopping criterion based on several consecutive orders. Then test the final program in an environment containing only the permitted variables and a read-only working directory.
+CMD: 
+CMD: tail -8 /app/final_lowl.txt; tail -8 /app/extremel.txt; tail -8 /app/hotl.txt; cat /app/{final_low,extreme,hot}.txt; jobs
+
+OBS:  1 2304 22 24.77631402015686
+adaptive 0.75 2 2568 26 27.191635608673096
+adaptive 0.75 3 2880 28 30.377144813537598
+adaptive 0.75 4 3216 34 33.52504515647888
+adaptive 0.75 5 3624 40 36.98863863945007
+[2]   Running                 python3 /app/output/transport.py pH2 oD2 0 .8 .3 .2 > /app/final_low.txt 2> /app/final_lowl.txt &
+[3]-  Running                 python3 /app/output/transport.py HD pD2 0.5 2.8 0.05 0.2 > /app/extreme.txt 2> /app/extremel.txt &
+[4]+  Running                 python3 /app/output/transport.py oD2 pD2 0 0.8 0.95 0.6 > /app/hot.txt 2> /app/hotl.txt &
+root@1afed5a5c86f:/app#
+
+
+#### step 54 06:14:10
+MSG: Analysis: The species-reversal check passed to floating-point precision: viscosity, conductivity, and diffusion are unchanged, and thermal diffusion reverses sign. The endpoint tests are still running. I will inspect their refinement histories, particularly for unnecessary refinement caused by numerically negligible partial waves.
+Plan: Read the endpoint progress and convergence results. Add a convergence-selection rule using several consecutive Sonine orders, and refine the energy stopping criterion so narrow panels below the error budget do not waste runtime.
+CMD: tail -12 /app/final_lowl.txt; tail -12 /app/extremel.txt; tail -12 /app/hotl.txt; cat /app/{final_low,extreme,hot}.txt; jobs
+
+OBS: 5 7 4704 44 47.334064245224
+adaptive 0.75 8 5232 46 52.297802448272705
+adaptive 0.75 9 5784 76 56.992512464523315
+adaptive 0.75 10 6696 102 65.33196425437927
+adaptive 1.0 1 2304 58 69.81689143180847
+[2]   Running                 python3 /app/output/transport.py pH2 oD2 0 .8 .3 .2 > /app/final_low.txt 2> /app/final_lowl.txt &
+[3]-  Running                 python3 /app/output/transport.py HD pD2 0.5 2.8 0.05 0.2 > /app/extreme.txt 2> /app/extremel.txt &
+[4]+  Running                 python3 /app/output/transport.py oD2 pD2 0 0.8 0.95 0.6 > /app/hot.txt 2> /app/hotl.txt &
+root@1afed5a5c86f:/app#
+
+
+#### step 55 06:14:37
+MSG: Analysis: The endpoint test exposed excessive adaptive refinement in a smooth high-quantum case. The likely cause is phase-jump detection in numerically closed, nonresonant partial waves. Only waves whose centrifugal-plus-potential effective potential has an attractive well can support the narrow shape resonances that require this special trigger.
+Plan: Restrict phase-jump detection to potentially resonant partial waves and inspect the remaining refined panels. Keep the cross-section Gaussian error estimate for all partial waves. Rerun the affected endpoint case and compare its transport result.
+CMD: python3 - <<'PY'
+p='/app/adaptive.py';s=open(p).read();s=s.replace('zl,wl=roots_legendre(4);zh,wh=roots_legendre(8)', '''rr=np.linspace(A+(1-A)*.95,5,5000)
+    vv=4*((1-A)/(rr-A))**6*(((1-A)/(rr-A))**6-1)
+    well=np.max(-C*vv*rr**2)
+    resonant_l=int((np.sqrt(1+4*well)-1)/2)+1
+    zl,wl=roots_legendre(4);zh,wh=roots_legendre(8)''')
+s=s.replace('jump=np.max(abs(diff),axis=(1,2))','jump=np.max(abs(diff[:,:,:resonant_l+1]),axis=(1,2))')
+s=s.replace('refine=err>tol*scale','refine=err>np.maximum(tol*scale,2e-11)')
+s=s.replace('if level>18:refine[:]=False',"if level>18:refine[:]=False\n            if level>6 and np.any(refine):print('panels',level,pp[refine],err[refine],jump[refine],file=__import__('sys').stderr)")
+open(p,'w').write(s)
+PY
+python3 /app/assemble.py
+python3 /app/output/transport.py HD pD2 0.5 2.8 0.05 0.2 > /app/extreme2.txt 2>/app/extreme2l.txt &
+tail -5 /app/extremel.txt; tail -5 /app/hotl.txt
+
+OBS: /app# python3 /app/assemble.py
+root@1afed5a5c86f:/app# python3 /app/output/transport.py HD pD2 0.5 2.8 0.05 0.2 > /app/extreme2.txt 2>/app/extreme2l.txt &
+[5] 1490
+root@1afed5a5c86f:/app# tail -5 /app/extremel.txt; tail -5 /app/hotl.txt
+adaptive 0.75 8 5232 46 52.297802448272705
+adaptive 0.75 9 5784 76 56.992512464523315
+adaptive 0.75 10 6696 102 65.33196425437927
+adaptive 0.75 11 7920 116 76.513680934906
+adaptive 0.75 12 9312 136 89.19068217277527
+adaptive 1.0 1 2304 58 69.81689143180847
+adaptive 1.0 2 3000 52 85.88391327857971
+adaptive 1.0 3 3624 38 96.42422938346863
+root@1afed5a5c86f:/app#
+
+
+#### step 56 06:14:59
+MSG: Analysis: The adaptive phase trigger now considers only partial waves capable of supporting an attractive effective-potential well, and the quadrature error test has a small absolute floor to avoid refining numerical noise indefinitely. The updated endpoint test is running alongside the original version for comparison.
+Plan: Inspect the refined-panel diagnostics and endpoint results. Confirm that the updated stopping rule preserves transport accuracy while reducing runtime, then remove diagnostic verbosity and run the final restricted-environment checks.
+CMD: tail -15 /app/extreme2l.txt; tail -8 /app/final_lowl.txt; cat /app/final_low.txt; tail -6 /app/hotl.txt; tail -6 /app/extremel.txt; jobs
+
+OBS: 136 89.19068217277527
+adaptive 0.75 13 10944 180 104.11625051498413
+[2]   Running                 python3 /app/output/transport.py pH2 oD2 0 .8 .3 .2 > /app/final_low.txt 2> /app/final_lowl.txt &
+[3]   Running                 python3 /app/output/transport.py HD pD2 0.5 2.8 0.05 0.2 > /app/extreme.txt 2> /app/extremel.txt &
+[4]-  Running                 python3 /app/output/transport.py oD2 pD2 0 0.8 0.95 0.6 > /app/hot.txt 2> /app/hotl.txt &
+[5]+  Running                 python3 /app/output/transport.py HD pD2 0.5 2.8 0.05 0.2 > /app/extreme2.txt 2> /app/extreme2l.txt &
+root@1afed5a5c86f:/app#
+
+
+#### step 57 06:15:11
+MSG: Analysis: Several concurrent tests are competing for CPU time, so their wall times are not representative of a checker run. The updated endpoint test has not yet produced its first progress line. I will stop the older over-refining version and focus on the updated integrator and the useful convergence tests.
+Plan: Stop the obsolete endpoint run, inspect the updated panel diagnostics, and let the low-quantum and high-temperature tests finish. Then measure one standalone run without competing jobs.
+CMD: kill %3; tail -20 /app/extreme2l.txt; tail -8 /app/final_lowl.txt; tail -8 /app/hotl.txt; jobs
+
+OBS: 136 16 129.08339738845825
+adaptive 1.0 9 5328 10 133.77757692337036
+[2]   Running                 python3 /app/output/transport.py pH2 oD2 0 .8 .3 .2 > /app/final_low.txt 2> /app/final_lowl.txt &
+[3]   Running                 python3 /app/output/transport.py HD pD2 0.5 2.8 0.05 0.2 > /app/extreme.txt 2> /app/extremel.txt &
+[4]-  Running                 python3 /app/output/transport.py oD2 pD2 0 0.8 0.95 0.6 > /app/hot.txt 2> /app/hotl.txt &
+[5]+  Running                 python3 /app/output/transport.py HD pD2 0.5 2.8 0.05 0.2 > /app/extreme2.txt 2> /app/extreme2l.txt &
+root@1afed5a5c86f:/app#
+
+
+#### step 58 06:15:30
+MSG: Analysis: Restricting phase-jump detection to physically resonant waves eliminated all unnecessary subdivisions in the smooth endpoint case. The original version's excessive refinement was numerical phase noise, not real scattering structure. The updated Gaussian error rule remains active for every cross-section moment.
+Plan: Finish the endpoint and high-order convergence tests, then compare the updated integrator with the validated low-quantum result. Remove temporary diagnostics and add a stable Sonine-convergence selection rule before the final restricted-environment run.
+CMD: tail -12 /app/extreme2l.txt; tail -12 /app/final_lowl.txt; tail -10 /app/hotl.txt; cat /app/{extreme2,final_low,hot}.txt; jobs
+
+OBS: y([9.26365732e-02, 1.73717441e-01, 6.18816320e-02, 4.24172036e-08]), array([9.26365732e-02, 1.73717441e-01, 6.188163
+20e-02, 4.24172006e-08])]
+{"viscosity": 0.09263657316891599, "thermal_conductivity": 0.17371744141132975, "binary_diffusion": 0.061881631967361156, "thermal_diffusion_factor": 4.24172005
+5852816e-08}
+[2]-  Running                 python3 /app/output/transport.py pH2 oD2 0 .8 .3 .2 > /app/final_low.txt 2> /app/final_lowl.txt &
+[5]+  Running                 python3 /app/output/transport.py HD pD2 0.5 2.8 0.05 0.2 > /app/extreme2.txt 2> /app/extreme2l.txt &
+root@1afed5a5c86f:/app#
+
+
+#### step 59 06:15:51
+MSG: Analysis: The high-temperature equal-mass endpoint test converged cleanly through order 18. The updated adaptive phase trigger also removes the smooth-case over-refinement. The remaining low-quantum run will verify the order-18 result against the independently validated order-12 calculation.
+Plan: Inspect the remaining results, then run the updated low-quantum case without competing jobs to measure runtime and confirm unchanged transport values. Add a conservative convergence-selection rule and perform the restricted-environment interface test.
+CMD: tail -10 /app/extreme2l.txt; tail -10 /app/final_lowl.txt; cat /app/{extreme2,final_low}.txt; jobs
+
+OBS: 728 14 97.0764524936676
+adaptive 0.6666666666666666 18 4896 24 99.95938277244568
+adaptive 0.6666666666666666 19 5184 38 106.06346249580383
+adaptive 0.6666666666666666 20 5640 0 115.83971858024597
+adaptive 1.0 1 2304 58 46.79314589500427
+adaptive 1.0 2 3000 42 55.5034339427948
+{"viscosity": 0.09162581750345998, "thermal_conductivity": 0.17474014640996866, "binary_diffusion": 0.06865281720399181, "thermal_diffusion_factor": -0.09254653
+46806381}
+[2]+  Running                 python3 /app/output/transport.py pH2 oD2 0 .8 .3 .2 > /app/final_low.txt 2> /app/final_lowl.txt &
+root@1afed5a5c86f:/app#
+
+
+#### step 60 06:16:16
+MSG: Analysis: The updated extreme-core/high-quantum case converged cleanly through order 18, with stable finite outputs. The remaining low-quantum run is finishing its final reduced-mass scattering integral. I will also check numerical stability of the power-series brackets at high order, since effective quadrature weights can be signed.
+Plan: Inspect the final low-quantum convergence history, then test the updated integrator under a restricted environment without competing jobs. Tighten the bracket arithmetic if higher-order cancellation is visible, and retain a conservative convergence check over several consecutive basis orders.
+CMD: tail -10 /app/final_lowl.txt; cat /app/final_low.txt; jobs
+cat /app/output/transport.py | head -16; wc -c /app/output/transport.py
+
+CMD: mkdir -p /app/readonly /app/scratch; cp /app/output/transport.py /app/readonly/transport.py; chmod 555 /app/readonly; env -i HOME=/app/scratch TMPDIR=/app/scratch PATH=/usr/local/bin:/usr/bin:/bin LANG=C python3 /app/readonly/transport.py pH2 oD2 0 0.8 0.3 0.2 > /app/restricted.txt 2>/app/restrictedl.txt &
+
+OBS: iron['OMP_NUM_THREADS']='2'
+import sys,json,time
+
+import numpy as np
+from scipy.special import spherical_jn,spherical_yn, eval_legendre
+from time import time
+
+def phases(E,mu,A,L,h=.0015,R=40,lmax=40):
+11359 /app/output/transport.py
+root@1afed5a5c86f:/app# mkdir -p /app/readonly /app/scratch; cp /app/output/transport.py /app/readonly/transport.py; chmod 555 /app/readonly; env -i HOME=/app/s
+cratch TMPDIR=/app/scratch PATH=/usr/local/bin:/usr/bin:/bin LANG=C python3 /app/readonly/transport.py pH2 oD2 0 0.8 0.3 0.2 > /app/restricted.txt 2>/app/restri
+ctedl.txt &
+[1] 1607
+root@1afed5a5c86f:/app#
+
+
+#### step 61 06:16:41
+MSG: Analysis: The order-18 low-quantum result agrees with the independently validated order-12 result well within the requested tolerance. The restricted-environment run is now active. One refinement remains: phase-based resonance detection should include partial waves with a positive-energy effective-potential well, not only those whose well lies below zero.
+Plan: Expand the resonance criterion to include every partial wave whose effective potential has a local well, using the potential derivative. Add a conservative convergence-selection rule, remove temporary diagnostics, and validate the revised integrator with additional mixtures and a restricted-environment run.
+CMD: python3 - <<'PY'
+p='/app/adaptive.py';s=open(p).read();s=s.replace('well=np.max(-C*vv*rr**2)', '''s6=((1-A)/(rr-A))**6
+    vp=24*s6*(1-2*s6)/(rr-A)
+    well=np.max(C*vp*rr**3/2)''')
+s=s.replace("            if level>6 and np.any(refine):print('panels',level,pp[refine],err[refine],jump[refine],file=__import__('sys').stderr)\n",'')
+open(p,'w').write(s)
+p='/app/assemble.py';s=open(p).read();s=s.replace("    print(json.dumps(dict(zip(",'''    # Require a stable sequence, rather than relying on a fixed low-order truncation.
+    history=np.asarray(transport.history)
+    for k in range(8,len(history)):
+        scale=np.maximum(np.abs(history[k])*1e-6,np.array([0.,0.,0.,5e-8]))
+        if np.all(np.max(np.abs(history[k-3:k]-history[k]),axis=0)<scale):
+            out=history[min(k+2,len(history)-1)]
+            break
+    print(json.dumps(dict(zip(''')
+open(p,'w').write(s)
+PY
+python3 /app/assemble.py
+python3 /app/output/transport.py oH2 HD 0.18 1.15 0.65 0.27 > /app/random1.txt 2>/app/random1l.txt &
+python3 /app/output/transport.py oD2 pH2 0.12 1.6 0.85 0.52 > /app/random2.txt 2>/app/random2l.txt &
+tail -8 /app/restrictedl.txt; cat /app/restricted.txt; jobs
+
+OBS:  1632
+root@1afed5a5c86f:/app# tail -8 /app/restrictedl.txt; cat /app/restricted.txt; jobs
+[1]   Running                 env -i HOME=/app/scratch TMPDIR=/app/scratch PATH=/usr/local/bin:/usr/bin:/bin LANG=C python3 /app/readonly/transport.py pH2 oD2 0
+ 0.8 0.3 0.2 > /app/restricted.txt 2> /app/restrictedl.txt &
+[2]-  Running                 python3 /app/output/transport.py oH2 HD 0.18 1.15 0.65 0.27 > /app/random1.txt 2> /app/random1l.txt &
+[3]+  Running                 python3 /app/output/transport.py oD2 pH2 0.12 1.6 0.85 0.52 > /app/random2.txt 2> /app/random2l.txt &
+root@1afed5a5c86f:/app#
+
+
+#### step 62 06:17:40
+MSG: Analysis: The transport-basis convergence checks are satisfactory, but I identified another accuracy issue to test: the energy-dependent partial-wave cutoff may omit a small forward-scattering contribution from the attractive long-range tail. That contribution can matter at the requested tolerance even when individual high-wave phase shifts are small.
+Plan: Compare scattering transport moments with substantially larger partial-wave cutoffs, quantify the omitted tail, and increase the production cutoff if necessary. Continue the restricted-environment and representative-mixture tests while checking this independent source of error.
+CMD: cat > /app/lcuttest.py <<'PY'
+from scatter import phases
+import numpy as np
+from scipy.special import roots_legendre,eval_legendre
+E=np.array([.05,.1,.2,.5,1,2,5,10,20,40]);C=8*np.pi**2/.8**2;k=np.sqrt(C*E)
+d=phases(E,1,0,.8,h=.001,R=40,lmax=300)
+a,w=roots_legendre(340);pl=np.array([eval_legendre(l,a) for l in range(301)])
+for cutoff in [1.8,3,4]:
+ q=[]
+ for i,ki in enumerate(k):
+  lm=min(300,int(cutoff*ki+(18 if cutoff==1.8 else 30)))
+  ls=np.arange(lm+1);amp=(2*ls+1)*np.exp(1j*d[i,:lm+1])*np.sin(d[i,:lm+1])/ki
+  f=amp@pl[:lm+1];q.append(2*np.pi*(abs(f)**2*w)@np.array([1-a,1-a*a]).T)
+ q=np.array(q)
+ if cutoff==1.8:old=q
+ else:print(cutoff,'fractional differences',((q-old)/q),flush=True)
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/lcuttest.py > /app/lcut.txt 2>&1 &
+tail -8 /app/restrictedl.txt; tail -5 /app/random1l.txt; tail -5 /app/random2l.txt; jobs
+
+OBS: ng                 env -i HOME=/app/scratch TMPDIR=/app/scratch PATH=/usr/local/bin:/usr/bin:/bin LANG=C python3 /app/readonly/transport.py pH2 oD2 0
+ 0.8 0.3 0.2 > /app/restricted.txt 2> /app/restrictedl.txt &
+[2]   Running                 python3 /app/output/transport.py oH2 HD 0.18 1.15 0.65 0.27 > /app/random1.txt 2> /app/random1l.txt &
+[3]-  Running                 python3 /app/output/transport.py oD2 pH2 0.12 1.6 0.85 0.52 > /app/random2.txt 2> /app/random2l.txt &
+[4]+  Running                 OPENBLAS_NUM_THREADS=2 python3 /app/lcuttest.py > /app/lcut.txt 2>&1 &
+root@1afed5a5c86f:/app#
+
+
+#### step 63 06:17:51
+MSG: Analysis: The representative mixtures and restricted-environment run are progressing normally. The partial-wave cutoff test is now running; it will show whether a larger cutoff is necessary to control the attractive-tail contribution. I will not finalize until that check is resolved.
+Plan: Read the cutoff comparison and completed transport results, then adjust the scattering cutoff and rerun one demanding case if needed. Measure runtime with a single active process before the final file check.
+CMD: cat /app/lcut.txt; tail -6 /app/restrictedl.txt; tail -6 /app/random1l.txt; tail -6 /app/random2l.txt; cat /app/{restricted,random1,random2}.txt; jobs
+
+OBS: 67596436
+adaptive 1.0 3 2808 6 37.705689907073975
+adaptive 1.0 4 2880 0 38.75638389587402
+[1]   Running                 env -i HOME=/app/scratch TMPDIR=/app/scratch PATH=/usr/local/bin:/usr/bin:/bin LANG=C python3 /app/readonly/transport.py pH2 oD2 0
+ 0.8 0.3 0.2 > /app/restricted.txt 2> /app/restrictedl.txt &
+[2]-  Running                 python3 /app/output/transport.py oH2 HD 0.18 1.15 0.65 0.27 > /app/random1.txt 2> /app/random1l.txt &
+[3]+  Running                 python3 /app/output/transport.py oD2 pH2 0.12 1.6 0.85 0.52 > /app/random2.txt 2> /app/random2l.txt &
+root@1afed5a5c86f:/app#
+
+
+#### step 64 06:18:18
+MSG: Analysis: The cutoff test found a significant forward-scattering truncation error: adding high partial waves changes transport cross sections by up to about 0.1%. The current cutoff is therefore insufficient. I will treat the high partial waves with a controlled weak-potential Born tail and validate that treatment against direct radial integration.
+Plan: Implement analytic first-Born phase shifts for the inverse-power expansion of the Kihara potential, use direct Numerov integration for the important lower waves, and compare the hybrid result with a much larger direct cutoff. This should improve accuracy without a prohibitive runtime increase.
+CMD: cat > /app/borntest.py <<'PY'
+import numpy as np
+from scipy.special import gammaln
+from scatter import phases
+
+def born(E,mu,A,L,ls):
+ C=8*np.pi**2*mu/L**2;k=np.sqrt(C*np.asarray(E))[:,None];ls=np.asarray(ls)[None,:]
+ out=np.zeros(np.broadcast_shapes(k.shape,ls.shape))
+ for base,coef in [(6,-4*(1-A)**6),(12,4*(1-A)**12)]:
+  for t in range(24 if A else 1):
+   s=base+t
+   coeff=coef*np.exp(gammaln(base+t)-gammaln(base)-gammaln(t+1))*A**t
+   logint=gammaln(s-1)+gammaln(ls+(3-s)/2)-(s-1)*np.log(2)-2*gammaln(s/2)-gammaln(ls+(s+1)/2)
+   out-=C*coeff*np.exp((s-2)*np.log(k)+logint)*np.pi/2
+ return out
+
+if __name__=='__main__':
+ E=np.array([.05,.1,.2,.5,1,2,5,10,20,40]);C=8*np.pi**2/.8**2;k=np.sqrt(C*E)
+ for A in [0,.5]:
+  d=phases(E,1,A,.8,h=.0008,R=40,lmax=260)
+  bd=born(E,1,A,.8,np.arange(30,261))
+  print('case',A,flush=True)
+  for mult in [2,3,4]:
+   for i,ki in enumerate(k):
+    lm=min(250,int(mult*ki+24))
+    print(E[i],mult,lm,'phase',d[i,lm],'born',bd[i,lm-30], 'difference',d[i,lm]-bd[i,lm-30],flush=True)
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/borntest.py > /app/bornlog.txt 2>&1 &
+
+OBS: )*np.pi/2
+>  return out
+>
+> if __name__=='__main__':
+>  E=np.array([.05,.1,.2,.5,1,2,5,10,20,40]);C=8*np.pi**2/.8**2;k=np.sqrt(C*E)
+>  for A in [0,.5]:
+>   d=phases(E,1,A,.8,h=.0008,R=40,lmax=260)
+>   bd=born(E,1,A,.8,np.arange(30,261))
+>   print('case',A,flush=True)
+>   for mult in [2,3,4]:
+>    for i,ki in enumerate(k):
+>     lm=min(250,int(mult*ki+24))
+>     print(E[i],mult,lm,'phase',d[i,lm],'born',bd[i,lm-30], 'difference',d[i,lm]-bd[i,lm-30],flush=True)
+> PY
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/borntest.py > /app/bornlog.txt 2>&1 &
+[4] 1705
+root@1afed5a5c86f:/app#
+
+
+#### step 65 06:20:10
+MSG: Analysis: The large-cutoff test confirms that high partial waves cannot simply be dropped at the previous cutoff. A weak-potential Born treatment of those waves is being checked against direct radial integration. The transport-equation and internal-state formulations remain validated; this is a scattering-tail accuracy correction.
+Plan: Inspect the Born-versus-Numerov phase comparison, then add a hybrid scattering solver with a much larger final cutoff. Validate the resulting transport cross sections against direct high-cutoff calculations and rerun representative mixtures.
+CMD: head -40 /app/bornlog.txt; tail -6 /app/restrictedl.txt; cat /app/{restricted,random1,random2}.txt; jobs
+
+OBS: ([ 0.03117952,  0.06911629,  0.02613866, -0.10694
+786])]
+{"viscosity": 0.031179523921737836, "thermal_conductivity": 0.06911628887709911, "binary_diffusion": 0.02613865663299287, "thermal_diffusion_factor": -0.1069478
+6162079725}
+{"viscosity": 0.03396839234256231, "thermal_conductivity": 0.10919838648958252, "binary_diffusion": 0.036332353249290836, "thermal_diffusion_factor": 0.03952708
+5527028986}
+{"viscosity": 0.08741194949036363, "thermal_conductivity": 0.17841079350105501, "binary_diffusion": 0.07522106430142891, "thermal_diffusion_factor": -0.05611495
+6156458465}
+root@1afed5a5c86f:/app#
+
+
+#### step 66 06:20:46
+MSG: Analysis: The Born phase shifts agree well with direct Numerov results in the weak-scattering high-partial-wave region. The previously tested transport interface and convergence machinery are working, but the scattering tail needs the larger hybrid cutoff before the outputs can meet the requested accuracy.
+Plan: Add direct integration through a conservative lower-wave cutoff and analytic Born phases beyond it, with a much larger final cutoff. Compare hybrid transport cross sections with direct large-cutoff results, then rerun the demanding low-quantum and high-temperature mixtures.
+CMD: cp /app/adaptive.py /app/adaptive_precut.py
+python3 - <<'PY'
+p='/app/adaptive.py';s=open(p).read();b=open('/app/borntest.py').read();b=b[b.index('def born'):b.index("if __name__")]
+s=s.replace('from scatter import phases','from scatter import phases\nfrom scipy.special import gammaln\n'+b)
+s=s.replace('T*65)*1.8+24','T*cut)*9+60')
+s=s.replace('int(np.sqrt(C*emax)*1.8+18)','int(np.sqrt(C*emax)*3+30)')
+s=s.replace('            count+=len(y)', '''            # Complete the weak high-partial-wave tail instead of abruptly truncating f.
+            bph=born(y*T,mu,A,L,np.arange(30,lmax+1))
+            for row,yi in enumerate(y):
+                lm=min(lmax,int(np.sqrt(C*T*yi)*3+30))
+                d[row,lm+1:]=bph[row,lm-29:]
+            count+=len(y)''')
+# do not discard a numerically integrated wave just because it exceeds its own individual cutoff
+# It is intentional to replace those weak waves with the accurate Born tail.
+open(p,'w').write(s)
+PY
+cat > /app/hybridtest.py <<'PY'
+from scatter import phases
+from borntest import born
+import numpy as np
+from scipy.special import roots_legendre,eval_legendre
+E=np.array([.05,.1,.2,.5,1,2,5,10,20,40]);C=8*np.pi**2/.8**2;k=np.sqrt(C*E)
+a,w=roots_legendre(800);pl=np.array([eval_legendre(l,a) for l in range(750)])
+d=phases(E,1,0,.8,h=.0005,R=40,lmax=350)
+bd=born(E,1,0,.8,np.arange(30,750))
+old=None
+for mult in [1.8,3,4,6,9]:
+ q=[]
+ for i,ki in enumerate(k):
+  lm=min(749,int(mult*ki+60))
+  dd=np.zeros(lm+1);nn=min(350,lm);dd[:nn+1]=d[i,:nn+1]
+  if mult>1.8:
+   nc=min(lm,int(3*ki+30));dd[nc+1:]=bd[i,nc-29:lm-29]
+  ls=np.arange(lm+1);amp=(2*ls+1)*np.exp(1j*dd)*np.sin(dd)/ki
+  f=amp@pl[:lm+1];q.append(2*np.pi*(abs(f)**2*w)@np.array([1-a,1-a*a]).T)
+ q=np.array(q)
+ print(mult,q,flush=True)
+ if old is not None:print('relative change',(q-old)/q,flush=True)
+ old=q
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/hybridtest.py > /app/hybridlog.txt 2>&1 &
+python3 /app/assemble.py
+python3 /app/output/transport.py pH2 oD2 0 0.8 0.3 0.2 > /app/hybridlow.txt 2>/app/hybridlowl.txt &
+
+OBS: [i,nc-29:lm-29]
+>   ls=np.arange(lm+1);amp=(2*ls+1)*np.exp(1j*dd)*np.sin(dd)/ki
+>   f=amp@pl[:lm+1];q.append(2*np.pi*(abs(f)**2*w)@np.array([1-a,1-a*a]).T)
+>  q=np.array(q)
+>  print(mult,q,flush=True)
+>  if old is not None:print('relative change',(q-old)/q,flush=True)
+>  old=q
+> PY
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/hybridtest.py > /app/hybridlog.txt 2>&1 &
+[1] 1750
+root@1afed5a5c86f:/app# python3 /app/assemble.py
+root@1afed5a5c86f:/app# python3 /app/output/transport.py pH2 oD2 0 0.8 0.3 0.2 > /app/hybridlow.txt 2>/app/hybridlowl.txt &
+[2] 1752
+root@1afed5a5c86f:/app#
+
+
+#### step 67 06:21:01
+MSG: Analysis: The hybrid scattering solver is now running. It keeps direct radial integration for the important waves and completes the weak high-wave tail analytically rather than truncating the amplitude abruptly. I will verify both the final tail cutoff and the transition from direct to Born phases before accepting the revised transport outputs.
+Plan: Inspect the hybrid cross-section convergence and runtime. Compare the hybrid result with larger direct cutoffs and, if necessary, smooth the direct/Born transition to avoid artificial energy-panel refinement.
+CMD: tail -40 /app/hybridlog.txt; tail -10 /app/hybridlowl.txt; cat /app/hybridlow.txt; jobs
+
+OBS: 3e-11 -4.87547125e-11]
+ [-8.04642826e-11 -1.32807291e-10]
+ [-6.09703079e-10 -6.65453468e-10]
+ [-2.70168467e-09 -4.16365746e-09]
+ [-6.93508692e-09 -7.88999090e-09]
+ [-1.58312932e-08 -1.66500255e-08]
+ [-2.37941828e-08 -2.91700737e-08]
+ [-2.25735763e-08 -2.89556743e-08]
+ [-1.62242314e-08 -2.09342743e-08]
+ [-1.02297730e-08 -1.31206209e-08]]
+[1]-  Done                    OPENBLAS_NUM_THREADS=2 python3 /app/hybridtest.py > /app/hybridlog.txt 2>&1
+[2]+  Running                 python3 /app/output/transport.py pH2 oD2 0 0.8 0.3 0.2 > /app/hybridlow.txt 2> /app/hybridlowl.txt &
+root@1afed5a5c86f:/app#
+
+
+#### step 68 06:21:33
+MSG: Analysis: The hybrid tail converges well: increasing its final cutoff changes the tested transport cross sections by less than a few parts in ten million. The remaining cost is evaluating angular scattering moments on a very large angle grid. I can calculate those moments exactly using Legendre multiplication recurrences, avoiding the large angular matrix.
+Plan: Replace angular-grid amplitude evaluation with exact partial-wave Legendre moment recurrences, validate against the existing angular quadrature, and smooth the direct/Born transition to avoid artificial energy discontinuities. Then rerun the standalone runtime and convergence tests.
+CMD: cp /app/adaptive.py /app/adaptive_angular.py
+python3 - <<'PY'
+p='/app/adaptive.py';s=open(p).read();a=s.index('    za,wza=');b=s.index('    ls=np.arange',a)
+s=s[:a]+s[b:]
+a=s.index('            amp=');b=s.index('            le=',a)
+s=s[:a]+'''            amp=(2*ls+1)[None,:]*np.exp(1j*d)*np.sin(d)/np.sqrt(C*T*y[:,None])
+            # Multiplication by x in the Legendre coefficient representation.
+            def times_x(v):
+                out=np.zeros_like(v)
+                out[:,1:]+=v[:,:-1]*(ls[1:]/(2*ls[1:]-1))
+                out[:,:-1]+=v[:,1:]*((ls[:-1]+1)/(2*ls[:-1]+3))
+                return out
+            even=amp.copy();even[:,1::2]=0
+            odd=amp.copy();odd[:,::2]=0
+            v=np.stack([even,odd]).reshape(2*len(y),lmax+1)
+            prev=np.zeros_like(v);curr=v.copy();q=np.empty((3,len(y),na))
+            ew=even.conj()/(2*ls+1);ow=odd.conj()/(2*ls+1)
+            for order in range(na):
+                ev=curr[:len(y)];ov=curr[len(y):]
+                q[0,:,order]=4*np.pi*np.real(np.sum(ew*ev,axis=1))
+                q[1,:,order]=4*np.pi*np.real(np.sum(ow*ov,axis=1))
+                q[2,:,order]=8*np.pi*np.real(np.sum(ew*ov,axis=1))
+                nxt=((2*order+1)*times_x(curr)-order*prev)/(order+1)
+                prev,curr=curr,nxt
+            qs=q.reshape(3,len(pp),len(zz),na)
+'''+s[b:]
+s=s.replace('int(np.sqrt(C*emax)*3+30)','int(np.sqrt(C*emax)*4+42)')
+s=s.replace('''                lm=min(lmax,int(np.sqrt(C*T*yi)*3+30))
+                d[row,lm+1:]=bph[row,lm-29:]''','''                switch=np.sqrt(C*T*yi)*4+30
+                blend=np.clip((np.arange(30,lmax+1)-switch)/8,0,1)
+                d[row,30:]=d[row,30:]*(1-blend)+bph[row]*blend''')
+open(p,'w').write(s)
+PY
+python3 /app/assemble.py
+python3 /app/output/transport.py pH2 oD2 0 0.8 0.3 0.2 > /app/hybridlow2.txt 2>/app/hybridlow2l.txt &
+tail -10 /app/hybridlowl.txt; jobs
+
+OBS:  open(p,'w').write(s)
+> PY
+root@1afed5a5c86f:/app# python3 /app/assemble.py
+root@1afed5a5c86f:/app# python3 /app/output/transport.py pH2 oD2 0 0.8 0.3 0.2 > /app/hybridlow2.txt 2>/app/hybridlow2l.txt &
+[3] 1799
+root@1afed5a5c86f:/app# tail -10 /app/hybridlowl.txt; jobs
+adaptive 0.5 1 2304 36 42.201091051101685
+[2]-  Running                 python3 /app/output/transport.py pH2 oD2 0 0.8 0.3 0.2 > /app/hybridlow.txt 2> /app/hybridlowl.txt &
+[3]+  Running                 python3 /app/output/transport.py pH2 oD2 0 0.8 0.3 0.2 > /app/hybridlow2.txt 2> /app/hybridlow2l.txt &
+root@1afed5a5c86f:/app#
+
+
+#### step 69 06:22:01
+MSG: Analysis: The high-wave tail now has a converged final cutoff, and I have replaced the large angular quadrature with exact Legendre-coefficient recurrences. The direct/Born transition is also smoothed and moved farther into the weak-scattering region. These changes should control scattering accuracy while keeping runtime practical.
+Plan: Validate the Legendre moment recurrence against direct angular quadrature, compare the two hybrid transport runs, and test sensitivity to the direct/Born transition and radial accuracy. Then run the final standalone program without competing jobs.
+CMD: OPENBLAS_NUM_THREADS=2 python3 - <<'PY'
+import numpy as np
+from scipy.special import roots_legendre,eval_legendre
+rng=np.random.default_rng(3);ls=np.arange(70);amp=rng.normal(size=(3,70))+1j*rng.normal(size=(3,70))
+a,w=roots_legendre(100);pl=np.array([eval_legendre(l,a) for l in ls]);curr=amp.copy();prev=np.zeros_like(curr)
+for n in range(18):
+ q=4*np.pi*np.real(np.sum(amp.conj()*curr/(2*ls+1),axis=1))
+ f=amp@pl;other=2*np.pi*(abs(f)**2*w)@eval_legendre(n,a)
+ print(n,np.max(abs(q-other)))
+ tx=np.zeros_like(curr);tx[:,1:]+=curr[:,:-1]*ls[1:]/(2*ls[1:]-1);tx[:,:-1]+=curr[:,1:]*(ls[:-1]+1)/(2*ls[:-1]+3)
+ nxt=((2*n+1)*tx-n*prev)/(n+1);prev,curr=curr,nxt
+PY
+tail -8 /app/hybridlow2l.txt; tail -8 /app/hybridlowl.txt; jobs
+
+OBS: 2304 36 42.201091051101685
+adaptive 0.5 2 2736 22 48.40485668182373
+adaptive 0.5 3 3000 20 52.330870389938354
+adaptive 0.5 4 3240 14 55.65554976463318
+adaptive 0.5 5 3408 10 58.14491629600525
+adaptive 0.5 6 3528 6 59.67042326927185
+adaptive 0.5 7 3600 6 60.84881782531738
+adaptive 0.5 8 3672 0 62.14221549034119
+[2]-  Running                 python3 /app/output/transport.py pH2 oD2 0 0.8 0.3 0.2 > /app/hybridlow.txt 2> /app/hybridlowl.txt &
+[3]+  Running                 python3 /app/output/transport.py pH2 oD2 0 0.8 0.3 0.2 > /app/hybridlow2.txt 2> /app/hybridlow2l.txt &
+root@1afed5a5c86f:/app#
+
+
+#### step 70 06:22:20
+MSG: Analysis: The Legendre recurrence test identified a boundary-truncation issue: multiplying by successive Legendre polynomials requires extra zero-padded coefficient slots. The physical high-wave tail makes the effect small, but I will correct it explicitly rather than rely on that.
+Plan: Pad the partial-wave coefficient arrays by the maximum angular moment order, rerun the angular-moment validation, and continue comparing the hybrid transport results. Then test the corrected final program with no competing jobs.
+CMD: python3 - <<'PY'
+p='/app/adaptive.py';s=open(p).read();s=s.replace('''            # Multiplication by x in the Legendre coefficient representation.
+            def times_x''','''            amp=np.pad(amp,((0,0),(0,na)))
+            moment_ls=np.arange(lmax+1+na)
+            # Multiplication by x in the Legendre coefficient representation.
+            def times_x''')
+s=s.replace('v[:,:-1]*(ls[1:]/(2*ls[1:]-1))','v[:,:-1]*(moment_ls[1:]/(2*moment_ls[1:]-1))').replace('v[:,1:]*((ls[:-1]+1)/(2*ls[:-1]+3))','v[:,1:]*((moment_ls[:-1]+1)/(2*moment_ls[:-1]+3))')
+s=s.replace('reshape(2*len(y),lmax+1)','reshape(2*len(y),lmax+1+na)').replace('even.conj()/(2*ls+1)','even.conj()/(2*moment_ls+1)').replace('odd.conj()/(2*ls+1)','odd.conj()/(2*moment_ls+1)')
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=2 python3 - <<'PY'
+import numpy as np
+from scipy.special import roots_legendre,eval_legendre
+rng=np.random.default_rng(3);amp=np.pad(rng.normal(size=(3,70))+1j*rng.normal(size=(3,70)),((0,0),(0,20)));ls=np.arange(90)
+a,w=roots_legendre(110);pl=np.array([eval_legendre(l,a) for l in ls]);curr=amp.copy();prev=np.zeros_like(curr)
+err=[]
+for n in range(18):
+ q=4*np.pi*np.real(np.sum(amp.conj()*curr/(2*ls+1),axis=1));f=amp@pl;other=2*np.pi*(abs(f)**2*w)@eval_legendre(n,a);err.append(np.max(abs(q-other)))
+ tx=np.zeros_like(curr);tx[:,1:]+=curr[:,:-1]*ls[1:]/(2*ls[1:]-1);tx[:,:-1]+=curr[:,1:]*(ls[:-1]+1)/(2*ls[:-1]+3)
+ nxt=((2*n+1)*tx-n*prev)/(n+1);prev,curr=curr,nxt
+print('maximum angular recurrence error',max(err))
+PY
+python3 /app/assemble.py
+tail -8 /app/hybridlow2l.txt; tail -8 /app/hybridlowl.txt; jobs
+
+OBS: 2304 36 42.201091051101685
+adaptive 0.5 2 2736 22 48.40485668182373
+adaptive 0.5 3 3000 20 52.330870389938354
+adaptive 0.5 4 3240 14 55.65554976463318
+adaptive 0.5 5 3408 10 58.14491629600525
+adaptive 0.5 6 3528 6 59.67042326927185
+adaptive 0.5 7 3600 6 60.84881782531738
+adaptive 0.5 8 3672 0 62.14221549034119
+[2]-  Running                 python3 /app/output/transport.py pH2 oD2 0 0.8 0.3 0.2 > /app/hybridlow.txt 2> /app/hybridlowl.txt &
+[3]+  Running                 python3 /app/output/transport.py pH2 oD2 0 0.8 0.3 0.2 > /app/hybridlow2.txt 2> /app/hybridlow2l.txt &
+root@1afed5a5c86f:/app#
+
+
+#### step 71 06:22:45
+MSG: Analysis: The padded Legendre recurrence now agrees with direct angular quadrature to about 1e-11 in the validation test. The hybrid scattering tail has also demonstrated cutoff convergence. I am checking the two pending hybrid transport runs before measuring the corrected standalone implementation on its own.
+Plan: Inspect process progress and results, stop any obsolete test if necessary, and run the corrected program without CPU competition. Verify that the larger scattering tail remains within the 600-second budget and that transport coefficients are stable under the direct/Born transition change.
+CMD: tail -12 /app/hybridlow2l.txt; tail -12 /app/hybridlowl.txt; cat /app/hybridlow{,2}.txt; jobs; for p in 1752 1799; do echo PID=$p; cat /proc/$p/status | head -20; done
+
+OBS: racerPid:      0
+Uid:    0       0       0       0
+Gid:    0       0       0       0
+FDSize: 256
+Groups: 0
+NStgid: 1752
+NSpid:  1752
+NSpgid: 1752
+NSsid:  57
+Kthread:        0
+VmPeak:   362596 kB
+VmSize:   347780 kB
+VmLck:         0 kB
+PID=1799
+Name:   python3
+Umask:  0022
+State:  R (running)
+Tgid:   1799
+Ngid:   0
+Pid:    1799
+PPid:   58
+TracerPid:      0
+Uid:    0       0       0       0
+Gid:    0       0       0       0
+FDSize: 256
+Groups: 0
+NStgid: 1799
+NSpid:  1799
+NSpgid: 1799
+NSsid:  57
+Kthread:        0
+VmPeak:   353724 kB
+VmSize:   333620 kB
+VmLck:         0 kB
+root@1afed5a5c86f:/app#
+
+
+#### step 72 06:23:09
+MSG: Analysis: The hybrid runs are progressing normally and use well below the memory limit. The corrected angular recurrence is validated. I will now stop the older angular-grid implementation and benchmark the final padded-recurrence version without competing jobs.
+Plan: Stop obsolete hybrid runs, then launch one clean standalone test with the corrected scattering-tail and angular-moment implementation. Measure its runtime and compare its result with the earlier hybrid calculation before further endpoint tests.
+CMD: kill %2 %3; python3 /app/assemble.py
+python3 - <<'PY' > /app/cleanlow.txt 2>/app/cleanlowl.txt &
+import subprocess,time
+s=time.monotonic()
+p=subprocess.run(['python3','/app/output/transport.py','pH2','oD2','0','0.8','0.3','0.2'])
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+
+OBS: semble.py
+[2]-  Terminated              python3 /app/output/transport.py pH2 oD2 0 0.8 0.3 0.2 > /app/hybridlow.txt 2> /app/hybridlowl.txt
+[3]+  Terminated              python3 /app/output/transport.py pH2 oD2 0 0.8 0.3 0.2 > /app/hybridlow2.txt 2> /app/hybridlow2l.txt
+root@1afed5a5c86f:/app# python3 - <<'PY' > /app/cleanlow.txt 2>/app/cleanlowl.txt &
+> import subprocess,time
+> s=time.monotonic()
+> p=subprocess.run(['python3','/app/output/transport.py','pH2','oD2','0','0.8','0.3','0.2'])
+> print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+> PY
+[1] 1901
+root@1afed5a5c86f:/app#
+
+
+#### step 73 06:23:37
+MSG: Analysis: The clean standalone benchmark is running with no competing numerical jobs. The corrected program now includes a converged high-partial-wave tail, exact angular-moment recurrences, and fast analytic collision brackets. I will use the benchmark to confirm both runtime and final transport convergence.
+Plan: Inspect its progress, then validate the direct/Born transition on a second cutoff choice and run the high-temperature endpoint. Check that the final file remains self-contained and produces exactly the required JSON object under the restricted environment.
+CMD: tail -12 /app/cleanlowl.txt; cat /app/cleanlow.txt; grep -n 'lmax\|switch\|blend\|phases' /app/output/transport.py | head -20; jobs
+
+OBS:         moment_ls=np.arange(lmax+1+na)
+119:            v=np.stack([even,odd]).reshape(2*len(y),lmax+1+na)
+139:            # arctan2 phases retain a pi jump through even very narrow shape resonances
+140:            order=np.argsort(zz);dd=d.reshape(len(pp),len(zz),lmax+1)[:,order]
+[1]+  Running                 python3 - <<'PY' > /app/cleanlow.txt 2> /app/cleanlowl.txt
+import subprocess,time
+s=time.monotonic()
+p=subprocess.run(['python3','/app/output/transport.py','pH2','oD2','0','0.8','0.3','0.2'])
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 74 06:24:02
+MSG: Analysis: The clean benchmark is still in its first scattering pass. The final partial-wave cutoff and direct/Born transition are now conservative, and the transport matrix remains inexpensive. I will assess the complete runtime before making any further performance changes.
+Plan: Read the benchmark progress and wait for its first reduced-mass integration to complete. Then inspect transport convergence and run an independent transition/cutoff check using the same physical case.
+CMD: tail -12 /app/cleanlowl.txt; cat /app/cleanlow.txt; jobs
+
+OBS: New Terminal Output:
+&
+root@1afed5a5c86f:/app# tail -12 /app/cleanlowl.txt; cat /app/cleanlow.txt; jobs
+[1]+  Running                 python3 - <<'PY' > /app/cleanlow.txt 2> /app/cleanlowl.txt
+import subprocess,time
+s=time.monotonic()
+p=subprocess.run(['python3','/app/output/transport.py','pH2','oD2','0','0.8','0.3','0.2'])
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 75 06:24:32
+MSG: Analysis: The clean benchmark is still running its first scattering integral. The largest remaining cost comes from the conservative high-wave cutoff, not from the transport matrix. I will wait for the measured result before deciding whether further optimization is needed.
+Plan: Allow the benchmark to progress and inspect its runtime and convergence output. Then validate one independent scattering-tail setting and complete the final environment and JSON-format checks.
+CMD: 
+CMD: tail -12 /app/cleanlowl.txt; cat /app/cleanlow.txt
+
+OBS: New Terminal Output:
+&
+root@1afed5a5c86f:/app# tail -12 /app/cleanlowl.txt; cat /app/cleanlow.txt
+adaptive 0.5 1 2304 36 54.699838638305664
+adaptive 0.5 2 2736 22 62.22333264350891
+adaptive 0.5 3 3000 20 66.37504577636719
+adaptive 0.5 4 3240 14 70.12499451637268
+adaptive 0.5 5 3408 10 73.34297132492065
+adaptive 0.5 6 3528 6 75.2941997051239
+adaptive 0.5 7 3600 6 76.6663978099823
+adaptive 0.5 8 3672 0 78.16806745529175
+root@1afed5a5c86f:/app#
+
+
+#### step 76 06:24:59
+MSG: Analysis: The clean low-quantum benchmark completed its first scattering integral in about 78 seconds, leaving comfortable runtime headroom if the other reduced masses are comparable. I also identified a phase-convention issue to prevent: direct and Born phases must be blended modulo pi, since adding pi leaves a scattering amplitude unchanged but would not leave a linear phase blend unchanged.
+Plan: Normalize only the weak high-wave phases modulo pi before blending, preserving the raw lower-wave phase information used to detect resonances. Continue the clean benchmark, then test the corrected high-temperature endpoint and an independent scattering-tail setting.
+CMD: python3 - <<'PY'
+p='/app/adaptive.py';s=open(p).read().replace('d[row,30:]=d[row,30:]*(1-blend)+bph[row]*blend','''weak=np.arctan(np.tan(d[row,30:]))
+                d[row,30:]=np.where(blend>0,weak*(1-blend)+bph[row]*blend,d[row,30:])''')
+open(p,'w').write(s)
+PY
+python3 /app/assemble.py
+tail -10 /app/cleanlowl.txt; cat /app/cleanlow.txt
+
+OBS: ,30:]))
+>                 d[row,30:]=np.where(blend>0,weak*(1-blend)+bph[row]*blend,d[row,30:])''')
+> open(p,'w').write(s)
+> PY
+root@1afed5a5c86f:/app# python3 /app/assemble.py
+root@1afed5a5c86f:/app# tail -10 /app/cleanlowl.txt; cat /app/cleanlow.txt
+adaptive 0.5 1 2304 36 54.699838638305664
+adaptive 0.5 2 2736 22 62.22333264350891
+adaptive 0.5 3 3000 20 66.37504577636719
+adaptive 0.5 4 3240 14 70.12499451637268
+adaptive 0.5 5 3408 10 73.34297132492065
+adaptive 0.5 6 3528 6 75.2941997051239
+adaptive 0.5 7 3600 6 76.6663978099823
+adaptive 0.5 8 3672 0 78.16806745529175
+root@1afed5a5c86f:/app#
+
+
+#### step 77 06:25:21
+MSG: Analysis: The benchmark shows that the final implementation is within reach of the runtime budget, but its angular-moment arrays still use the largest high-energy cutoff even for very low-energy panels. That is unnecessary. I will use an energy-appropriate final cutoff for each batch while keeping the already-validated conservative tail rule.
+Plan: Make the angular-moment and Born-tail arrays local to each energy batch, preserving the same cutoff at that batch's highest energy. Validate unchanged transport values and measure the resulting runtime improvement.
+CMD: cp /app/adaptive.py /app/adaptive_global.py
+python3 - <<'PY'
+p='/app/adaptive.py';s=open(p).read().replace('lmax=int(np.sqrt(8*np.pi**2*mu/L**2*T*cut)*9+60)','global_lmax=int(np.sqrt(8*np.pi**2*mu/L**2*T*cut)*9+60)').replace('ls=np.arange(lmax+1); C=8*np.pi**2*mu/L**2','C=8*np.pi**2*mu/L**2')
+s=s.replace('y=yy.ravel();d=np.zeros((len(y),lmax+1))','''y=yy.ravel()
+            lmax=min(global_lmax,int(np.sqrt(C*T*np.max(y))*9+60))
+            ls=np.arange(lmax+1)
+            d=np.zeros((len(y),lmax+1))''')
+open(p,'w').write(s)
+PY
+python3 /app/assemble.py
+tail -12 /app/cleanlowl.txt; cat /app/cleanlow.txt; jobs
+
+OBS: daptive 0.5 2 2736 22 62.22333264350891
+adaptive 0.5 3 3000 20 66.37504577636719
+adaptive 0.5 4 3240 14 70.12499451637268
+adaptive 0.5 5 3408 10 73.34297132492065
+adaptive 0.5 6 3528 6 75.2941997051239
+adaptive 0.5 7 3600 6 76.6663978099823
+adaptive 0.5 8 3672 0 78.16806745529175
+[1]+  Running                 python3 - <<'PY' > /app/cleanlow.txt 2> /app/cleanlowl.txt
+import subprocess,time
+s=time.monotonic()
+p=subprocess.run(['python3','/app/output/transport.py','pH2','oD2','0','0.8','0.3','0.2'])
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 78 06:25:48
+MSG: Analysis: The implementation now uses batch-local high-wave arrays, preserving the conservative scattering cutoff while avoiding oversized arrays at low energy. The older clean benchmark is still running; I will inspect it and then benchmark the optimized version. The remaining work is independent tail-transition validation and final runtime/interface checks.
+Plan: Inspect the benchmark, run the optimized high-temperature endpoint, and compare two direct/Born transition settings through scattering transport moments. This will quantify the residual tail approximation error before finalizing.
+CMD: tail -12 /app/cleanlowl.txt; cat /app/cleanlow.txt; jobs
+cat > /app/transitiontest.py <<'PY'
+from scatter import phases
+from borntest import born
+import numpy as np
+from scipy.special import roots_legendre,eval_legendre
+E=np.array([.05,.1,.2,.5,1,2,5,10,20]);C=8*np.pi**2/.8**2;k=np.sqrt(C*E)
+a,w=roots_legendre(720);pl=np.array([eval_legendre(l,a) for l in range(680)])
+for A in [0,.25,.5]:
+ d=phases(E,1,A,.8,h=.0005,R=50,lmax=350)
+ bd=born(E,1,A,.8,np.arange(30,680))
+ old=None
+ for switch in [3,4,5]:
+  q=[]
+  for i,ki in enumerate(k):
+   dd=np.zeros(680);dd[:351]=np.arctan(np.tan(d[i]));blend=np.clip((np.arange(30,680)-(switch*ki+30))/8,0,1)
+   dd[30:]=dd[30:]*(1-blend)+bd[i]*blend
+   ls=np.arange(680);amp=(2*ls+1)*np.exp(1j*dd)*np.sin(dd)/ki
+   f=amp@pl;q.append(2*np.pi*(abs(f)**2*w)@np.array([1-a,1-a*a]).T)
+  q=np.array(q)
+  if old is not None: print(A,switch,'relative change',(q-old)/q,flush=True)
+  old=q
+PY
+OPENBLAS_NUM_THREADS=2 python3 /app/transitiontest.py > /app/transitionlog.txt 2>&1 &
+
+OBS: witch in [3,4,5]:
+>   q=[]
+>   for i,ki in enumerate(k):
+>    dd=np.zeros(680);dd[:351]=np.arctan(np.tan(d[i]));blend=np.clip((np.arange(30,680)-(switch*ki+30))/8,0,1)
+>    dd[30:]=dd[30:]*(1-blend)+bd[i]*blend
+>    ls=np.arange(680);amp=(2*ls+1)*np.exp(1j*dd)*np.sin(dd)/ki
+>    f=amp@pl;q.append(2*np.pi*(abs(f)**2*w)@np.array([1-a,1-a*a]).T)
+>   q=np.array(q)
+>   if old is not None: print(A,switch,'relative change',(q-old)/q,flush=True)
+>   old=q
+> PY
+root@1afed5a5c86f:/app# OPENBLAS_NUM_THREADS=2 python3 /app/transitiontest.py > /app/transitionlog.txt 2>&1 &
+[2] 2039
+root@1afed5a5c86f:/app#
+
+
+#### step 79 06:26:12
+MSG: Analysis: The clean hybrid benchmark has completed two reduced-mass scattering integrals at roughly 80 seconds each. The batch-local optimization should reduce the remaining overhead. An independent direct/Born transition test is now running to quantify the residual weak-tail approximation error.
+Plan: Inspect the transition comparison and complete benchmark result. Then run the optimized high-temperature endpoint and a restricted-environment test, checking both runtime and JSON output. If needed, increase the direct-wave region slightly based on the transition error.
+CMD: cat /app/transitionlog.txt; tail -12 /app/cleanlowl.txt; cat /app/cleanlow.txt; jobs
+
+OBS: 
+adaptive 0.6666666666666666 12 4032 6 90.91734218597412
+adaptive 0.6666666666666666 13 4104 6 92.28040194511414
+adaptive 0.6666666666666666 14 4176 6 93.60747385025024
+adaptive 0.6666666666666666 15 4248 4 94.98975205421448
+adaptive 0.6666666666666666 16 4296 0 96.14710521697998
+[1]+  Running                 python3 - <<'PY' > /app/cleanlow.txt 2> /app/cleanlowl.txt
+import subprocess,time
+s=time.monotonic()
+p=subprocess.run(['python3','/app/output/transport.py','pH2','oD2','0','0.8','0.3','0.2'])
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 80 06:26:21
+MSG: Analysis: The independent transition test shows very small transport-cross-section changes when moving the direct/Born boundary farther out, confirming that the weak-tail approximation is controlled. The benchmark is finishing its last reduced-mass scattering integral. I will now test the optimized implementation at the high-temperature endpoint and under the required restricted environment.
+Plan: Read the full transition comparison and benchmark result, then run one optimized endpoint test without other numerical jobs. Verify runtime, convergence, and exact JSON formatting, and make the final file checks.
+CMD: head -24 /app/transitionlog.txt; tail -10 /app/cleanlowl.txt; cat /app/cleanlow.txt; jobs
+
+OBS: 
+adaptive 0.6666666666666666 12 4032 6 90.91734218597412
+adaptive 0.6666666666666666 13 4104 6 92.28040194511414
+adaptive 0.6666666666666666 14 4176 6 93.60747385025024
+adaptive 0.6666666666666666 15 4248 4 94.98975205421448
+adaptive 0.6666666666666666 16 4296 0 96.14710521697998
+[1]+  Running                 python3 - <<'PY' > /app/cleanlow.txt 2> /app/cleanlowl.txt
+import subprocess,time
+s=time.monotonic()
+p=subprocess.run(['python3','/app/output/transport.py','pH2','oD2','0','0.8','0.3','0.2'])
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 81 06:26:56
+MSG: Analysis: The direct/Born transition comparison is reassuring, and the hybrid tail's final cutoff is converged. The clean benchmark is still finishing its final scattering pass. I will inspect the complete result and then benchmark the batch-local optimized version on a worst-case high-temperature setting.
+Plan: Wait briefly for the benchmark to complete, read its runtime and convergence history, and launch the optimized endpoint test. Then validate the final JSON interface in a restricted environment and check the output directory contents.
+CMD: 
+CMD: tail -10 /app/cleanlowl.txt; cat /app/cleanlow.txt; jobs
+
+OBS: 
+adaptive 0.6666666666666666 12 4032 6 90.91734218597412
+adaptive 0.6666666666666666 13 4104 6 92.28040194511414
+adaptive 0.6666666666666666 14 4176 6 93.60747385025024
+adaptive 0.6666666666666666 15 4248 4 94.98975205421448
+adaptive 0.6666666666666666 16 4296 0 96.14710521697998
+[1]+  Running                 python3 - <<'PY' > /app/cleanlow.txt 2> /app/cleanlowl.txt
+import subprocess,time
+s=time.monotonic()
+p=subprocess.run(['python3','/app/output/transport.py','pH2','oD2','0','0.8','0.3','0.2'])
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 82 06:27:31
+MSG: Analysis: The benchmark has completed two scattering integrals and is still in the final one. Its earlier stages suggest the unoptimized version is within the checker budget, but I will measure the completed runtime rather than infer it. The batch-local optimized version should be faster without changing its numerical cutoff.
+Plan: Wait for the benchmark to complete, then run the optimized version at the high-temperature, low-quantum endpoint. Inspect convergence and runtime before the final restricted-environment validation.
+CMD: 
+CMD: tail -12 /app/cleanlowl.txt; cat /app/cleanlow.txt; jobs
+
+OBS: 0.6666666666666666 14 4176 6 93.60747385025024
+adaptive 0.6666666666666666 15 4248 4 94.98975205421448
+adaptive 0.6666666666666666 16 4296 0 96.14710521697998
+adaptive 1.0 1 2304 46 65.61161398887634
+adaptive 1.0 2 2856 40 75.78031420707703
+adaptive 1.0 3 3336 30 84.5406424999237
+[1]+  Running                 python3 - <<'PY' > /app/cleanlow.txt 2> /app/cleanlowl.txt
+import subprocess,time
+s=time.monotonic()
+p=subprocess.run(['python3','/app/output/transport.py','pH2','oD2','0','0.8','0.3','0.2'])
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 83 06:28:11
+MSG: Analysis: The clean hybrid benchmark is now refining the final reduced-mass integral. The scattering tail and transport-basis checks are satisfactory so far. I will let this run finish before launching the optimized endpoint benchmark, so the runtime measurement is not distorted by competing jobs.
+Plan: Wait for completion and inspect the final transport convergence and wall time. Then run the current optimized file on a high-temperature endpoint and verify its restricted-environment JSON interface.
+CMD: 
+CMD: tail -8 /app/cleanlowl.txt; cat /app/cleanlow.txt; jobs
+
+OBS: 0.10691945]), array([ 0.03118406,  0.06912483,  0.02613942, -0.10691
+946])]
+[1]+  Done                    python3 - <<'PY' > /app/cleanlow.txt 2> /app/cleanlowl.txt
+import subprocess,time
+s=time.monotonic()
+p=subprocess.run(['python3','/app/output/transport.py','pH2','oD2','0','0.8','0.3','0.2'])
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+
+{"viscosity": 0.031184061829912953, "thermal_conductivity": 0.06912483171775169, "binary_diffusion": 0.02613942044418128, "thermal_diffusion_factor": -0.1069194
+5311321524}
+exit 0 seconds 294.41674312436953
+root@1afed5a5c86f:/app#
+
+
+#### step 84 06:28:37
+MSG: Analysis: The clean hybrid benchmark completed successfully in about 294 seconds, below the 600-second limit, with stable transport convergence. Including the high-wave scattering tail changed the earlier truncated-cutoff results by more than tolerance, so that correction was necessary. The current batch-local version should be faster while retaining the same accuracy.
+Plan: Benchmark the optimized program on a high-temperature, low-quantum unequal-mass case under the restricted environment. Then compare the optimized low-temperature result with the completed hybrid benchmark and perform final file and JSON checks.
+CMD: chmod 755 /app/readonly; cp /app/output/transport.py /app/readonly/transport.py; chmod 555 /app/readonly
+python3 - <<'PY' > /app/optimizedhot.txt 2>/app/optimizedhotl.txt &
+import subprocess,time,os
+s=time.monotonic()
+env={'HOME':'/app/scratch','TMPDIR':'/app/scratch','PATH':'/usr/local/bin:/usr/bin:/bin','LANG':'C'}
+p=subprocess.run(['python3','transport.py','pH2','oD2','0','0.8','0.05','0.6'],cwd='/app/readonly',env=env)
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+
+OBS:  Output:
+
+root@1afed5a5c86f:/app# chmod 755 /app/readonly; cp /app/output/transport.py /app/readonly/transport.py; chmod 555 /app/readonly
+root@1afed5a5c86f:/app# python3 - <<'PY' > /app/optimizedhot.txt 2>/app/optimizedhotl.txt &
+> import subprocess,time,os
+> s=time.monotonic()
+> env={'HOME':'/app/scratch','TMPDIR':'/app/scratch','PATH':'/usr/local/bin:/usr/bin:/bin','LANG':'C'}
+> p=subprocess.run(['python3','transport.py','pH2','oD2','0','0.8','0.05','0.6'],cwd='/app/readonly',env=env)
+> print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+> PY
+[1] 2188
+root@1afed5a5c86f:/app#
+
+
+#### step 85 06:29:05
+MSG: Analysis: The optimized endpoint test is running under the checker's restricted environment and a read-only working directory. The completed hybrid benchmark established that the full low-quantum calculation fits within the runtime limit. I will also inspect the high-order collision-bracket conditioning and retain convergence checks rather than trust a fixed polynomial order.
+Plan: Read endpoint progress and convergence, test bracket arithmetic at higher order, and compare the optimized low-temperature result with the completed hybrid reference. Then finalize only after the JSON interface, runtime, and file constraints are verified.
+CMD: tail -10 /app/optimizedhotl.txt; cat /app/optimizedhot.txt; tail -38 /app/output/transport.py; ls -la /app/output
+
+OBS: 
+    for k in range(8,len(history)):
+        scale=np.maximum(np.abs(history[k])*1e-6,np.array([0.,0.,0.,5e-8]))
+        if np.all(np.max(np.abs(history[k-3:k]-history[k]),axis=0)<scale):
+            out=history[min(k+2,len(history)-1)]
+            break
+    print(json.dumps(dict(zip(['viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'],map(float,out)))))
+if __name__=='__main__':
+    main()
+total 28
+drwxr-xr-x 1 root root  4096 Nov  5 06:07 .
+drwxr-xr-x 1 root root  4096 Nov  5 06:28 ..
+-rw-r--r-- 1 root root 13370 Nov  5 06:25 transport.py
+root@1afed5a5c86f:/app#
+
+
+#### step 86 06:29:27
+MSG: Analysis: The final file is self-contained and well below the size limit. The restricted-environment endpoint benchmark is still running. The transport solution is checked across several consecutive Sonine orders, and the scattering solver now includes the high-partial-wave tail that the earlier cutoff omitted.
+Plan: Inspect the endpoint runtime and convergence as it progresses. After it finishes, compare the optimized low-temperature calculation with the completed hybrid benchmark and perform the final JSON and file-constraint checks.
+CMD: tail -12 /app/optimizedhotl.txt; cat /app/optimizedhot.txt; jobs
+
+OBS: New Terminal Output:
+t.py
+root@1afed5a5c86f:/app# tail -12 /app/optimizedhotl.txt; cat /app/optimizedhot.txt; jobs
+[1]+  Running                 python3 - <<'PY' > /app/optimizedhot.txt 2> /app/optimizedhotl.txt
+import subprocess,time,os
+s=time.monotonic()
+env={'HOME':'/app/scratch','TMPDIR':'/app/scratch','PATH':'/usr/local/bin:/usr/bin:/bin','LANG':'C'}
+p=subprocess.run(['python3','transport.py','pH2','oD2','0','0.8','0.05','0.6'],cwd='/app/readonly',env=env)
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 87 06:30:11
+MSG: Analysis: The endpoint benchmark is still in its first scattering pass. I will continue to measure it without other numerical jobs so its runtime is representative. The file and interface constraints are already satisfied structurally; the remaining checks are numerical convergence and complete runtime.
+Plan: Wait for endpoint progress, then inspect its convergence history and wall time. Afterwards run the optimized low-temperature comparison and validate that standard output contains exactly four finite JSON numbers.
+CMD: 
+CMD: tail -12 /app/optimizedhotl.txt; cat /app/optimizedhot.txt; jobs
+
+OBS:  1 2304 32 76.23147368431091
+adaptive 0.5 2 2688 30 82.89366602897644
+adaptive 0.5 3 3048 16 89.37616419792175
+adaptive 0.5 4 3240 18 92.91078567504883
+[1]+  Running                 python3 - <<'PY' > /app/optimizedhot.txt 2> /app/optimizedhotl.txt
+import subprocess,time,os
+s=time.monotonic()
+env={'HOME':'/app/scratch','TMPDIR':'/app/scratch','PATH':'/usr/local/bin:/usr/bin:/bin','LANG':'C'}
+p=subprocess.run(['python3','transport.py','pH2','oD2','0','0.8','0.05','0.6'],cwd='/app/readonly',env=env)
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 88 06:30:54
+MSG: Analysis: The high-temperature endpoint's first scattering pass completed in about 76 seconds and is refining only a small number of panels. This suggests the full run should remain below the checker limit. The final implementation includes the correct exchange averaging, coupled heat/diffusion response, and converged scattering tail.
+Plan: Let the endpoint benchmark finish, inspect its transport convergence and runtime, then compare the optimized low-temperature output with the validated hybrid calculation. Finish with JSON-format, syntax, and output-directory checks.
+CMD: 
+CMD: tail -12 /app/optimizedhotl.txt; cat /app/optimizedhot.txt; jobs
+
+OBS: 0.5 5 3456 8 96.71828389167786
+adaptive 0.5 6 3552 8 98.46161460876465
+adaptive 0.5 7 3648 6 100.11811375617981
+adaptive 0.5 8 3720 0 101.4811646938324
+[1]+  Running                 python3 - <<'PY' > /app/optimizedhot.txt 2> /app/optimizedhotl.txt
+import subprocess,time,os
+s=time.monotonic()
+env={'HOME':'/app/scratch','TMPDIR':'/app/scratch','PATH':'/usr/local/bin:/usr/bin:/bin','LANG':'C'}
+p=subprocess.run(['python3','transport.py','pH2','oD2','0','0.8','0.05','0.6'],cwd='/app/readonly',env=env)
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 89 06:31:46
+MSG: Analysis: The restricted-environment endpoint test has completed its first reduced-mass scattering integral in about 101 seconds. Its adaptive refinement is controlled, and no interface or filesystem issues have appeared. I will continue the clean runtime measurement and inspect the final transport convergence before finishing.
+Plan: Wait for the remaining scattering integrals, then check the final output and wall time. Afterwards compare the optimized low-temperature calculation with the completed hybrid reference and run the final JSON and file checks.
+CMD: 
+CMD: tail -10 /app/optimizedhotl.txt; cat /app/optimizedhot.txt; jobs
+
+OBS: 46161460876465
+adaptive 0.5 7 3648 6 100.11811375617981
+adaptive 0.5 8 3720 0 101.4811646938324
+adaptive 0.6666666666666666 1 2304 44 85.30448698997498
+[1]+  Running                 python3 - <<'PY' > /app/optimizedhot.txt 2> /app/optimizedhotl.txt
+import subprocess,time,os
+s=time.monotonic()
+env={'HOME':'/app/scratch','TMPDIR':'/app/scratch','PATH':'/usr/local/bin:/usr/bin:/bin','LANG':'C'}
+p=subprocess.run(['python3','transport.py','pH2','oD2','0','0.8','0.05','0.6'],cwd='/app/readonly',env=env)
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 90 06:32:36
+MSG: Analysis: The high-temperature restricted-environment test is progressing within the runtime budget, with its second reduced-mass scattering pass now complete at the initial quadrature level. No output-format or environment problems have appeared.
+Plan: Allow the adaptive refinements and final reduced-mass integral to finish, then inspect the transport convergence and total runtime. Afterward, run the optimized low-temperature comparison and final file/JSON validation.
+CMD: 
+CMD: tail -12 /app/optimizedhotl.txt; cat /app/optimizedhot.txt; jobs
+
+OBS: 66666666 14 4392 4 124.12940001487732
+adaptive 0.6666666666666666 15 4440 2 125.29281949996948
+adaptive 0.6666666666666666 16 4464 0 126.30736565589905
+[1]+  Running                 python3 - <<'PY' > /app/optimizedhot.txt 2> /app/optimizedhotl.txt
+import subprocess,time,os
+s=time.monotonic()
+env={'HOME':'/app/scratch','TMPDIR':'/app/scratch','PATH':'/usr/local/bin:/usr/bin:/bin','LANG':'C'}
+p=subprocess.run(['python3','transport.py','pH2','oD2','0','0.8','0.05','0.6'],cwd='/app/readonly',env=env)
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 91 06:33:31
+MSG: Analysis: The endpoint test has completed its second reduced-mass scattering integral in about 126 seconds and is now in the final one. The full run should remain below the 600-second limit. I will check the final transport convergence and then finish the independent optimized-versus-reference comparison.
+Plan: Wait for the final scattering integral and inspect the output, convergence history, and total runtime. Then run the final JSON-format and file-constraint checks, with an additional low-temperature comparison if the endpoint test remains stable.
+CMD: 
+CMD: tail -12 /app/optimizedhotl.txt; cat /app/optimizedhot.txt; jobs
+
+OBS: 66666666 14 4392 4 124.12940001487732
+adaptive 0.6666666666666666 15 4440 2 125.29281949996948
+adaptive 0.6666666666666666 16 4464 0 126.30736565589905
+[1]+  Running                 python3 - <<'PY' > /app/optimizedhot.txt 2> /app/optimizedhotl.txt
+import subprocess,time,os
+s=time.monotonic()
+env={'HOME':'/app/scratch','TMPDIR':'/app/scratch','PATH':'/usr/local/bin:/usr/bin:/bin','LANG':'C'}
+p=subprocess.run(['python3','transport.py','pH2','oD2','0','0.8','0.05','0.6'],cwd='/app/readonly',env=env)
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 92 06:34:25
+MSG: Analysis: The restricted-environment endpoint run is still finishing its final scattering integral. The earlier clean hybrid benchmark completed in 294 seconds, and the endpoint's completed stages remain consistent with the 600-second budget. I will inspect the final convergence and runtime before declaring completion.
+Plan: Wait for the endpoint output, then compare the optimized low-temperature result against the completed hybrid reference. Finally verify that transport.py is a regular standalone file and that its standard output has exactly the required four finite JSON numbers.
+CMD: 
+CMD: tail -12 /app/optimizedhotl.txt; cat /app/optimizedhot.txt; jobs
+
+OBS:  4464 0 126.30736565589905
+adaptive 1.0 1 2304 46 97.72929191589355
+adaptive 1.0 2 2856 48 108.07682013511658
+adaptive 1.0 3 3432 34 119.00045394897461
+[1]+  Running                 python3 - <<'PY' > /app/optimizedhot.txt 2> /app/optimizedhotl.txt
+import subprocess,time,os
+s=time.monotonic()
+env={'HOME':'/app/scratch','TMPDIR':'/app/scratch','PATH':'/usr/local/bin:/usr/bin:/bin','LANG':'C'}
+p=subprocess.run(['python3','transport.py','pH2','oD2','0','0.8','0.05','0.6'],cwd='/app/readonly',env=env)
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 93 06:35:17
+MSG: Analysis: The restricted-environment endpoint test is refining its final reduced-mass integral and remains on track to finish within 600 seconds. The corrected scattering-tail and transport-basis calculations have passed independent convergence checks.
+Plan: Allow the endpoint run to finish, inspect its total runtime and convergence, then run the optimized low-temperature comparison. Complete the task only after checking the final JSON output and file constraints.
+CMD: 
+CMD: tail -8 /app/optimizedhotl.txt; cat /app/optimizedhot.txt; jobs
+
+OBS:  /app/optimizedhot.txt 2> /app/optimizedhotl.txt
+import subprocess,time,os
+s=time.monotonic()
+env={'HOME':'/app/scratch','TMPDIR':'/app/scratch','PATH':'/usr/local/bin:/usr/bin:/bin','LANG':'C'}
+p=subprocess.run(['python3','transport.py','pH2','oD2','0','0.8','0.05','0.6'],cwd='/app/readonly',env=env)
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+
+{"viscosity": 0.0915764969039869, "thermal_conductivity": 0.17630582574681383, "binary_diffusion": 0.075834344173328, "thermal_diffusion_factor": 0.032644612072
+685535}
+exit 0 seconds 380.6773423301056
+root@1afed5a5c86f:/app#
+
+
+#### step 94 06:35:41
+MSG: Analysis: The restricted-environment high-temperature endpoint test completed successfully in about 381 seconds, below the 600-second limit, with stable convergence through order 18. Its output contains the required four finite JSON numbers. I will perform one final optimized-versus-reference comparison at low temperature and then check the final file.
+Plan: Run the current optimized program on the previously validated low-temperature case, compare its outputs with the completed hybrid reference, and verify syntax, JSON members, regular-file status, and output-directory contents.
+CMD: python3 - <<'PY' > /app/optimizedlow.txt 2>/app/optimizedlowl.txt &
+import subprocess,time
+s=time.monotonic()
+p=subprocess.run(['python3','/app/output/transport.py','pH2','oD2','0','0.8','0.3','0.2'])
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+python3 - <<'PY'
+import ast,json,math,os
+p='/app/output/transport.py'
+ast.parse(open(p).read())
+o=json.loads(open('/app/optimizedhot.txt').readline())
+assert set(o)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+assert all(isinstance(v,(int,float)) and math.isfinite(v) for v in o.values())
+assert os.path.isfile(p) and not os.path.islink(p)
+print('syntax, JSON, and file checks passed; bytes:',os.path.getsize(p))
+PY
+
+OBS: s,flush=True)
+> PY
+[1] 2436
+root@1afed5a5c86f:/app# python3 - <<'PY'
+> import ast,json,math,os
+> p='/app/output/transport.py'
+> ast.parse(open(p).read())
+> o=json.loads(open('/app/optimizedhot.txt').readline())
+> assert set(o)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+> assert all(isinstance(v,(int,float)) and math.isfinite(v) for v in o.values())
+> assert os.path.isfile(p) and not os.path.islink(p)
+> print('syntax, JSON, and file checks passed; bytes:',os.path.getsize(p))
+> PY
+syntax, JSON, and file checks passed; bytes: 13370
+root@1afed5a5c86f:/app#
+
+
+#### step 95 06:36:31
+MSG: Analysis: The standalone file passes syntax, JSON-member, finite-number, regular-file, and size checks. The restricted-environment endpoint benchmark completed in about 381 seconds with stable transport convergence. The final optimized low-temperature comparison is now running.
+Plan: Wait for the low-temperature comparison, check agreement with the completed hybrid reference, and inspect its runtime and convergence. Then leave only the final transport.py in the output directory and mark the task complete.
+CMD: 
+CMD: tail -10 /app/optimizedlowl.txt; cat /app/optimizedlow.txt; ls -la /app/output; jobs
+
+OBS: tes: 13370
+root@1afed5a5c86f:/app# tail -10 /app/optimizedlowl.txt; cat /app/optimizedlow.txt; ls -la /app/output; jobs
+total 28
+drwxr-xr-x 1 root root  4096 Nov  5 06:07 .
+drwxr-xr-x 1 root root  4096 Nov  5 06:35 ..
+-rw-r--r-- 1 root root 13370 Nov  5 06:25 transport.py
+[1]+  Running                 python3 - <<'PY' > /app/optimizedlow.txt 2> /app/optimizedlowl.txt
+import subprocess,time
+s=time.monotonic()
+p=subprocess.run(['python3','/app/output/transport.py','pH2','oD2','0','0.8','0.3','0.2'])
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 96 06:37:24
+MSG: Analysis: The final optimized low-temperature run is still in its first scattering pass. All structural checks passed, and the demanding restricted-environment endpoint run finished well within the runtime limit. I am waiting for the last numerical comparison before completing the task.
+Plan: Let the low-temperature run finish, compare all four outputs with the completed hybrid reference, and inspect its convergence and runtime. No further implementation changes are planned unless that comparison reveals a discrepancy.
+CMD: 
+CMD: tail -10 /app/optimizedlowl.txt; cat /app/optimizedlow.txt; jobs
+
+OBS: .5 2 2736 22 63.40957808494568
+adaptive 0.5 3 3000 20 68.39468050003052
+adaptive 0.5 4 3240 14 72.52579069137573
+adaptive 0.5 5 3408 10 75.53183341026306
+adaptive 0.5 6 3528 6 77.6592047214508
+adaptive 0.5 7 3600 6 79.22339582443237
+adaptive 0.5 8 3672 0 80.66538596153259
+[1]+  Running                 python3 - <<'PY' > /app/optimizedlow.txt 2> /app/optimizedlowl.txt
+import subprocess,time
+s=time.monotonic()
+p=subprocess.run(['python3','/app/output/transport.py','pH2','oD2','0','0.8','0.3','0.2'])
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 97 06:38:35
+MSG: Analysis: The optimized low-temperature run has completed its first scattering integral and is tracking the earlier hybrid benchmark closely. The file and restricted-environment checks have passed. I am also reviewing the convergence safeguard so unusually slow Sonine convergence can be handled without repeating the scattering calculation.
+Plan: Wait for the final comparison and inspect its convergence history. Then add a small reserve of higher-order scattering moments, allowing the transport basis to be extended cheaply if the normal order-18 convergence check is insufficient.
+CMD: 
+CMD: tail -10 /app/optimizedlowl.txt; cat /app/optimizedlow.txt; jobs
+
+OBS: ive 0.6666666666666666 9 3816 6 87.20575428009033
+adaptive 0.6666666666666666 10 3888 6 88.6103823184967
+adaptive 0.6666666666666666 11 3960 6 90.04913806915283
+adaptive 0.6666666666666666 12 4032 6 91.46676754951477
+adaptive 0.6666666666666666 13 4104 6 92.80836892127991
+[1]+  Running                 python3 - <<'PY' > /app/optimizedlow.txt 2> /app/optimizedlowl.txt
+import subprocess,time
+s=time.monotonic()
+p=subprocess.run(['python3','/app/output/transport.py','pH2','oD2','0','0.8','0.3','0.2'])
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 98 06:39:27
+MSG: Analysis: The optimized low-temperature run is tracking the validated hybrid calculation and has nearly finished its second scattering integral. The remaining work is the final numerical comparison and a convergence reserve for unusually slow Sonine sequences.
+Plan: Wait for the comparison to finish, verify all four output differences, and then add reusable higher-order moment capacity so the transport solve can extend its basis without another scattering pass if needed.
+CMD: 
+CMD: tail -8 /app/optimizedlowl.txt; cat /app/optimizedlow.txt; jobs
+
+OBS: ve 0.6666666666666666 12 4032 6 91.46676754951477
+adaptive 0.6666666666666666 13 4104 6 92.80836892127991
+adaptive 0.6666666666666666 14 4176 6 94.28991532325745
+adaptive 0.6666666666666666 15 4248 4 95.6715247631073
+adaptive 0.6666666666666666 16 4296 0 96.77756929397583
+[1]+  Running                 python3 - <<'PY' > /app/optimizedlow.txt 2> /app/optimizedlowl.txt
+import subprocess,time
+s=time.monotonic()
+p=subprocess.run(['python3','/app/output/transport.py','pH2','oD2','0','0.8','0.3','0.2'])
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+root@1afed5a5c86f:/app#
+
+
+#### step 99 06:40:23
+MSG: Analysis: The optimized low-temperature test is now in its final scattering integral and has matched the earlier benchmark's progress. The species statistics, transport normalization, tail cutoff, angular moments, and species-reversal symmetry have all been checked. I will finish the numerical comparison before the final convergence-reserve change.
+Plan: Wait for the final result, compare it with the completed hybrid reference, and then enable a modest reserve of higher Sonine orders. Run one final endpoint check on that version and verify the output file and JSON interface.
+CMD: 
+CMD: tail -8 /app/optimizedlowl.txt; cat /app/optimizedlow.txt; jobs; cat /sys/fs/cgroup/cpu.max
+
+OBS: 77756929397583
+adaptive 1.0 1 2304 46 68.2814929485321
+adaptive 1.0 2 2856 40 78.6895956993103
+adaptive 1.0 3 3336 30 87.45535659790039
+adaptive 1.0 4 3696 20 94.2005763053894
+adaptive 1.0 5 3936 22 99.06902575492859
+adaptive 1.0 6 4200 20 103.74185347557068
+[1]+  Running                 python3 - <<'PY' > /app/optimizedlow.txt 2> /app/optimizedlowl.txt
+import subprocess,time
+s=time.monotonic()
+p=subprocess.run(['python3','/app/output/transport.py','pH2','oD2','0','0.8','0.3','0.2'])
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+ &
+200000 100000
+root@1afed5a5c86f:/app#
+
+
+#### step 100 06:41:08
+MSG: Analysis: The optimized low-temperature run is refining its final scattering integral, and the environment has the same two-CPU limit as the checker. Its progress and earlier benchmarks remain within the runtime budget. I will complete the numerical comparison, then add a small reserve of higher-order moments for the convergence safeguard.
+Plan: Wait for the last result, compare all four outputs with the validated hybrid calculation, and enable higher transport orders only if the normal convergence sequence is insufficient. Perform a final restricted-environment test and file/JSON checks.
+CMD: 
+CMD: tail -8 /app/optimizedlowl.txt; cat /app/optimizedlow.txt; jobs
+
+OBS: 1945]), array([ 0.03118406,  0.06912483,  0.02613942, -0.10691
+946])]
+[1]+  Done                    python3 - <<'PY' > /app/optimizedlow.txt 2> /app/optimizedlowl.txt
+import subprocess,time
+s=time.monotonic()
+p=subprocess.run(['python3','/app/output/transport.py','pH2','oD2','0','0.8','0.3','0.2'])
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+
+{"viscosity": 0.031184061822486953, "thermal_conductivity": 0.06912483170362446, "binary_diffusion": 0.02613942044237497, "thermal_diffusion_factor": -0.1069194
+531477978}
+exit 0 seconds 300.1320680999197
+root@1afed5a5c86f:/app#
+
+
+#### step 101 06:41:40
+MSG: Analysis: The optimized low-temperature calculation completed in about 300 seconds and agrees with the earlier full hybrid calculation to much better than the requested tolerance. The restricted-environment high-temperature endpoint completed in about 381 seconds. I will add a modest reserve of higher-order moments so an unusually slow transport-basis convergence sequence can be extended without repeating scattering.
+Plan: Compute scattering moments through order 22 while normally solving the tested order-18 transport system. Extend the transport basis only if several consecutive orders are not stable. Test this final version on an endpoint case, then verify the file and JSON constraints.
+CMD: python3 - <<'PY'
+p='/app/assemble.py';s=open(p).read().replace('    N=18','    N=18; reserve=22').replace('scattering_moments(T,mu,A,L,N,h=', 'scattering_moments(T,mu,A,L,reserve,h=')
+a=s.index('    out=transport(');b=s.index('    print(json.dumps',a)
+s=s[:a]+'''    for order in [18,20,22]:
+        ws={}
+        for i,j in [(0,0),(0,1),(1,1)]:
+            mu=m[i]*m[j]/(m[i]+m[j])
+            ws[i,j]=effective_weights(moms[mu],order,sp[i][1],sp[i][2] if i==j else 0)
+        out=transport(m,x,T,N=order,ne=2*order+3,qs=lambda i,j,z,a,w:ws[i,j][z])
+        # Require agreement over several consecutive orders; extending this
+        # system is cheap because the scattering moments are already available.
+        history=np.asarray(transport.history)
+        stable=False
+        for k in range(8,len(history)):
+            scale=np.maximum(np.abs(history[k])*1e-6,np.array([0.,0.,0.,5e-8]))
+            if np.all(np.max(np.abs(history[k-3:k]-history[k]),axis=0)<scale):
+                out=history[min(k+2,len(history)-1)]
+                stable=True
+                break
+        if stable:break
+'''+s[b:]
+open(p,'w').write(s)
+PY
+python3 /app/assemble.py
+python3 - <<'PY' > /app/reservetest.txt 2>/app/reservetestl.txt &
+import subprocess,time
+s=time.monotonic()
+p=subprocess.run(['python3','/app/output/transport.py','HD','pD2','0.5','2.8','0.05','0.2'])
+print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+PY
+python3 - <<'PY'
+import json
+old=json.loads(open('/app/cleanlow.txt').readline());new=json.loads(open('/app/optimizedlow.txt').readline())
+print('optimized/reference relative differences:',{k:(new[k]-old[k])/old[k] for k in old})
+PY
+
+OBS: ])
+> print('exit',p.returncode,'seconds',time.monotonic()-s,flush=True)
+> PY
+[1] 2623
+root@1afed5a5c86f:/app# python3 - <<'PY'
+> import json
+> old=json.loads(open('/app/cleanlow.txt').readline());new=json.loads(open('/app/optimizedlow.txt').readline())
+> print('optimized/reference relative differences:',{k:(new[k]-old[k])/old[k] for k in old})
+> PY
+optimized/reference relative differences: {'viscosity': -2.381344940571936e-10, 'thermal_conductivity': -2.0437268076913312e-10, 'binary_diffusion': -6.91028547
+7804296e-11, 'thermal_diffusion_factor': 3.234449675124603e-10}
+root@1afed5a5c86f:/app#
+
+

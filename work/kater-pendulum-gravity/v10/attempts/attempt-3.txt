@@ -1,0 +1,741 @@
+#### step 2 22:12:20
+MSG: Analysis: No data have been inspected yet. The first step is to read the lab notes and determine the measurement model, file formats, and clock corrections needed for the reduction.
+Plan: Read NOTES.md, list the data files, and inspect representative run and clock-check records.
+CMD: cat /app/data/NOTES.md
+
+CMD: find /app/data -type f -maxdepth 3 -printf '%p %s bytes\n'; head -n 12 /app/data/runs/a1.csv; head -n 12 /app/data/sync/a1.csv
+
+OBS: LED was seen lit. The detector occasionally misses a second; those rows are absent.
+
+## Damping
+
+The bar loses amplitude through air drag and pivot friction; both are small, but at the larger
+release angles the swing decays noticeably over a run.
+root@6194d492ab96:/app# find /app/data -type f -maxdepth 3 -printf '%p %s bytes\n'; head -n 12 /app/data/runs/a1.csv; head -n 12 /app/data/sync/a1.csv
+find: warning: you have specified the global option -maxdepth after the argument -type, but global options are not positional, i.e., -maxdepth affects tests spe
+cified before it as well as those specified after it.  Please specify global options before other arguments.
+/app/data/NOTES.md 4717 bytes
+/app/data/runs/b2.csv 390089 bytes
+/app/data/runs/a2.csv 349707 bytes
+/app/data/runs/b1.csv 387599 bytes
+/app/data/runs/a1.csv 361817 bytes
+/app/data/runs/a3.csv 359445 bytes
+/app/data/runs/b3.csv 386064 bytes
+/app/data/sync/b2.csv 968 bytes
+/app/data/sync/a2.csv 974 bytes
+/app/data/sync/b1.csv 1023 bytes
+/app/data/sync/a1.csv 1016 bytes
+/app/data/sync/a3.csv 1016 bytes
+/app/data/sync/b3.csv 970 bytes
+# run: a1
+# tracker: pendulum-track 1.8
+# unit: deg
+# nominal_fps: 240
+frame_counter,theta,tracker_ok
+12040,24.56664,1
+12041,24.57185,1
+12042,24.57974,1
+12043,24.59242,1
+12044,24.57845,1
+12045,24.58146,1
+12046,24.58102,1
+gps_s,frame_counter
+41874,12192
+41875,12433
+41876,12674
+41878,13155
+41879,13396
+41880,13637
+41881,13877
+41882,14118
+41883,14359
+41885,14840
+41886,15081
+root@6194d492ab96:/app#
+
+
+#### step 3 22:12:50
+MSG: Analysis: The notes identify several essential corrections: the centre of mass shifted when the heavy weight moved, pivot A rolls on a finite-radius pin, the camera angles are oblique projections rather than true swing angles, and frame times must be calibrated separately from GPS clock checks. The logs also contain invalid tracker samples and potentially wrapping frame counters.
+Plan: Inspect all logs and available numerical libraries, then build a physical fit that accounts for clock calibration, camera projection, damping, and the rolling pivot.
+CMD: python3 - <<'PY'
+import numpy as np, scipy, pandas as pd
+from pathlib import Path
+print('scipy',scipy.__version__)
+for name in ['a1','a2','a3','b1','b2','b3']:
+ p=Path('/app/data/runs/'+name+'.csv'); print('\n',name, '\n', '\n'.join(p.read_text().splitlines()[:5]))
+ x=pd.read_csv(p,comment='#'); s=pd.read_csv('/app/data/sync/'+name+'.csv')
+ f=np.unwrap(x.frame_counter.to_numpy()*2*np.pi/65536)*65536/(2*np.pi)
+ sf=np.unwrap(s.frame_counter.to_numpy()*2*np.pi/65536)*65536/(2*np.pi)
+ fit=np.polyfit(s.gps_s-s.gps_s.iloc[0],sf,1)
+ print('rows',len(x),'counter range',f[0],f[-1],'frame step counts',np.unique(np.round(np.diff(f)),return_counts=True),'bad',sum(x.tracker_ok==0))
+ print('angle range',x.theta.min(),x.theta.max(),'first angle',x.theta.iloc[:80].mean())
+ print('sync',s.iloc[[0,-1]].to_dict('records'),'fps',fit[0],'resid range',np.min(sf-np.polyval(fit,s.gps_s-s.gps_s.iloc[0])),np.max(sf-np.polyval(fit,s.gps_s-s.gps_s.iloc[0])))
+ print(s.to_string(index=False))
+PY
+
+OBS: New Terminal Output:
+
+root@6194d492ab96:/app# python3 - <<'PY'
+> import numpy as np, scipy, pandas as pd
+> from pathlib import Path
+> print('scipy',scipy.__version__)
+> for name in ['a1','a2','a3','b1','b2','b3']:
+>  p=Path('/app/data/runs/'+name+'.csv'); print('\n',name, '\n', '\n'.join(p.read_text().splitlines()[:5]))
+>  x=pd.read_csv(p,comment='#'); s=pd.read_csv('/app/data/sync/'+name+'.csv')
+>  f=np.unwrap(x.frame_counter.to_numpy()*2*np.pi/65536)*65536/(2*np.pi)
+>  sf=np.unwrap(s.frame_counter.to_numpy()*2*np.pi/65536)*65536/(2*np.pi)
+>  fit=np.polyfit(s.gps_s-s.gps_s.iloc[0],sf,1)
+>  print('rows',len(x),'counter range',f[0],f[-1],'frame step counts',np.unique(np.round(np.diff(f)),return_counts=True),'bad',sum(x.tracker_ok==0))
+>  print('angle range',x.theta.min(),x.theta.max(),'first angle',x.theta.iloc[:80].mean())
+>  print('sync',s.iloc[[0,-1]].to_dict('records'),'fps',fit[0],'resid range',np.min(sf-np.polyval(fit,s.gps_s-s.gps_s.iloc[0])),np.max(sf-np.polyval(fit,s.gps_s
+-s.gps_s.iloc[0])))
+>  print(s.to_string(index=False))
+> PY
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+ModuleNotFoundError: No module named 'scipy'
+root@6194d492ab96:/app#
+
+
+#### step 4 22:13:11
+MSG: Analysis: The numerical inspection did not run because SciPy is missing. Numerical integration and nonlinear fitting will be useful for the camera and rolling-pivot corrections.
+Plan: Install the numerical packages and repeat the compact inspection of all six datasets.
+CMD: pip install numpy scipy pandas matplotlib
+
+CMD: cat > /app/inspect_data.py <<'PY'
+import numpy as np, scipy, pandas as pd
+from pathlib import Path
+print('scipy',scipy.__version__)
+for name in ['a1','a2','a3','b1','b2','b3']:
+ p=Path('/app/data/runs/'+name+'.csv'); print('\n',name, '\n', '\n'.join(p.read_text().splitlines()[:5]))
+ x=pd.read_csv(p,comment='#'); s=pd.read_csv('/app/data/sync/'+name+'.csv')
+ f=np.unwrap(x.frame_counter.to_numpy()*2*np.pi/65536)*65536/(2*np.pi)
+ sf=np.unwrap(s.frame_counter.to_numpy()*2*np.pi/65536)*65536/(2*np.pi)
+ fit=np.polyfit(s.gps_s-s.gps_s.iloc[0],sf,1)
+ print('rows',len(x),'counter range',f[0],f[-1],'frame step counts',np.unique(np.round(np.diff(f)),return_counts=True),'bad',sum(x.tracker_ok==0))
+ print('angle range',x.theta.min(),x.theta.max(),'first angle',x.theta.iloc[:80].mean())
+ print('sync',s.iloc[[0,-1]].to_dict('records'),'fps',fit[0],'resid range',np.min(sf-np.polyval(fit,s.gps_s-s.gps_s.iloc[0])),np.max(sf-np.polyval(fit,s.gps_s-s.gps_s.iloc[0])))
+ print(s.to_string(index=False))
+PY
+python3 /app/inspect_data.py
+
+OBS:  (7.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 7.1/7.1 MB 21.9 MB/s eta 0:00:00
+Downloading pyparsing-3.3.3-py3-none-any.whl (126 kB)
+Downloading python_dateutil-3.0.0-py2.py3-none-any.whl (94 kB)
+Downloading six-1.17.0-py2.py3-none-any.whl (11 kB)
+Downloading tzdata-2026.5-py2.py3-none-any.whl (347 kB)
+Installing collected packages: tzdata, six, scipy, pyparsing, pillow, packaging, kiwisolver, fonttools, cycler, contourpy, python-dateutil, pandas, matplotlib
+cat > /app/inspect_data.py <<'PY'
+import numpy as np, scipy, pandas as pd
+from pathlib import Path
+print('scipy',scipy.__version__)
+for name in ['a1','a2','a3','b1','b2','b3']:
+ p=Path('/app/data/runs/'+name+'.csv'); print('\n',name, '\n', '\n'.join(p.read_text().splitlines()[:5]))
+ x=pd.read_csv(p,comment='#'); s=pd.read_csv('/app/data/sync/'+name+'.csv')
+ f=np.unwrap(x.frame_counter.to_numpy()*2*np.pi/65536)*65536/(2*np.pi)
+ sf=np.unwrap(s.frame_counter.to_numpy()*2*np.pi/65536)*65536/(2*np.pi)
+ fit=np.polyfit(s.gps_s-s.gps_s.iloc[0],sf,1)
+ print('rows',len(x),'counter range',f[0],f[-1],'frame step counts',np.unique(np.round(np.diff(f)),return_counts=True),'bad',sum(x.tracker_ok==0))
+ print('angle range',x.theta.min(),x.theta.max(),'first angle',x.theta.iloc[:80].mean())
+ print('sync',s.iloc[[0,-1]].to_dict('records'),'fps',fit[0],'resid range',np.min(sf-np.polyval(fit,s.gps_s-s.gps_s.iloc[0])),np.max(sf-np.polyval(fit,s.gps_s-s
+.gps_s.iloc[0])))
+ print(s.to_string(index=False))
+PY
+python3 /app/inspect_data.py
+
+
+
+#### step 5 22:13:24
+MSG: Analysis: Package installation is still finishing; the inspection script has been queued.
+Plan: Wait briefly for installation and inspection output.
+CMD: 
+OBS: 6
+ 52635          63275
+ 52636          63514
+ 52637          63753
+ 52638          63992
+ 52639          64231
+ 52640          64470
+ 52643          65186
+ 52644          65425
+ 52645            128
+ 52646            367
+ 52647            606
+ 52648            845
+ 52649           1083
+ 52650           1322
+ 52651           1561
+ 52652           1800
+ 52653           2039
+ 52654           2278
+ 52655           2517
+ 52656           2755
+ 52657           2994
+ 52658           3233
+ 52659           3461
+ 52660           3700
+ 52661           3939
+ 52662           4178
+ 52663           4417
+ 52664           4655
+ 52665           4894
+ 52666           5133
+ 52667           5372
+ 52668           5611
+ 52669           5850
+ 52670           6089
+ 52671           6328
+ 52672           6566
+ 52673           6805
+ 52674           7044
+ 52675           7283
+ 52676           7522
+ 52677           7761
+ 52678           8000
+ 52679           8239
+ 52680           8477
+ 52681           8716
+ 52682           8955
+ 52683           9194
+ 52684           9433
+ 52685           9672
+ 52686           9911
+ 52687          10150
+ 52688          10388
+ 52689          10627
+ 52691          11105
+ 52692          11344
+ 52693          11583
+ 52694          11822
+ 52695          12060
+ 52697          12538
+ 52698          12774
+ 52699          13013
+ 52701          13491
+ 52703          13968
+ 52704          14207
+ 52705          14446
+ 52706          14685
+ 52708          15163
+root@6194d492ab96:/app#
+
+
+#### step 6 22:13:56
+MSG: Analysis: The logs have about 90 seconds each and continuous delivered-frame counters, including 16-bit wraps. Some clock checks depart from a single constant-rate line by several frames, suggesting missing delivered frames or timing offsets that must be resolved rather than averaged away. The rolling pin also changes pivot A's effective inertia and restoring lever arm.
+Plan: Produce compact clock diagnostics to identify rate segments and discontinuities, and estimate swing extrema and decay as starting values for the physical fit.
+CMD: cat > /app/diagnostics.py <<'PY'
+import numpy as np,pandas as pd
+from scipy.signal import find_peaks,savgol_filter
+names=['a1','a2','a3','b1','b2','b3']
+for n in names:
+ x=pd.read_csv('/app/data/runs/'+n+'.csv',comment='#');s=pd.read_csv('/app/data/sync/'+n+'.csv')
+ f=np.unwrap(s.frame_counter.to_numpy()*2*np.pi/65536)*65536/(2*np.pi); t=s.gps_s.to_numpy()-s.gps_s.iloc[0]
+ slope=np.median(np.diff(f)/np.diff(t)); slope=np.polyfit(t[:min(20,len(t))],f[:min(20,len(t))],1)[0]
+ res=f-f[0]-slope*t
+ print('\n',n,'early fps',slope,'time,counter-offset pairs:')
+ print(list(zip(t.tolist(),np.round(res,2).tolist())))
+ y=x.theta.to_numpy(); y=y*(np.pi/180 if n[0]=='a' else 1)
+ good=x.tracker_ok.to_numpy()==1; y=np.interp(np.arange(len(y)),np.flatnonzero(good),y[good]); ys=savgol_filter(y,41,3)
+ pk=find_peaks(ys,distance=350,prominence=.03)[0];tr=find_peaks(-ys,distance=350,prominence=.03)[0]
+ print('first angle',np.mean(y[:80]),'maxima',list(zip(np.round(pk[:6]/240,3),np.round(ys[pk[:6]],4))),'minima',list(zip(np.round(tr[:6]/240,3),np.round(ys[tr[:6]],4))))
+ print('last extrema',list(zip(np.round(pk[-3:]/240,3),np.round(ys[pk[-3:]],4))),list(zip(np.round(tr[-3:]/240,3),np.round(ys[tr[-3:]],4))))
+PY
+python3 /app/diagnostics.py
+
+OBS: New Terminal Output:
+
+root@6194d492ab96:/app# cat > /app/diagnostics.py <<'PY'
+> import numpy as np,pandas as pd
+> from scipy.signal import find_peaks,savgol_filter
+> names=['a1','a2','a3','b1','b2','b3']
+> for n in names:
+>  x=pd.read_csv('/app/data/runs/'+n+'.csv',comment='#');s=pd.read_csv('/app/data/sync/'+n+'.csv')
+>  f=np.unwrap(s.frame_counter.to_numpy()*2*np.pi/65536)*65536/(2*np.pi); t=s.gps_s.to_numpy()-s.gps_s.iloc[0]
+>  slope=np.median(np.diff(f)/np.diff(t)); slope=np.polyfit(t[:min(20,len(t))],f[:min(20,len(t))],1)[0]
+>  res=f-f[0]-slope*t
+>  print('\n',n,'early fps',slope,'time,counter-offset pairs:')
+>  print(list(zip(t.tolist(),np.round(res,2).tolist())))
+>  y=x.theta.to_numpy(); y=y*(np.pi/180 if n[0]=='a' else 1)
+>  good=x.tracker_ok.to_numpy()==1; y=np.interp(np.arange(len(y)),np.flatnonzero(good),y[good]); ys=savgol_filter(y,41,3)
+>  pk=find_peaks(ys,distance=350,prominence=.03)[0];tr=find_peaks(-ys,distance=350,prominence=.03)[0]
+>  print('first angle',np.mean(y[:80]),'maxima',list(zip(np.round(pk[:6]/240,3),np.round(ys[pk[:6]],4))),'minima',list(zip(np.round(tr[:6]/240,3),np.round(ys[tr
+[:6]],4))))
+>  print('last extrema',list(zip(np.round(pk[-3:]/240,3),np.round(ys[pk[-3:]],4))),list(zip(np.round(tr[-3:]/240,3),np.round(ys[tr[-3:]],4))))
+> PY
+root@6194d492ab96:/app# python3 /app/diagnostics.py
+
+
+
+#### step 7 22:14:28
+MSG: Analysis: The next reduction will use the general orthographic angle mapping and the rolling-pin equation of motion. For pivot A, the pin-axis-to-COM distance is the corrected surface-to-COM distance plus the pin radius, while its small-angle inertia uses the surface-to-COM distance. These distinctions are important at the requested precision.
+Plan: Collect the pending diagnostics and install Numba to accelerate repeated numerical integration during fitting.
+CMD: 
+CMD: pip install numba
+
+OBS: 825), np
+.float64(-0.1029)), (np.float64(85.775), np.float64(-0.0995)), (np.float64(87.733), np.float64(-0.0964))]
+root@6194d492ab96:/app# pip install numba
+Collecting numba
+  Downloading numba-0.68.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (2.8 kB)
+Collecting llvmlite<0.51,>=0.50.0dev0 (from numba)
+  Downloading llvmlite-0.50.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (5.1 kB)
+Requirement already satisfied: numpy<2.6,>=1.22 in /usr/local/lib/python3.12/site-packages (from numba) (2.3.3)
+Downloading numba-0.68.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (3.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.9/3.9 MB 19.5 MB/s eta 0:00:00
+Downloading llvmlite-0.50.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (59.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 59.7/59.7 MB 62.7 MB/s eta 0:00:00
+Installing collected packages: llvmlite, numba
+Successfully installed llvmlite-0.50.0 numba-0.68.1
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your syst
+em unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you a
+re doing and want to suppress this warning.
+
+[notice] A new release of pip is available: 25.0.1 -> 26.2.2
+[notice] To update, run: pip install --upgrade pip
+root@6194d492ab96:/app#
+
+
+#### step 8 22:15:34
+MSG: Analysis: Clock diagnostics show discrete losses of delivered frames, not smooth rate drift: a2 loses about 5 frames, a3 about 3 then 9, b2 about 4, and b3 about 11 then 3. GPS checks can determine the oscillator rate after accounting for these jumps. Swing decay is appreciable and the image extrema are asymmetric, consistent with the oblique camera.
+Plan: Implement clock calibration with frame-loss segments, then fit all six trajectories using a shared three-parameter camera projection, independent run periods and release conditions, and linear plus quadratic damping. Use robust residuals to reject tracker outliers.
+CMD: cat > /app/reduce.py <<'PY'
+import numpy as np, pandas as pd
+from scipy.optimize import least_squares, linprog
+from scipy.signal import savgol_filter
+from numba import njit
+import json
+names=['a1','a2','a3','b1','b2','b3']
+r=.003002/2
+d=.20346+.815*(.3920-.4120)/4.862
+h=d+r
+b=1.00003-d
+print('geometry',d,h,b)
+
+# Counter jumps are located between the bracketing GPS checks. Their exact
+# position within that second will be refined from the swing residuals.
+def load(n):
+ s=pd.read_csv('/app/data/sync/'+n+'.csv'); st=s.gps_s.to_numpy()-s.gps_s.iloc[0]
+ sf=np.round(np.unwrap(s.frame_counter.to_numpy()*2*np.pi/65536)*65536/(2*np.pi))
+ # Preliminary rate from the first unaffected portion.
+ rate=np.polyfit(st[:20],sf[:20],1)[0]
+ jumps=np.round(np.diff(sf)-rate*np.diff(st)).astype(int)
+ ji=np.flatnonzero(jumps < -1)
+ lost=-jumps[ji]; cumulative=np.zeros(len(st))
+ for j,k in zip(ji,lost): cumulative[j+1:]+=k
+ corrected=sf+cumulative
+ fit=np.polyfit(st,corrected,1)
+ # Each first-lit frame is within one frame after a whole GPS second.
+ # Linear feasibility bounds improve upon regression when phases repeat.
+ A=np.column_stack([st,np.ones(len(st))])
+ rr=linprog([1,0],A_ub=np.vstack([A,-A]),b_ub=np.r_[corrected,1-corrected],bounds=[(None,None),(None,None)],method='highs')
+ rr2=linprog([-1,0],A_ub=np.vstack([A,-A]),b_ub=np.r_[corrected,1-corrected],bounds=[(None,None),(None,None)],method='highs')
+ if rr.success and rr2.success:
+  rate=(rr.x[0]+rr2.x[0])/2
+  print(n,'fps OLS',fit[0],'bounds',rr.x[0],rr2.x[0])
+ else:
+  rate=fit[0]; print(n,'clock infeasible, fps',rate)
+ x=pd.read_csv('/app/data/runs/'+n+'.csv',comment='#')
+ f=np.round(np.unwrap(x.frame_counter.to_numpy()*2*np.pi/65536)*65536/(2*np.pi))
+ y=x.theta.to_numpy()*(np.pi/180 if n[0]=='a' else 1)
+ ok=x.tracker_ok.to_numpy()==1
+ gaps=[]
+ for j,k in zip(ji,lost):
+  # Default position at midpoint in delivered-counter space.
+  lo,hi=sf[j],sf[j+1]; cut=(lo+hi)/2
+  gaps.append((lo-f[0],hi-f[0],int(k),cut-f[0]))
+ f-=f[0]
+ fc=f.copy()
+ for lo,hi,k,cut in gaps: fc[f>=cut]+=k
+ t=fc/rate
+ print(n,'gaps',gaps,'duration',t[-1])
+ return dict(n=n,f=f,y=y,ok=ok,t=t,rate=rate,gaps=gaps)
+data=[load(n) for n in names]
+
+@njit(cache=True)
+def integrate(t,w,amp,release,lin,quad,coul,rolling):
+ # ODE uses angular damping per unit small-angle inertia.
+ out=np.empty(len(t)); th=amp; v=0.; time=release
+ for i in range(len(t)):
+  target=t[i]
+  if target<=release:
+   out[i]=amp;continue
+  steps=max(1,int(np.ceil((target-time)/.008)))
+  dt=(target-time)/steps
+  for j in range(steps):
+   k1x=v; k1v=acc(th,v,w,lin,quad,coul,rolling)
+   k2x=v+dt*k1v/2;k2v=acc(th+dt*k1x/2,k2x,w,lin,quad,coul,rolling)
+   k3x=v+dt*k2v/2;k3v=acc(th+dt*k2x/2,k3x,w,lin,quad,coul,rolling)
+   k4x=v+dt*k3v;k4v=acc(th+dt*k3x,k4x,w,lin,quad,coul,rolling)
+   th+=dt*(k1x+2*k2x+2*k3x+k4x)/6
+   v+=dt*(k1v+2*k2v+2*k3v+k4v)/6
+  time=target;out[i]=th
+ return out
+@njit(cache=True)
+def acc(th,v,w,lin,quad,coul,rolling):
+ return -(w*w*np.sin(th)+rolling*np.sin(th)*v*v+lin*v+quad*v*abs(v)+coul*np.tanh(v/.005))/(1+2*rolling*(1-np.cos(th)))
+
+def project(th,cam):
+ roll,p,q=cam
+ return roll+np.arctan2(p*np.sin(th),np.cos(th)+q*np.sin(th))
+
+def physical(ws):
+ wa=np.mean(ws[:3]**2);wb=np.mean(ws[3:]**2)
+ g=(b*b-d*d)/(b/wb-h/wa)
+ k2=g*h/wa-d*d
+ return g,k2
+
+# parameters: camera roll,p,q; then per-run w, amplitude, release, linear,quadratic
+# Coulomb term initially disabled.
+def residual(par,stride=8,full=False):
+ cam=par[:3];pars=par[3:].reshape(6,5);g,k2=physical(pars[:,0]);rolling=r*h/(k2+d*d)
+ out=[]
+ for run,pp in zip(data,pars):
+  inds=np.flatnonzero(run['ok'])[::stride]
+  # Mask the one-second interval whose exact lost-frame position is unknown.
+  for lo,hi,k,cut in run['gaps']:
+   inds=inds[(run['f'][inds]<lo)|(run['f'][inds]>hi)]
+  w,amp,release,lin,quad=pp
+  th=integrate(run['t'][inds],w,amp,release,lin,quad,0.,rolling if run['n'][0]=='a' else 0.)
+  out.append(project(th,cam)-run['y'][inds])
+ return out if full else np.concatenate(out)
+
+if __name__=='__main__':
+ cam=[.015,.85,-.25];pars=[]
+ for run in data:
+  # Start near the time at which the held angle first changes.
+  y=run['y'];start=np.mean(y[:80]);sm=savgol_filter(y,31,2)
+  release=run['t'][np.flatnonzero(abs(sm-start)>.003)[0]]-.08
+  amp=np.arctan2(np.tan(start-cam[0]),cam[1]-cam[2]*np.tan(start-cam[0]))
+  pars.extend([2*np.pi/(1.81 if run['n'][0]=='a' else 1.97),amp,release,.024,.012])
+ p0=np.r_[cam,pars]
+ lo=np.r_[[-.15,.3,-2],np.tile([3,-1.5,.3,0,0],6)]
+ hi=np.r_[[.15,1.8,2],np.tile([3.7,1.5,1.6,.2,.2],6)]
+ print('start',p0)
+ fit=least_squares(residual,p0,bounds=(lo,hi),loss='soft_l1',f_scale=.001,verbose=2,x_scale='jac',diff_step=1e-5,max_nfev=150,ftol=1e-10,xtol=1e-10,gtol=1e-10)
+ np.save('/app/fit.npy',fit.x)
+ print('camera',fit.x[:3]);print('runs',fit.x[3:].reshape(6,5));print('g,k2',physical(fit.x[3:].reshape(6,5)[:,0]))
+ for n,rr in zip(names,residual(fit.x,full=True)):
+  print(n,'rms',np.sqrt(np.mean(rr**2)),'robust',np.percentile(abs(rr),[50,90,95,99]))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/reduce.py > /app/fit.log 2>&1
+
+OBS: t-frame position is unknown.
+>   for lo,hi,k,cut in run['gaps']:
+>    inds=inds[(run['f'][inds]<lo)|(run['f'][inds]>hi)]
+>   w,amp,release,lin,quad=pp
+>   th=integrate(run['t'][inds],w,amp,release,lin,quad,0.,rolling if run['n'][0]=='a' else 0.)
+>   out.append(project(th,cam)-run['y'][inds])
+>  return out if full else np.concatenate(out)
+>
+> if __name__=='__main__':
+>  cam=[.015,.85,-.25];pars=[]
+>  for run in data:
+>   # Start near the time at which the held angle first changes.
+>   y=run['y'];start=np.mean(y[:80]);sm=savgol_filter(y,31,2)
+>   release=run['t'][np.flatnonzero(abs(sm-start)>.003)[0]]-.08
+>   amp=np.arctan2(np.tan(start-cam[0]),cam[1]-cam[2]*np.tan(start-cam[0]))
+>   pars.extend([2*np.pi/(1.81 if run['n'][0]=='a' else 1.97),amp,release,.024,.012])
+>  p0=np.r_[cam,pars]
+>  lo=np.r_[[-.15,.3,-2],np.tile([3,-1.5,.3,0,0],6)]
+>  hi=np.r_[[.15,1.8,2],np.tile([3.7,1.5,1.6,.2,.2],6)]
+>  print('start',p0)
+>  fit=least_squares(residual,p0,bounds=(lo,hi),loss='soft_l1',f_scale=.001,verbose=2,x_scale='jac',diff_step=1e-5,max_nfev=150,ftol=1e-10,xtol=1e-10,gtol=1e-10
+)
+>  np.save('/app/fit.npy',fit.x)
+>  print('camera',fit.x[:3]);print('runs',fit.x[3:].reshape(6,5));print('g,k2',physical(fit.x[3:].reshape(6,5)[:,0]))
+>  for n,rr in zip(names,residual(fit.x,full=True)):
+>   print(n,'rms',np.sqrt(np.mean(rr**2)),'robust',np.percentile(abs(rr),[50,90,95,99]))
+> PY
+root@6194d492ab96:/app# OPENBLAS_NUM_THREADS=1 python3 /app/reduce.py > /app/fit.log 2>&1
+root@6194d492ab96:/app#
+
+
+#### step 9 22:15:40
+MSG: Analysis: The first simultaneous physical fit has finished. It includes GPS rate calibration and masks intervals containing dropped frames, so their uncertain locations cannot bias the period estimate.
+Plan: Inspect fit convergence and residuals, then check whether the damping model and camera projection adequately explain the data.
+CMD: cat /app/fit.log
+
+OBS:        26         1.3457e-03      1.26e-04       1.73e-03       1.31e-01
+      20             27         1.3373e-03      8.40e-06       4.27e-04       2.35e-03
+      21             28         1.3372e-03      3.50e-08       2.70e-05       8.73e-06
+      22             29         1.3372e-03      8.24e-14       4.61e-08       3.77e-09
+`ftol` termination condition is satisfied.
+Function evaluations 29, initial cost 8.4577e-01, final cost 1.3372e-03, first-order optimality 3.77e-09.
+camera [ 0.01569952  0.93906843 -0.13403781]
+runs [[ 3.47229308  0.41401036  0.8306986   0.02221244  0.01999587]
+ [ 3.47225525 -0.45342048  1.21188789  0.02229031  0.01991326]
+ [ 3.47230077  0.28641923  0.67226284  0.02216281  0.02013059]
+ [ 3.20286306  0.84089741  1.09131309  0.02219814  0.01999113]
+ [ 3.2027573  -0.40343566  0.94020668  0.02235517  0.01978785]
+ [ 3.2028423  -0.61751255  1.36883143  0.02220692  0.01998548]]
+g,k2 (np.float64(9.791871559300644), np.float64(0.12369302632941653))
+a1 rms 0.00034651753523379166 robust [0.00023648 0.00058426 0.00068354 0.00086356]
+a2 rms 0.0005774116476048802 robust [0.00038525 0.00095248 0.00115823 0.00146451]
+a3 rms 0.0004966077084367015 robust [0.00031964 0.00080655 0.0009883  0.00129095]
+b1 rms 0.00036455297482875773 robust [0.00024815 0.00059206 0.000714   0.00095908]
+b2 rms 0.0004798272671015018 robust [0.00031473 0.00080222 0.00095775 0.00127044]
+b3 rms 0.0003458107835029781 robust [0.00024524 0.00056521 0.00066223 0.00088688]
+root@6194d492ab96:/app#
+
+
+#### step 10 22:15:59
+MSG: Analysis: The simultaneous fit explains the angle trajectories well and returns plausible gravity and geometry. However, three GPS calibrations are infeasible because quantized clock checks caused the preliminary dropped-frame counts to be underestimated by one. This must be fixed before the final high-precision fit.
+Plan: Search nearby integer loss counts and require a physically valid first-lit-frame clock model. Then refit with the corrected timing and denser angle sampling.
+CMD: cat > /app/check_clocks.py <<'PY'
+import numpy as np,pandas as pd,itertools
+from scipy.optimize import linprog
+for n in ['a1','a2','a3','b1','b2','b3']:
+ s=pd.read_csv('/app/data/sync/'+n+'.csv');t=s.gps_s.to_numpy()-s.gps_s.iloc[0];f=np.round(np.unwrap(s.frame_counter.to_numpy()*2*np.pi/65536)*65536/(2*np.pi))
+ rate=np.polyfit(t[:20],f[:20],1)[0];delta=np.round(np.diff(f)-rate*np.diff(t)).astype(int);ji=np.flatnonzero(delta<-1);base=-delta[ji]
+ print(n,'gap seconds',t[ji])
+ for counts in itertools.product(*[range(max(0,k-2),k+3) for k in base]):
+  cf=f.copy()
+  for j,k in zip(ji,counts):cf[j+1:]+=k
+  A=np.column_stack([t,np.ones(len(t))]);kwargs=dict(A_ub=np.vstack([A,-A]),b_ub=np.r_[cf,1-cf],bounds=[(None,None),(None,None)],method='highs')
+  lo=linprog([1,0],**kwargs);hi=linprog([-1,0],**kwargs)
+  if lo.success and hi.success:print('feasible losses',counts,'rate interval',lo.x[0],hi.x[0])
+PY
+python3 /app/check_clocks.py
+
+OBS: New Terminal Output:
+
+root@6194d492ab96:/app# cat > /app/check_clocks.py <<'PY'
+> import numpy as np,pandas as pd,itertools
+> from scipy.optimize import linprog
+> for n in ['a1','a2','a3','b1','b2','b3']:
+>  s=pd.read_csv('/app/data/sync/'+n+'.csv');t=s.gps_s.to_numpy()-s.gps_s.iloc[0];f=np.round(np.unwrap(s.frame_counter.to_numpy()*2*np.pi/65536)*65536/(2*np.pi)
+)
+>  rate=np.polyfit(t[:20],f[:20],1)[0];delta=np.round(np.diff(f)-rate*np.diff(t)).astype(int);ji=np.flatnonzero(delta<-1);base=-delta[ji]
+>  print(n,'gap seconds',t[ji])
+>  for counts in itertools.product(*[range(max(0,k-2),k+3) for k in base]):
+>   cf=f.copy()
+>   for j,k in zip(ji,counts):cf[j+1:]+=k
+>   A=np.column_stack([t,np.ones(len(t))]);kwargs=dict(A_ub=np.vstack([A,-A]),b_ub=np.r_[cf,1-cf],bounds=[(None,None),(None,None)],method='highs')
+>   lo=linprog([1,0],**kwargs);hi=linprog([-1,0],**kwargs)
+>   if lo.success and hi.success:print('feasible losses',counts,'rate interval',lo.x[0],hi.x[0])
+> PY
+root@6194d492ab96:/app# python3 /app/check_clocks.py
+a1 gap seconds []
+feasible losses () rate interval 240.74285714285713 240.74468085106383
+a2 gap seconds [48]
+feasible losses (5,) rate interval 239.42307692307693 239.42424242424244
+a3 gap seconds [33 60]
+
+
+
+#### step 11 22:16:23
+MSG: Analysis: The integer search confirms that a2 lost five frames, not four. The other clock searches are still completing. The current fit's damping estimates are consistent across runs, supporting the chosen physical model.
+Plan: Finish the clock search, apply the uniquely feasible loss counts, and refine the shared-camera trajectory fit using more samples.
+CMD: 
+CMD: cp /app/reduce.py /app/reduce_initial.py; python3 - <<'PY'
+p='/app/reduce.py'
+s=open(p).read().replace('lost=-jumps[ji]; cumulative=np.zeros(len(st))',"lost=np.array({'a1':[], 'a2':[5], 'a3':[3,9], 'b1':[7], 'b2':[4], 'b3':[11,3]}[n]); cumulative=np.zeros(len(st))")
+s=s.replace('def residual(par,stride=8,full=False):','def residual(par,stride=2,full=False):')
+s=s.replace('p0=np.r_[cam,pars]','p0=np.load("/app/fit.npy")')
+s=s.replace("f_scale=.001","f_scale=.0006")
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/reduce.py > /app/refit.log 2>&1
+
+OBS: New Terminal Output:
+
+a3 gap seconds [33 60]
+feasible losses (3, 9) rate interval 241.19767441860466 241.20238095238096
+b1 gap seconds [22]
+feasible losses (7,) rate interval 239.135593220339 239.13698630136986
+b2 gap seconds [70]
+feasible losses (4,) rate interval 240.45454545454547 240.4561403508772
+b3 gap seconds [39 78]
+feasible losses (11, 3) rate interval 238.8709677419355 238.87234042553192
+root@6194d492ab96:/app# cp /app/reduce.py /app/reduce_initial.py; python3 - <<'PY'
+> p='/app/reduce.py'
+> s=open(p).read().replace('lost=-jumps[ji]; cumulative=np.zeros(len(st))',"lost=np.array({'a1':[], 'a2':[5], 'a3':[3,9], 'b1':[7], 'b2':[4], 'b3':[11,3]}[n]);
+cumulative=np.zeros(len(st))")
+> s=s.replace('def residual(par,stride=8,full=False):','def residual(par,stride=2,full=False):')
+> s=s.replace('p0=np.r_[cam,pars]','p0=np.load("/app/fit.npy")')
+> s=s.replace("f_scale=.001","f_scale=.0006")
+> open(p,'w').write(s)
+> PY
+root@6194d492ab96:/app# OPENBLAS_NUM_THREADS=1 python3 /app/reduce.py > /app/refit.log 2>&1
+root@6194d492ab96:/app#
+
+
+#### step 12 22:16:53
+MSG: Analysis: Each clock now has a unique feasible integer-loss correction, and the denser fit has completed. The corrected rates are constrained to a few parts per million by the GPS logs.
+Plan: Inspect the refined parameters and quantify uncertainty and residual structure before writing the result.
+CMD: cat /app/refit.log
+
+CMD: cat > /app/validate.py <<'PY'
+import reduce as m
+import numpy as np
+from scipy.optimize._numdiff import approx_derivative
+p=np.load('/app/fit.npy');pp=p[3:].reshape(6,5)
+print('periods',2*np.pi/pp[:,0]);print('amplitudes',abs(pp[:,1]));g,k2=m.physical(pp[:,0]);print('g,k',g,np.sqrt(k2))
+res=m.residual(p)
+J=approx_derivative(m.residual,p,method='3-point',rel_step=1e-5)
+var=np.median(abs(res))**2/.67449**2
+cov=np.linalg.inv(J.T@J)*var
+print('estimated parameter sd',np.sqrt(np.diag(cov)))
+for run,rr in zip(m.data,m.residual(p,full=True)):
+ inds=np.flatnonzero(run['ok'])[::2]
+ for lo,hi,k,cut in run['gaps']:inds=inds[(run['f'][inds]<lo)|(run['f'][inds]>hi)]
+ print(run['n'],'residual blocks median, rms')
+ for lo,hi in [(0,10),(10,30),(30,60),(60,90)]:
+  sel=(run['t'][inds]>=lo)&(run['t'][inds]<hi)
+  print(lo,hi,np.median(rr[sel]),np.sqrt(np.mean(rr[sel]**2)))
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/validate.py
+
+OBS: 966e-06 2.18745466e-05 1.06571659e-05 7.37738199e-06
+ 8.29867036e-06]
+a1 residual blocks median, rms
+0 10 1.1747909488797961e-05 0.00035794511669238495
+10 30 1.8837146217032252e-06 0.0003577866597821479
+30 60 6.051661503234107e-06 0.0003442370866126832
+60 90 -6.792436889882167e-06 0.0003499041034356877
+a2 residual blocks median, rms
+0 10 1.7415164425133023e-05 0.0003530650737171959
+10 30 -4.60148700687224e-06 0.00034986029394204016
+30 60 8.998152364075862e-06 0.000353690480593643
+60 90 6.83925392375162e-06 0.0003509677584004638
+a3 residual blocks median, rms
+0 10 -1.3652198060432053e-05 0.00034670340414600623
+10 30 -7.525112934898825e-07 0.00036084359728735446
+30 60 -9.92756398521255e-06 0.00035277330498709506
+60 90 -1.4757561008674203e-05 0.0003467227387508657
+b1 residual blocks median, rms
+0 10 2.745183229513337e-06 0.0003616642095022884
+10 30 1.1392503829976697e-05 0.0003456421644457437
+30 60 1.485672904050217e-05 0.0003460103362143945
+60 90 -4.625814888248314e-06 0.0003508171128302614
+b2 residual blocks median, rms
+0 10 -1.9963482548235323e-05 0.00036011560829413695
+10 30 -1.3839191428943742e-06 0.0003529790810843491
+30 60 -6.767444656073651e-06 0.0003539192725776454
+60 90 5.248635718789474e-06 0.0003506306595800828
+b3 residual blocks median, rms
+0 10 -3.7367154587630846e-05 0.00033925555683512624
+10 30 -5.717415480332999e-06 0.0003490263208681834
+30 60 -6.926844636601093e-06 0.0003491026325842694
+60 90 1.0754645211635827e-05 0.0003469216201231369
+root@6194d492ab96:/app#
+
+
+#### step 13 22:17:26
+MSG: Analysis: The corrected fit leaves stationary, approximately Gaussian angle residuals of 0.00035 radians in every run, with no material early/late drift. Estimated fitting uncertainties are far below the requested tolerances. The six infinitesimal periods agree closely within each pivot; gravity is about 9.79184 m/s² and the centre-of-mass radius of gyration about 0.351700 m.
+Plan: Perform one final fit using every valid frame, then write the required five-member JSON object and verify its schema and numerical values.
+CMD: cat > /app/finalize.py <<'PY'
+import reduce as m
+import numpy as np,json,os
+from scipy.optimize import least_squares
+p=np.load('/app/fit.npy')
+fit=least_squares(lambda z:m.residual(z,stride=1),p,loss='linear',x_scale='jac',diff_step=1e-5,ftol=1e-11,xtol=1e-11,gtol=1e-9,max_nfev=20)
+p=fit.x;np.save('/app/final_fit.npy',p)
+params=p[3:].reshape(6,5)
+periods=2*np.pi/params[:,0]
+# Combine the replicate infinitesimal frequencies at each pivot.
+wa2=float(np.mean(params[:3,0]**2));wb2=float(np.mean(params[3:,0]**2))
+g,k2=m.physical(params[:,0])
+result={
+ 'g_m_s2':float(g),
+ 'small_amplitude_period_s':{'a':float(2*np.pi/np.sqrt(wa2)),'b':float(2*np.pi/np.sqrt(wb2))},
+ 'radius_of_gyration_m':float(np.sqrt(k2)),
+ 'run_periods_s':dict(zip(m.names,map(float,periods))),
+ 'release_amplitude_rad':dict(zip(m.names,map(float,abs(params[:,1]))))
+}
+os.makedirs('/app/output',exist_ok=True)
+with open('/app/output/result.json','w') as f:json.dump(result,f,indent=2,allow_nan=False);f.write('\n')
+print('final camera',p[:3]);print('final fit',fit.message)
+print(json.dumps(result,indent=2))
+assert set(result)=={'g_m_s2','small_amplitude_period_s','radius_of_gyration_m','run_periods_s','release_amplitude_rad'}
+assert set(result['small_amplitude_period_s'])=={'a','b'}
+for key in ['run_periods_s','release_amplitude_rad']:assert set(result[key])==set(m.names)
+def check(v):
+ if isinstance(v,dict):
+  for x in v.values():check(x)
+ else:assert type(v) in (float,int) and np.isfinite(v) and v>0
+check(result)
+print('Schema and finite positive numbers verified.')
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/finalize.py > /app/final.log 2>&1
+
+CMD: tail -n 32 /app/final.log; cat /app/output/result.json
+
+OBS: np.float64(9561.0), 11, np.float64(9447.0)), (np.float64(18638.0), np.float64(18874.0), 3, np.float64(18756.0))] duration 89.99393
+453550782
+final camera [ 0.01569986  0.93983699 -0.13403352]
+final fit `gtol` termination condition is satisfied.
+{
+  "g_m_s2": 9.791828982832532,
+  "small_amplitude_period_s": {
+    "a": 1.8095292066584876,
+    "b": 1.9617702315620968
+  },
+  "radius_of_gyration_m": 0.35170008999090335,
+  "run_periods_s": {
+    "a1": 1.8095303774667924,
+    "a2": 1.8095292735457928,
+    "a3": 1.8095279689652883,
+    "b1": 1.9617660490736084,
+    "b2": 1.9617750087678523,
+    "b3": 1.9617696368759263
+  },
+  "release_amplitude_rad": {
+    "a1": 0.4137100502702664,
+    "a2": 0.4528823848245286,
+    "a3": 0.286094335430311,
+    "b1": 0.8405970520325131,
+    "b2": 0.40312110805862433,
+    "b3": 0.6172156848923522
+  }
+}
+Schema and finite positive numbers verified.
+{
+  "g_m_s2": 9.791828982832532,
+  "small_amplitude_period_s": {
+    "a": 1.8095292066584876,
+    "b": 1.9617702315620968
+  },
+  "radius_of_gyration_m": 0.35170008999090335,
+  "run_periods_s": {
+    "a1": 1.8095303774667924,
+    "a2": 1.8095292735457928,
+    "a3": 1.8095279689652883,
+    "b1": 1.9617660490736084,
+    "b2": 1.9617750087678523,
+    "b3": 1.9617696368759263
+  },
+  "release_amplitude_rad": {
+    "a1": 0.4137100502702664,
+    "a2": 0.4528823848245286,
+    "a3": 0.286094335430311,
+    "b1": 0.8405970520325131,
+    "b2": 0.40312110805862433,
+    "b3": 0.6172156848923522
+  }
+}
+root@6194d492ab96:/app#
+
+
+#### step 14 22:17:31
+MSG: Analysis: The reduction is complete. GPS-calibrated timing, dropped frames, invalid tracker samples, oblique camera projection, nonlinear swing motion, damping, shifted centre of mass, and pivot A's rolling pin were accounted for. The final fit converged, and /app/output/result.json contains exactly the requested members with finite positive JSON numbers.
+Plan: No further commands are needed.
+CMD: 
+OBS: Current terminal state:
+New Terminal Output:
+
+root@6194d492ab96:/app#
+
+
+Are you sure you want to mark the task as complete? This will trigger your solution to be graded and you won't be able to make any further corrections. If so, include "task_complete": true in your JSON response again.
+
+#### step 15 22:17:34
+MSG: Analysis: The requested result file has been written and verified. The task is ready for grading.
+Plan: Confirm completion without changing the verified output.
+CMD: 
+OBS: New Terminal Output:
+
+root@6194d492ab96:/app#
+
+

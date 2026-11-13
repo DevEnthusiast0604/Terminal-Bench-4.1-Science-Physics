@@ -1,0 +1,2431 @@
+#### step 2 00:55:35
+MSG: Analysis: The output directory has not yet been inspected and no implementation exists. The required accuracy rules out a low-order mixture formula; the program needs numerical classical scattering and a converged solution of the linearized collision equations.
+Plan: Inspect the available tools and create a workspace. I will implement an orthonormal Sonine-polynomial collision-bracket solver, test its normalization against hard-sphere limits, and then add accurate Kihara scattering quadrature and convergence checks.
+CMD: mkdir -p /app/output /app/work && ls -la /app && which gcc g++ && python3 - <<'PY'
+import numpy, scipy, sympy
+print(numpy.__version__,scipy.__version__,sympy.__version__)
+PY
+
+OBS: New Terminal Output:
+root@627da822ee8d:/app# mkdir -p /app/output /app/work && ls -la /app && which gcc g++ && python3 - <<'PY'
+> import numpy, scipy, sympy
+> print(numpy.__version__,scipy.__version__,sympy.__version__)
+> PY
+total 16
+drwxr-xr-x 1 root root 4096 Nov  3 00:55 .
+drwxr-xr-x 1 root root 4096 Nov  3 00:51 ..
+drwxr-xr-x 2 root root 4096 Nov  3 00:51 output
+drwxr-xr-x 2 root root 4096 Nov  3 00:55 work
+root@627da822ee8d:/app#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#### step 3 00:55:40
+MSG: Analysis: The workspace directories exist, but the command chain stopped at the compiler lookup. The final program must therefore be designed around the supplied Python numerical libraries, unless another usable compiler is available.
+Plan: Check the installed numerical packages and executables separately, then develop a vectorized quadrature formulation that uses numpy for the expensive collision-bracket operations.
+CMD: command -v gcc; command -v cc; command -v clang; command -v g++; python3 - <<'PY'
+import numpy, scipy, sympy
+print(numpy.__version__,scipy.__version__,sympy.__version__)
+PY
+ls /usr/bin | head
+
+OBS: New Terminal Output:
+
+root@627da822ee8d:/app# command -v gcc; command -v cc; command -v clang; command -v g++; python3 - <<'PY'
+> import numpy, scipy, sympy
+> print(numpy.__version__,scipy.__version__,sympy.__version__)
+> PY
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#### step 4 00:55:43
+MSG: Analysis: The package-import check has not yet returned output.
+Plan: Wait briefly for the environment probe to finish.
+CMD: 
+OBS: New Terminal Output:
+
+> PY
+2.3.3 1.18.1 1.14.0
+root@627da822ee8d:/app# ls /usr/bin | head
+[
+addpart
+apt
+apt-cache
+apt-cdrom
+apt-config
+apt-get
+apt-key
+apt-mark
+arch
+root@627da822ee8d:/app#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#### step 5 00:58:40
+MSG: Analysis: The numerical libraries are available, but no C/C++ compiler was found. I have derived a collision-bracket formulation using generating functions for vector and traceless-tensor Sonine polynomials. This avoids expensive multidimensional velocity quadrature and supports increasing the polynomial order until the transport coefficients converge.
+Plan: Implement the bracket generator and transport-system normalization first. Test it with hard-sphere collision cross sections, whose lowest-order diffusion and viscosity values provide useful independent checks. Then implement the actual Kihara cross sections.
+CMD: cat > /app/work/brackets.py <<'PY'
+import numpy as np
+from scipy.special import roots_genlaguerre, roots_legendre, eval_genlaguerre, gammaln
+from scipy.linalg import solve
+import time
+
+def series(nu,N,e,h,a,b,p,q):
+    B=b*b; C=q*q; E=1-a*a-p*p; F=B*C+a*p*b*q*h
+    shape=np.broadcast_shapes(e.shape,h.shape)
+    out=np.zeros((N+1,N+1)+shape)
+    for m in range(N+1):
+        out[0,m]=C**m*eval_genlaguerre(m,nu-1,e)
+    for n in range(N):
+        v0=B*(nu-e+2*n)
+        v1=-(nu+2*n)*(E+B*C)+2*e*F
+        v2=(nu+2*n)*C*E-e*(2*F*C-C*E)
+        w0=-(nu+n-1)*B*B
+        w1=2*(nu+n-1)*B*E
+        w2=-(nu+n-1)*E*E
+        for m in range(N+1):
+            val=v0*out[n,m]
+            if m>=1: val=val+v1*out[n,m-1]+(n+1)*2*C*out[n+1,m-1]
+            if m>=2: val=val+v2*out[n,m-2]-(n+1)*C*C*out[n+1,m-2]
+            if n>=1:
+                val=val+w0*out[n-1,m]
+                if m>=1: val=val+w1*out[n-1,m-1]
+                if m>=2: val=val+w2*out[n-1,m-2]
+            out[n+1,m]=val/(n+1)
+    return out
+
+def polyadd(dst,src,poly):
+    N=dst.shape[0]-1
+    for (i,j),v in poly.items():
+        if i<=N and j<=N:
+            dst[i:,j:]+=v*src[:N+1-i,:N+1-j]
+
+def polymul(P,Q):
+    out={}
+    for (i,j),v in P.items():
+        for (k,l),w in Q.items():
+            key=(i+k,j+l)
+            out[key]=out.get(key,0)+v*w
+    return out
+
+def correlation(l,N,e,h,a,b,p,q):
+    ap=a*p; bq=b*q; B=b*b; C=q*q
+    H={(0,0):bq*h,(1,0):-bq*B*h-ap*B,(0,1):-bq*C*h-ap*C,(1,1):bq*(B*C+ap*ap)*h+2*ap*B*C}
+    if l==1:
+        out=1.5*ap*series(2.5,N,e,h,a,b,p,q)
+        polyadd(out,series(3.5,N,e,h,a,b,p,q),{k:e*v for k,v in H.items()})
+    else:
+        out=2.5*ap*ap*series(3.5,N,e,h,a,b,p,q)
+        polyadd(out,series(4.5,N,e,h,a,b,p,q),{k:(10/3)*ap*e*v for k,v in H.items()})
+        Hc={(0,0):B,(0,1):-2*B*C-2*ap*bq*h,(0,2):B*C*C+ap*ap*C+2*ap*bq*C*h}
+        Hd={(0,0):C,(1,0):-2*B*C-2*ap*bq*h,(2,0):C*B*B+ap*ap*B+2*ap*bq*B*h}
+        HH=polymul(H,H); CD=polymul(Hc,Hd)
+        for k,v in CD.items(): HH[k]=HH.get(k,0)-v/3
+        polyadd(out,series(5.5,N,e,h,a,b,p,q),{k:e*e*v for k,v in HH.items()})
+    return out
+
+def angle_weights(L,h,wh,Q):
+    # Q shape energies x L
+    P0=np.ones_like(h); P1=h.copy()
+    out=np.zeros((len(Q),len(h)))
+    for l in range(1,L+1):
+        if l==1: P=P1
+        else:
+            P=((2*l-1)*h*P1-(l-1)*P0)/l
+            P0,P1=P1,P
+        out+=(2*l+1)*Q[:,l-1,None]*P[None,:]*wh[None,:]/2
+    return out
+
+def matrix(l,N,R,X,T,e,we,Q):
+    L=2*N+l
+    h,wh=roots_legendre(L+1)
+    aw=angle_weights(L,h,wh,Q[:,:L])
+    base=we[:,None]*aw
+    def integrate(a,b,p,q,mu):
+        C=correlation(l,N,e[:,None],h[None,:],a,b,p,q)
+        vals=np.einsum('ijuv,uv->ij',C,base,optimize=True)*2/np.sqrt(np.pi)*np.sqrt(2*T/mu)
+        return (vals+vals.T)/2 if a==p and b==q else vals
+    r=np.sqrt(.5)
+    self1=integrate(r,r,r,r,.5)+integrate(r,r,r,-r,.5)
+    self2=self1/np.sqrt(R)
+    a=np.sqrt(1/(1+R)); b=np.sqrt(R/(1+R)); mu=R/(1+R)
+    aa=integrate(a,b,a,b,mu)
+    bb=integrate(b,-a,b,-a,mu)
+    ab=integrate(a,b,b,-a,mu)
+    x=X; y=1-X
+    B=np.block([[x*x*self1+x*y*aa,x*y*ab],[x*y*ab.T,y*y*self2+x*y*bb]])
+    # Normalize each Sonine basis to unit Maxwell norm.
+    norm=np.sqrt(np.exp(gammaln(np.arange(N+1)+l+1.5)-gammaln(np.arange(N+1)+1)-gammaln(l+1.5))*(1.5 if l==1 else 2.5))
+    norm=np.tile(norm,2)
+    B/=norm[:,None]*norm[None,:]
+    return B,norm
+
+def transport(N,R,X,T,e,we,Q):
+    B,norm=matrix(2,N,R,X,T,e,we,Q)
+    rhs=np.zeros(2*(N+1)); rhs[0]=5*X; rhs[N+1]=5*(1-X)
+    aa=solve(B,rhs/norm,assume_a='sym')/norm
+    eta=T/2*(X*aa[0]+(1-X)*aa[N+1])
+    B,norm=matrix(1,N,R,X,T,e,we,Q)
+    rhs=np.zeros((2*(N+1),2))
+    rhs[0,0]=1.5*np.sqrt(2*T); rhs[N+1,0]=-1.5*np.sqrt(2*T/R)
+    rhs[1,1]=-3.75*X*np.sqrt(2*T); rhs[N+2,1]=-3.75*(1-X)*np.sqrt(2*T/R)
+    null=np.zeros(2*(N+1)); null[0]=X; null[N+1]=(1-X)*np.sqrt(R)
+    null/=norm
+    border=np.zeros((len(B)+1,len(B)+1)); border[:-1,:-1]=B; border[-1,:-1]=null; border[:-1,-1]=null
+    rr=np.zeros((len(B)+1,2)); rr[:-1]=rhs/norm[:,None]
+    ab=solve(border,rr,assume_a='sym')[:-1]/norm[:,None]
+    delta=ab[0]-ab[N+1]/np.sqrt(R)
+    D=X*(1-X)*np.sqrt(2*T)/2*delta[0]
+    ratio=delta[1]/delta[0]
+    h=ab[:,1]-ratio*ab[:,0]
+    lam=-1.25*np.sqrt(2*T)*(X*h[1]+(1-X)*h[N+2]/np.sqrt(R))
+    alpha=ratio/(X*(1-X))
+    return np.array([eta,lam,D,alpha])
+
+if __name__=='__main__':
+    e,we=roots_genlaguerre(55,1)
+    Q=np.full((len(e),42),np.pi)
+    for R,X in [(1,.5),(10,.3),(100,.001),(100,.95)]:
+        for N in [1,2,3,5,8,12]:
+            st=time.time(); v=transport(N,R,X,1.,e,we,Q)
+            print(R,X,N,v,'time',time.time()-st,flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/brackets.py
+
+OBS: 131393432617
+100 0.001 3 [ 1.79103221  0.06805302  0.16753876 -0.4678827 ] time 0.0077245235443115234
+100 0.001 5 [ 1.79107889  0.06808424  0.16865115 -0.48358834] time 0.017192363739013672
+100 0.001 8 [ 1.79108173  0.06808822  0.16918314 -0.49062151] time 0.04478311538696289
+100 0.001 12 [ 1.79108184  0.06808931  0.16940997 -0.49350563] time 0.1476273536682129
+100 0.95 1 [ 0.49661759  0.59719782  0.15157864 -0.81750329] time 0.0021789073944091797
+100 0.95 2 [ 0.49680547  0.61337941  0.15170356 -0.86051958] time 0.0032548904418945312
+100 0.95 3 [ 0.49682979  0.61512298  0.15172888 -0.86687485] time 0.005188703536987305
+100 0.95 5 [ 0.49683505  0.61550624  0.15173875 -0.86872797] time 0.01198267936706543
+100 0.95 8 [ 0.49683535  0.6155374   0.1517406  -0.86895588] time 0.03267192840576172
+
+
+
+#### step 6 00:58:50
+MSG: Analysis: The hard-sphere tests reproduce the known leading transport scales and show systematic convergence. Thermal diffusion for a large mass ratio converges more slowly than viscosity, so higher polynomial orders and careful numerical stabilization will be necessary.
+Plan: Probe the high-order stability of the bracket recurrence and verify its generating-function identity. In parallel, derive and implement classical deflection-angle quadrature using the turning radius as the integration variable, which resolves orbiting trajectories without root-finding for every impact parameter.
+CMD: cat > /app/work/check.py <<'PY'
+from brackets import *
+e,we=roots_genlaguerre(110,1); Q=np.full((len(e),110),np.pi)
+for R,X in [(1,.5),(10,.3),(100,.001),(100,.95)]:
+ for N in [16,20,24,30,36,44]:
+  st=time.time()
+  try: v=transport(N,R,X,1,e,we,Q); print(R,X,N,v,time.time()-st,flush=True)
+  except Exception as ex: print(ex,flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/check.py
+
+OBS: New Terminal Output:
+
+100 0.95 8 [ 0.49683535  0.6155374   0.1517406  -0.86895588] time 0.03267192840576172
+100 0.95 12 [ 0.49683536  0.6155395   0.1517409  -0.86897994] time 0.11002898216247559
+root@627da822ee8d:/app# cat > /app/work/check.py <<'PY'
+> from brackets import *
+> e,we=roots_genlaguerre(110,1); Q=np.full((len(e),110),np.pi)
+> for R,X in [(1,.5),(10,.3),(100,.001),(100,.95)]:
+>  for N in [16,20,24,30,36,44]:
+>   st=time.time()
+>   try: v=transport(N,R,X,1,e,we,Q); print(R,X,N,v,time.time()-st,flush=True)
+>   except Exception as ex: print(ex,flush=True)
+> PY
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/check.py
+
+
+
+#### step 7 00:59:00
+MSG: Analysis: The high-order tests are running. The thermal-diffusion sign follows the specified light-species convention: for the hard-sphere examples the lighter species preferentially gathers on the hot side, giving a negative factor.
+Plan: Collect the high-order results before choosing a stabilization method.
+CMD: 
+OBS: New Terminal Output:
+
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/check.py
+1 0.5 16 [1.79136177e-01 6.77832904e-01 2.15581167e-01 1.57293755e-16] 2.2015693187713623
+1 0.5 20 [ 1.79136177e-01  6.77832904e-01  2.15581167e-01 -2.25360634e-17] 2.0019149780273438
+1 0.5 24 [ 1.79136177e-01  6.77832904e-01  2.15581167e-01 -2.85916392e-16] 1.557387113571167
+
+
+
+#### step 8 00:59:18
+MSG: Analysis: The bracket calculation remains stable through order 24 in the first test. The scattering calculation will use separate inner and outer turning-point branches below the orbiting threshold, and a single monotone branch above it.
+Plan: Collect the rest of the convergence results and implement the scattering module. The impact-parameter integral will be split around the orbiting point, with quadrature clustered near its logarithmic deflection singularity.
+CMD: 
+OBS: New Terminal Output:
+
+1 0.5 24 [ 1.79136177e-01  6.77832904e-01  2.15581167e-01 -2.85916392e-16] 1.557387113571167
+1 0.5 30 [ 1.79136177e-01  6.77832904e-01  2.15581167e-01 -6.32848154e-17] 8.72160005569458
+
+
+
+#### step 9 01:00:00
+MSG: Analysis: The high-order convergence experiment is still running. The cross sections depend only on core ratio and reduced collision energy, so all mass pairs can share them.
+Plan: Implement turning-point-based scattering quadrature, including the orbiting-energy calculation. Then compare progressively refined quadratures to quantify the cross-section error rather than relying on a fixed empirical fit.
+CMD: cat > /app/work/scatter.py <<'PY'
+import numpy as np
+from scipy.special import roots_legendre
+from scipy.optimize import brentq, minimize_scalar
+from functools import lru_cache
+
+@lru_cache(None)
+def gauss(n):
+ x,w=roots_legendre(n)
+ return (x+1)/2,w/2
+
+def potential(r,A):
+ z=(1-A)/(r-A); z6=z**6
+ return 4*z6*(z6-1)
+
+def deriv(r,A):
+ z=(1-A)/(r-A); z6=z**6
+ return 24*z6*(1-2*z6)/(r-A)
+
+def orbit_energy(r,A):
+ return potential(r,A)+r*deriv(r,A)/2
+
+def critical(A):
+ rm=A+(1-A)*2**(1/6)
+ opt=minimize_scalar(lambda r:-orbit_energy(r,A),bounds=(rm,rm+2),method='bounded',options={'xatol':1e-14})
+ return opt.x,orbit_energy(opt.x,A)
+
+def branches(A,E):
+ rc,ec=critical(A)
+ z6=(1+np.sqrt(1+E))/2
+ r0=A+(1-A)*z6**(-1/6)
+ if E>=ec: return r0,None,None
+ ro=brentq(lambda r:orbit_energy(r,A)-E,rc,max(rc*2,2+5*(1/E)**(1/6)),xtol=1e-14)
+ ri=brentq(lambda r:orbit_energy(r,A)-E,A+(1-A)*2**(1/6),rc,xtol=1e-14)
+ Bc=ro*ro*(1-potential(ro,A)/E)
+ rin=brentq(lambda r:r*r*(1-potential(r,A)/E)-Bc,r0,ri,xtol=1e-14)
+ return r0,ro,rin
+
+def deflect(rt,A,E,ro=None,n=160):
+ rt=np.asarray(rt); b2=rt*rt*(1-potential(rt,A)/E)
+ u,w=gauss(n)
+ # transform t=1-u^2 to remove the turning-point square root
+ if ro is None:
+  uu=u[None,:]; ww=w[None,:]
+  t=1-uu*uu
+  r=rt[:,None]/t
+  f=1-b2[:,None]/(r*r)-potential(r,A)/E
+  return np.pi-4*np.sqrt(b2)/rt*np.sum(ww*uu/np.sqrt(np.maximum(f,1e-300)),axis=1)
+ # Inner branch: subdivide about the orbiting bottleneck in u.
+ uc=np.sqrt(np.maximum(0,1-rt/ro))
+ delta=np.maximum(0,ro*ro*(1-potential(ro,A)/E)-b2)
+ width=np.minimum(.08,np.maximum(2e-7,np.sqrt(delta)/(4*ro)))
+ edges=np.column_stack([np.zeros(len(rt)),np.maximum(0,uc-8*width),np.maximum(0,uc-width),uc,np.minimum(1,uc+width),np.minimum(1,uc+8*width),np.ones(len(rt))])
+ total=np.zeros(len(rt))
+ for j in range(edges.shape[1]-1):
+  lo=edges[:,j,None]; span=edges[:,j+1,None]-lo
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+  f=1-b2[:,None]/(r*r)-potential(r,A)/E
+  total+=np.sum(span*w*uu/np.sqrt(np.maximum(f,1e-300)),axis=1)
+ return np.pi-4*np.sqrt(b2)/rt*total
+
+def cross_sections(A,E,L,n=100,ndef=160):
+ r0,ro,rin=branches(A,E)
+ u,w=gauss(n)
+ rs=[]; ws=[]
+ if ro is not None:
+  # quadratic clustering on both sides of the critical impact parameter
+  for lo,hi in [(0,.5),(.5,.9),(.9,.99),(.99,.9999),(.9999,.99999999)]:
+   v=lo+(hi-lo)*u; rt=r0+(rin-r0)*v
+   db=2*rt*(1-potential(rt,A)/E)-rt*rt*deriv(rt,A)/E
+   rs.append(rt); ws.append(w*(hi-lo)*(rin-r0)*np.pi*db)
+  outer=ro
+ else: outer=r0
+ # outer branch, range to infinity. Geometric partition resolves critical limit.
+ bounds=[0,.0001,.001,.01,.05,.2,.5,.8,.95,1]
+ rtout=[]; wtout=[]
+ for lo,hi in zip(bounds[:-1],bounds[1:]):
+  v=lo+(hi-lo)*u
+  rt=outer+v/(1-v)
+  db=2*rt*(1-potential(rt,A)/E)-rt*rt*deriv(rt,A)/E
+  rtout.append(rt); wtout.append(w*(hi-lo)/(1-v)**2*np.pi*db)
+ rtout=np.concatenate(rtout); wtout=np.concatenate(wtout)
+ co=np.cos(deflect(rtout,A,E,n=ndef))
+ if rs:
+  ri=np.concatenate(rs); wi=np.concatenate(ws)
+  ci=np.cos(deflect(ri,A,E,ro,n=ndef))
+  co=np.concatenate([ci,co]); wtout=np.concatenate([wi,wtout])
+ # Use stable small-angle recurrence for 1-P_l(cos chi).
+ z=1-co; pm=np.zeros_like(z); p=z.copy(); Q=[]
+ for l in range(1,L+1):
+  if l>1:
+   pp=((2*l-1)*(z+(1-z)*p)-(l-1)*pm)/l
+   pm,p=p,pp
+  Q.append(np.dot(wtout,p))
+ return np.array(Q)
+
+if __name__=='__main__':
+ import time
+ for A in [0,.35,.8]:
+  print('critical',A,critical(A),flush=True)
+  for E in [.04,.2,.79,.81,1,5,50]:
+   for n in [40,80,160]:
+    st=time.time(); q=cross_sections(A,E,4,n,n*2)
+    print(A,E,n,q,time.time()-st,flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/scatter.py > /app/work/scatter.log 2>&1 &
+
+CMD: tail -20 /app/work/scatter.log
+
+OBS: 
+  ci=np.cos(deflect(ri,A,E,ro,n=ndef))
+  co=np.concatenate([ci,co]); wtout=np.concatenate([wi,wtout])
+ # Use stable small-angle recurrence for 1-P_l(cos chi).
+ z=1-co; pm=np.zeros_like(z); p=z.copy(); Q=[]
+ for l in range(1,L+1):
+  if l>1:
+   pp=((2*l-1)*(z+(1-z)*p)-(l-1)*pm)/l
+   pm,p=p,pp
+  Q.append(np.dot(wtout,p))
+ return np.array(Q)
+
+if __name__=='__main__':
+ import time
+ for A in [0,.35,.8]:
+  print('critical',A,critical(A),flush=True)
+  for E in [.04,.2,.79,.81,1,5,50]:
+   for n in [40,80,160]:
+    st=time.time(); q=cross_sections(A,E,4,n,n*2)
+    print(A,E,n,q,time.time()-st,flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/scatter.py > /app/work/scatter.log 2>&1 &
+tail -20 /app/work/scatter.log
+10 0.3 16 [ 0.49542094  0.27400129  0.16897462 -0.51811467] 0.3383033275604248
+
+
+
+#### step 10 01:00:27
+MSG: Analysis: The terminal is still occupied by the high-order bracket experiment, so the scattering file creation is queued behind it.
+Plan: Allow the queued work to finish and then inspect both convergence logs.
+CMD: 
+OBS: 0 0.3 16 [ 0.49542094  0.27400129  0.16897462 -0.51811467] 0.3383033275604248
+10 0.3 20 [ 0.49542095  0.27400214  0.16897527 -0.51812426] 0.6192059516906738
+10 0.3 24 [ 0.49542095  0.27400237  0.16897545 -0.51812686] 1.1446294784545898
+10 0.3 30 [ 0.49542095  0.27400245  0.16897552 -0.51812784] 2.3942673206329346
+10 0.3 36 [ 0.49542095  0.27400246  0.16897554 -0.51812805] 4.22948694229126
+10 0.3 44 [ 0.49542095  0.27400247  0.16897554 -0.51812811] 14.112855672836304
+100 0.001 16 [ 1.79108185  0.06808969  0.16949531 -0.49456732] 0.3297154903411865
+100 0.001 20 [ 1.79108185  0.06808987  0.16953531 -0.49505912] 0.5758676528930664
+100 0.001 24 [ 1.79108185  0.06808996  0.16955674 -0.49532058] 1.0098514556884766
+100 0.001 30 [ 1.79108185  0.06809003  0.16957367 -0.49552578] 2.3163061141967773
+
+
+
+#### step 11 01:01:01
+MSG: Analysis: The high-order hard-sphere calculation converges well for moderate mass ratios, but the nearly tracer light species at mass ratio 100 has a slow diffusion tail. That case will need either substantially higher order or a justified tail extrapolation. I will also independently check the generating-function recurrence before relying on the numerical results.
+Plan: Wait for the remaining tests and scattering setup to complete, then compare the recurrence against direct evaluation of its analytic generating function.
+CMD: 
+OBS: New Terminal Output:
+
+100 0.001 30 [ 1.79108185  0.06809003  0.16957367 -0.49552578] 2.3163061141967773
+100 0.001 36 [ 1.79108185  0.06809007  0.16958233 -0.49563025] 4.258670330047607
+100 0.001 44 [ 1.79108185  0.06809009  0.16958835 -0.49570248] 22.382944107055664
+100 0.95 16 [ 0.49683536  0.61553967  0.15174096 -0.86898284] 0.3688676357269287
+100 0.95 20 [ 0.49683536  0.6155397   0.15174097 -0.86898349] 0.6596646308898926
+100 0.95 24 [ 0.49683536  0.61553971  0.15174098 -0.8689837 ] 2.768362045288086
+
+
+
+#### step 12 01:01:23
+MSG: Analysis: The remaining bracket tests are finishing. The slow tracer-limit convergence is now quantified, while the high-light-fraction case converges rapidly.
+Plan: Inspect the scattering log and then refine any numerical instability exposed by the cross-section convergence tests.
+CMD: 
+CMD: tail -35 /app/work/scatter.log; ps -eo pid,etime,cmd | grep python
+
+OBS: New Terminal Output:
+
+100 0.95 24 [ 0.49683536  0.61553971  0.15174098 -0.8689837 ] 2.768362045288086
+100 0.95 30 [ 0.49683536  0.61553972  0.15174098 -0.8689838 ] 11.679548263549805
+tail -35 /app/work/scatter.log; ps -eo pid,etime,cmd | grep python
+
+
+
+#### step 13 01:02:02
+MSG: Analysis: The tests confirm the transport normalization, but the initial scattering integrand can lose precision when the turning radius is large or close to an orbiting trajectory.
+Plan: Replace the subtraction of nearly equal radial energies with a factored expression, and bound the far-impact-parameter tail explicitly. This should improve both accuracy and runtime.
+CMD: 
+OBS: New Terminal Output:
+
+tail -35 /app/work/scatter.log; ps -eo pid,etime,cmd | grep python
+100 0.95 36 [ 0.49683536  0.61553972  0.15174098 -0.86898383] 24.584487199783325
+
+
+
+#### step 14 01:02:38
+MSG: Analysis: The high-order process is nearly done. I have identified two numerical improvements for scattering: evaluate the radial-energy difference with expm1 to avoid turning-point cancellation, and truncate the far-impact-parameter tail where its contribution is negligible.
+Plan: Apply these fixes after the queued file creation finishes, then rerun the cross-section convergence checks.
+CMD: 
+OBS: s chi).
+>  z=1-co; pm=np.zeros_like(z); p=z.copy(); Q=[]
+>  for l in range(1,L+1):
+>   if l>1:
+>    pp=((2*l-1)*(z+(1-z)*p)-(l-1)*pm)/l
+>    pm,p=p,pp
+>   Q.append(np.dot(wtout,p))
+>  return np.array(Q)
+>
+> if __name__=='__main__':
+>  import time
+>  for A in [0,.35,.8]:
+>   print('critical',A,critical(A),flush=True)
+>   for E in [.04,.2,.79,.81,1,5,50]:
+>    for n in [40,80,160]:
+>     st=time.time(); q=cross_sections(A,E,4,n,n*2)
+>     print(A,E,n,q,time.time()-st,flush=True)
+> PY
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/scatter.py > /app/work/scatter.log 2>&1 &
+[1] 384
+root@627da822ee8d:/app# tail -20 /app/work/scatter.log
+root@627da822ee8d:/app# tail -35 /app/work/scatter.log; ps -eo pid,etime,cmd | grep python
+bash: ps: command not found
+root@627da822ee8d:/app#
+
+
+#### step 15 01:02:51
+MSG: Analysis: The scattering module is now created and its convergence test is running.
+Plan: Inspect the results, then apply the stable radial-energy evaluation and repeat the tests at representative low and high collision energies.
+CMD: tail -30 /app/work/scatter.log
+python3 - <<'PY'
+p='/app/work/scatter.py'
+s=open(p).read().replace('def critical(A):','@lru_cache(None)\ndef critical(A):')
+s=s.replace('def deflect(rt,A,E,ro=None,n=160):', '''def radial(rt,u,A,E):
+ t=1-u*u
+ z6=((1-A)/(rt-A))**6
+ ld=np.log1p(-rt*u*u/(rt-A*t))
+ diff=4*(z6*z6*np.expm1(12*ld)-z6*np.expm1(6*ld))
+ return u*u*(2-u*u)*(1-4*z6*(z6-1)/E)-diff/E
+
+def deflect(rt,A,E,ro=None,n=160):''')
+s=s.replace('f=1-b2[:,None]/(r*r)-potential(r,A)/E','f=radial(rt[:,None],uu,A,E)')
+s=s.replace('bounds=[0,.0001,.001,.01,.05,.2,.5,.8,.95,1]','bounds=[0,.0001,.001,.01,.05,.2,.5,.8,.95,.98]')
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/scatter.py > /app/work/scatter2.log 2>&1 &
+
+OBS: t@627da822ee8d:/app# python3 - <<'PY'
+> p='/app/work/scatter.py'
+> s=open(p).read().replace('def critical(A):','@lru_cache(None)\ndef critical(A):')
+> s=s.replace('def deflect(rt,A,E,ro=None,n=160):', '''def radial(rt,u,A,E):
+>  t=1-u*u
+>  z6=((1-A)/(rt-A))**6
+>  ld=np.log1p(-rt*u*u/(rt-A*t))
+>  diff=4*(z6*z6*np.expm1(12*ld)-z6*np.expm1(6*ld))
+>  return u*u*(2-u*u)*(1-4*z6*(z6-1)/E)-diff/E
+>
+> def deflect(rt,A,E,ro=None,n=160):''')
+> s=s.replace('f=1-b2[:,None]/(r*r)-potential(r,A)/E','f=radial(rt[:,None],uu,A,E)')
+> s=s.replace('bounds=[0,.0001,.001,.01,.05,.2,.5,.8,.95,1]','bounds=[0,.0001,.001,.01,.05,.2,.5,.8,.95,.98]')
+> open(p,'w').write(s)
+> PY
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/scatter.py > /app/work/scatter2.log 2>&1 &
+[1] 415
+root@627da822ee8d:/app#
+
+
+#### step 16 01:03:13
+MSG: Analysis: Most cross sections are already converged well below the requested tolerance. One high-core case exposed turning-point cancellation, which the new factored radial-energy expression should fix.
+Plan: Inspect the refined scattering results and begin energy quadrature tests for actual Kihara transport. I will split the collision-energy integration at the orbiting threshold to handle its nonanalytic behavior accurately.
+CMD: tail -30 /app/work/scatter2.log
+cat > /app/work/runmix.py <<'PY'
+from brackets import *
+from scatter import *
+import sys
+A,R,X,T=map(float,sys.argv[1:5]); ng=int(sys.argv[5]); N=int(sys.argv[6])
+ec=critical(A)[1]/T
+# piecewise Legendre quadrature for exp(-e)*e weight
+bounds=sorted(set([0,min(ec,70),.1,.3,1,2,4,8,16,32,55,90,150]))
+u,w=gauss(ng)
+ee=[]; ww=[]
+for lo,hi in zip(bounds[:-1],bounds[1:]):
+ e=lo+(hi-lo)*u; ee.extend(e); ww.extend(w*(hi-lo)*e*np.exp(-e))
+e=np.array(ee); we=np.array(ww)
+st=time.time(); Q=np.array([cross_sections(A,T*z,2*N+2,70,140) for z in e]); print('scattering',len(e),time.time()-st,flush=True)
+for n in [1,3,5,8,12,16,20,N]:
+ if n>N: continue
+ st=time.time(); print(n,transport(n,R,X,T,e,we,Q),time.time()-st,flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/runmix.py 0 10 .3 1 16 24 > /app/work/mix.log 2>&1 &
+
+OBS: oat,sys.argv[1:5]); ng=int(sys.argv[5]); N=int(sys.argv[6])
+> ec=critical(A)[1]/T
+> # piecewise Legendre quadrature for exp(-e)*e weight
+> bounds=sorted(set([0,min(ec,70),.1,.3,1,2,4,8,16,32,55,90,150]))
+> u,w=gauss(ng)
+> ee=[]; ww=[]
+> for lo,hi in zip(bounds[:-1],bounds[1:]):
+>  e=lo+(hi-lo)*u; ee.extend(e); ww.extend(w*(hi-lo)*e*np.exp(-e))
+> e=np.array(ee); we=np.array(ww)
+> st=time.time(); Q=np.array([cross_sections(A,T*z,2*N+2,70,140) for z in e]); print('scattering',len(e),time.time()-st,flush=True)
+> for n in [1,3,5,8,12,16,20,N]:
+>  if n>N: continue
+>  st=time.time(); print(n,transport(n,R,X,T,e,we,Q),time.time()-st,flush=True)
+> PY
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/runmix.py 0 10 .3 1 16 24 > /app/work/mix.log 2>&1 &
+[1] 436
+root@627da822ee8d:/app#
+
+
+#### step 17 01:03:39
+MSG: Analysis: The stable scattering calculation now agrees across quadrature refinements, including the case that previously suffered cancellation. The first actual-mixture calculation is underway.
+Plan: Compare energy-quadrature resolutions and polynomial orders for representative mixtures. Also change the bracket integration to process energy nodes in small batches, keeping high-order tracer calculations within the memory limit.
+CMD: cat /app/work/mix.log
+cp /app/work/brackets.py /app/work/brackets_old.py
+python3 - <<'PY'
+p='/app/work/brackets.py';s=open(p).read()
+s=s.replace("C=correlation(l,N,e[:,None],h[None,:],a,b,p,q)\n        vals=np.einsum('ijuv,uv->ij',C,base,optimize=True)*2/np.sqrt(np.pi)*np.sqrt(2*T/mu)","vals=np.zeros((N+1,N+1))\n        for start in range(0,len(e),16):\n            sl=slice(start,start+16)\n            C=correlation(l,N,e[sl,None],h[None,:],a,b,p,q)\n            vals+=np.einsum('ijuv,uv->ij',C,base[sl],optimize=True)\n        vals*=2/np.sqrt(np.pi)*np.sqrt(2*T/mu)")
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/runmix.py 0 10 .3 1 32 24 > /app/work/mix2.log 2>&1 &
+cat > /app/work/high.py <<'PY'
+from brackets import *
+e,we=roots_genlaguerre(190,1); Q=np.full((len(e),210),np.pi)
+for N in [50,60,70,80,95]:
+ st=time.time(); print(N,transport(N,100,.001,1,e,we,Q),time.time()-st,flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/high.py > /app/work/high.log 2>&1 &
+
+OBS: r start in range(0,len(e),16):\n            sl=slice(start,start+16)\n            C=correlation(l,N,e[sl,None],h[None,:],a,b,p,
+q)\n            vals+=np.einsum('ijuv,uv->ij',C,base[sl],optimize=True)\n        vals*=2/np.sqrt(np.pi)*np.sqrt(2*T/mu)")
+> open(p,'w').write(s)
+> PY
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/runmix.py 0 10 .3 1 32 24 > /app/work/mix2.log 2>&1 &
+[1] 458
+root@627da822ee8d:/app# cat > /app/work/high.py <<'PY'
+> from brackets import *
+> e,we=roots_genlaguerre(190,1); Q=np.full((len(e),210),np.pi)
+> for N in [50,60,70,80,95]:
+>  st=time.time(); print(N,transport(N,100,.001,1,e,we,Q),time.time()-st,flush=True)
+> PY
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/high.py > /app/work/high.log 2>&1 &
+[2] 460
+root@627da822ee8d:/app#
+
+
+#### step 18 01:03:57
+MSG: Analysis: The first Lennard-Jones mixture results converge in polynomial order, but the energy quadrature and near-critical scattering still need verification. High-order brackets are now evaluated in batches to control memory usage.
+Plan: Inspect the finer energy-quadrature result and test scattering immediately above and below the orbiting threshold, where ordinary turning-point quadrature can miss a narrow bottleneck. Fix the inner-branch interval construction so all quadrature subintervals stay ordered.
+CMD: cat /app/work/mix2.log; cat /app/work/high.log
+python3 - <<'PY'
+p='/app/work/scatter.py';s=open(p).read().replace('np.maximum(0,uc-width),uc,np.minimum(1,uc+width)', 'np.maximum(0,uc-width),uc,np.minimum(1,uc+width)')
+s=s.replace('np.ones(len(rt))])','np.ones(len(rt))])\n edges=np.sort(np.clip(edges,0,1),axis=1)')
+open(p,'w').write(s)
+PY
+cat > /app/work/near.py <<'PY'
+from scatter import *
+for A in [0,.35,.8]:
+ ec=critical(A)[1]
+ for f in [.99,.999,.9999,1.0001,1.001,1.01]:
+  for n in [40,80,160,320]:
+   print(A,f,n,cross_sections(A,ec*f,8,n,2*n)[:4],flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/near.py > /app/work/near.log 2>&1 &
+
+OBS: 
+20 [ 0.31073538  0.18355006  0.10907961 -0.00785669] 4.449295997619629
+root@627da822ee8d:/app# python3 - <<'PY'
+> p='/app/work/scatter.py';s=open(p).read().replace('np.maximum(0,uc-width),uc,np.minimum(1,uc+width)', 'np.maximum(0,uc-width),uc,np.minimum(1,uc+width)')
+> s=s.replace('np.ones(len(rt))])','np.ones(len(rt))])\n edges=np.sort(np.clip(edges,0,1),axis=1)')
+> open(p,'w').write(s)
+> PY
+root@627da822ee8d:/app# cat > /app/work/near.py <<'PY'
+> from scatter import *
+> for A in [0,.35,.8]:
+>  ec=critical(A)[1]
+>  for f in [.99,.999,.9999,1.0001,1.001,1.01]:
+>   for n in [40,80,160,320]:
+>    print(A,f,n,cross_sections(A,ec*f,8,n,2*n)[:4],flush=True)
+> PY
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/near.py > /app/work/near.log 2>&1 &
+[3] 483
+root@627da822ee8d:/app#
+
+
+#### step 19 01:04:04
+MSG: Analysis: Doubling the energy quadrature changes the transport outputs by much less than the tolerance in the tested mixture. The near-critical scattering test and high-order tracer test are still running.
+Plan: Collect those results, then select adaptive polynomial orders and refine the scattering quadrature only where necessary. The next priority is ensuring that the extreme mass-ratio tracer case reaches the required accuracy within 600 seconds.
+CMD: tail -30 /app/work/near.log; cat /app/work/high.log; tail -4 /app/work/mix2.log
+
+OBS: 3455 3.69729504 3.81741282]
+0.8 1.01 40 [3.27368807 3.52381747 3.69447958 3.81428501]
+0.8 1.01 80 [3.27368791 3.52382092 3.69446553 3.81432764]
+0.8 1.01 160 [3.27368792 3.52382091 3.69446559 3.81432741]
+0.8 1.01 320 [3.27368792 3.52382091 3.69446559 3.81432741]
+[1]   Done                    OPENBLAS_NUM_THREADS=1 python3 /app/work/runmix.py 0 10 .3 1 32 24 > /app/work/mix2.log 2>&1
+[3]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/work/near.py > /app/work/near.log 2>&1
+12 [ 0.31073528  0.18355004  0.10907953 -0.00785602] 1.1577842235565186
+16 [ 0.31073538  0.18355006  0.1090796  -0.00785658] 2.6000618934631348
+20 [ 0.31073538  0.18355006  0.10907961 -0.00785669] 4.449295997619629
+24 [ 0.31073539  0.18355006  0.10907961 -0.00785662] 7.213231086730957
+root@627da822ee8d:/app#
+
+
+#### step 20 01:04:35
+MSG: Analysis: Near-critical scattering converges more slowly just above the orbiting threshold, but the discrepancy is confined to a narrow energy interval. The high-order tracer test is more expensive than the moderate-order calculations, so I will avoid recomputing lower-order brackets once a larger matrix has been assembled.
+Plan: Refactor the solver to reuse leading principal submatrices for convergence checks. Add denser quadrature around the critical turning radius above the orbiting threshold, and test several mixtures spanning the temperature and mass-ratio ranges.
+CMD: cat /app/work/high.log
+python3 - <<'PY'
+p='/app/work/scatter.py';s=open(p).read()
+s=s.replace('rtout=np.concatenate(rtout); wtout=np.concatenate(wtout)', '''rtout=np.concatenate(rtout); wtout=np.concatenate(wtout)''')
+# extra split at the critical radius on the single-branch side
+s=s.replace('rtout=[]; wtout=[]','''rc,ec=critical(A)
+ if ro is None and E<ec*1.15:
+  vc=(rc-outer)/(1+rc-outer)
+  dv=max(1e-7, min(.03,np.sqrt(max(0,E/ec-1))*.05))
+  bounds=sorted(set(bounds+[max(0,min(.98,vc+k*dv)) for k in [-8,-2,-.5,0,.5,2,8]]))
+ rtout=[]; wtout=[]''')
+open(p,'w').write(s)
+PY
+for args in '0 1 .5 .2' '0 100 .001 50' '.8 100 .001 .2' '.35 50 .05 2' '.8 30 .8 1'; do set -- $args; OPENBLAS_NUM_THREADS=1 python3 /app/work/runmix.py "$@" 24 30 > "/app/work/m_${1}_${2}_${4}.log" 2>&1 & done
+
+OBS: ut=np.concatenate(rtout); wtout=np.concatenate(wtout)', '''rtout=np.concatenate(rtout); wtout=np.concatenate(wtout)''')
+> # extra split at the critical radius on the single-branch side
+> s=s.replace('rtout=[]; wtout=[]','''rc,ec=critical(A)
+>  if ro is None and E<ec*1.15:
+>   vc=(rc-outer)/(1+rc-outer)
+>   dv=max(1e-7, min(.03,np.sqrt(max(0,E/ec-1))*.05))
+>   bounds=sorted(set(bounds+[max(0,min(.98,vc+k*dv)) for k in [-8,-2,-.5,0,.5,2,8]]))
+>  rtout=[]; wtout=[]''')
+> open(p,'w').write(s)
+> PY
+root@627da822ee8d:/app# for args in '0 1 .5 .2' '0 100 .001 50' '.8 100 .001 .2' '.35 50 .05 2' '.8 30 .8 1'; do set -- $args; OPENBLAS_NUM_THREADS=1 python3 /a
+pp/work/runmix.py "$@" 24 30 > "/app/work/m_${1}_${2}_${4}.log" 2>&1 & done
+[3] 524
+[4] 525
+[5] 526
+[6] 527
+[7] 528
+root@627da822ee8d:/app#
+
+
+#### step 21 01:04:54
+MSG: Analysis: The high-order tracer calculation has reached order 50. Several actual-mixture convergence tests are now running. To improve efficiency, I will separate matrix assembly from the small linear solves and evaluate several truncation orders from one assembled matrix.
+Plan: Implement matrix reuse, then inspect the test results to determine a conservative stopping criterion and maximum order. Also add an independent generating-function consistency test.
+CMD: cat /app/work/high.log; for f in /app/work/m_*.log; do echo "$f"; tail -4 "$f"; done
+python3 - <<'PY'
+p='/app/work/brackets.py';s=open(p).read();s=s.replace('def transport(N,R,X,T,e,we,Q):\n    B,norm=matrix(2,N,R,X,T,e,we,Q)','''def transport(N,R,X,T,e,we,Q):
+    B2,norm2=matrix(2,N,R,X,T,e,we,Q)
+    B1,norm1=matrix(1,N,R,X,T,e,we,Q)
+    return transport_matrices(N,R,X,T,B2,norm2,B1,norm1)
+
+def transport_matrices(N,R,X,T,B2,norm2,B1,norm1):
+    big=len(norm1)//2-1
+    ix=np.r_[np.arange(N+1),big+1+np.arange(N+1)]
+    B=B2[np.ix_(ix,ix)].copy(); norm=norm2[ix]''')
+s=s.replace('B,norm=matrix(1,N,R,X,T,e,we,Q)\n    rhs=', 'B=B1[np.ix_(ix,ix)].copy(); norm=norm1[ix]\n    rhs=')
+open(p,'w').write(s)
+PY
+cat > /app/work/gencheck.py <<'PY'
+from brackets import *
+for a,b,p,q in [(np.sqrt(.5),np.sqrt(.5),np.sqrt(.5),-np.sqrt(.5)),(.1,np.sqrt(.99),np.sqrt(.99),-.1)]:
+ e=np.array([[1.3]]); h=np.array([[.37]])
+ for nu in [2.5,3.5,5.5]:
+  C=series(nu,20,e,h,a,b,p,q)[:,:,0,0]
+  z=.07; w=-.13; D=1-b*b*z-q*q*w+(1-a*a-p*p)*z*w; F=b*b*q*q+a*p*b*q*h[0,0]
+  val=D**(-nu)*np.exp(-e[0,0]*(b*b*z+q*q*w-2*F*z*w)/D)
+  approx=np.sum(C*z**np.arange(21)[:,None]*w**np.arange(21)[None,:])
+  print(val,approx,approx-val)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/gencheck.py
+
+OBS: ,ix)].copy(); norm=norm2[ix]''')
+> s=s.replace('B,norm=matrix(1,N,R,X,T,e,we,Q)\n    rhs=', 'B=B1[np.ix_(ix,ix)].copy(); norm=norm1[ix]\n    rhs=')
+> open(p,'w').write(s)
+> PY
+root@627da822ee8d:/app# cat > /app/work/gencheck.py <<'PY'
+> from brackets import *
+> for a,b,p,q in [(np.sqrt(.5),np.sqrt(.5),np.sqrt(.5),-np.sqrt(.5)),(.1,np.sqrt(.99),np.sqrt(.99),-.1)]:
+>  e=np.array([[1.3]]); h=np.array([[.37]])
+>  for nu in [2.5,3.5,5.5]:
+>   C=series(nu,20,e,h,a,b,p,q)[:,:,0,0]
+>   z=.07; w=-.13; D=1-b*b*z-q*q*w+(1-a*a-p*p)*z*w; F=b*b*q*q+a*p*b*q*h[0,0]
+>   val=D**(-nu)*np.exp(-e[0,0]*(b*b*z+q*q*w-2*F*z*w)/D)
+>   approx=np.sum(C*z**np.arange(21)[:,None]*w**np.arange(21)[None,:])
+>   print(val,approx,approx-val)
+> PY
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/gencheck.py
+
+
+
+#### step 22 01:05:05
+MSG: Analysis: The mixture tests show that viscosity converges quickly, while tracer diffusion and thermal diffusion need higher orders. The recurrence consistency check is running, and matrix reuse has been implemented.
+Plan: Collect the completed tests and benchmark a single high-order matrix with no competing jobs. Then implement a production driver with convergence checks based on several nested truncations from the same collision matrix.
+CMD: 
+CMD: cat /app/work/high.log; for f in /app/work/m_*.log; do echo "$f"; tail -3 "$f"; done; jobs
+
+OBS: 2]   Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/high.py > /app/work/high.log 2>&1 &
+[3]   Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/runmix.py "$@" 24 30 > "/app/work/m_${1}_${2}_${4}.log" 2>&1 &
+[4]   Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/runmix.py "$@" 24 30 > "/app/work/m_${1}_${2}_${4}.log" 2>&1 &
+[5]   Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/runmix.py "$@" 24 30 > "/app/work/m_${1}_${2}_${4}.log" 2>&1 &
+[6]-  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/runmix.py "$@" 24 30 > "/app/work/m_${1}_${2}_${4}.log" 2>&1 &
+[7]+  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/runmix.py "$@" 24 30 > "/app/work/m_${1}_${2}_${4}.log" 2>&1 &
+root@627da822ee8d:/app#
+
+
+#### step 23 01:05:53
+MSG: Analysis: The generating-function recurrence agrees with direct analytic evaluation to machine precision. The outstanding jobs are sharing CPUs, so their wall times are not representative of the checker runtime.
+Plan: Let the current tests finish, then benchmark the optimized solver in isolation. I will also test near-critical scattering after the additional interval splits.
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/work/near.py > /app/work/near2.log 2>&1 &
+
+CMD: 
+CMD: cat /app/work/high.log; for f in /app/work/m_*.log; do echo "$f"; tail -2 "$f"; done; tail -12 /app/work/near2.log
+
+OBS: 7868563e-02 3.02479290e-02 5.15495311e-17] 30.795588970184326
+0.8 1.0001 40 [3.27587584 3.52689069 3.69759434 3.81772182]
+0.8 1.0001 80 [3.27587584 3.52689069 3.69759434 3.81772182]
+0.8 1.0001 160 [3.27587584 3.52689069 3.69759434 3.81772182]
+0.8 1.0001 320 [3.27587584 3.52689069 3.69759434 3.81772182]
+0.8 1.001 40 [3.27563858 3.52663455 3.69729504 3.8174128 ]
+0.8 1.001 80 [3.27563858 3.52663455 3.69729504 3.8174128 ]
+0.8 1.001 160 [3.27563858 3.52663455 3.69729504 3.8174128 ]
+0.8 1.001 320 [3.27563858 3.52663455 3.69729504 3.8174128 ]
+0.8 1.01 40 [3.27368792 3.52382091 3.69446559 3.81432741]
+0.8 1.01 80 [3.27368792 3.52382091 3.69446559 3.81432741]
+0.8 1.01 160 [3.27368792 3.52382091 3.69446559 3.81432741]
+0.8 1.01 320 [3.27368792 3.52382091 3.69446559 3.81432741]
+root@627da822ee8d:/app#
+
+
+#### step 24 01:06:02
+MSG: Analysis: The additional critical-radius splits make near-critical scattering converge to the displayed precision. Actual-mixture results are stable for most compositions by order 30, but the extreme tracer case still has a noticeable tail.
+Plan: Inspect the high-order process and benchmark matrix assembly. I will optimize the bracket generator further by integrating the angular polynomial analytically before the Sonine recurrence, reducing the cost of high orders.
+CMD: cat /app/work/high.log; cat /proc/460/status | head -25; cat /proc/460/stat; free -m; jobs
+
+OBS: 0       0
+Gid:    0       0       0       0
+FDSize: 256
+Groups: 0
+NStgid: 460
+NSpid:  460
+NSpgid: 460
+NSsid:  56
+Kthread:        0
+VmPeak:   593436 kB
+VmSize:   592168 kB
+VmLck:         0 kB
+VmPin:         0 kB
+VmHWM:    417260 kB
+VmRSS:    377920 kB
+RssAnon:          350224 kB
+RssFile:           27696 kB
+460 (python3) R 57 460 56 34817 645 4196608 2643307 0 0 0 6351 3720 0 0 20 0 1 0 201194221 606380032 93698 18446744073709551615 105777808134144 105777808134481
+140725618461552 0 0 0 0 16781312 2 0 0 0 17 30 0 0 0 0 0 105777808145840 105777808146456 105778009796608 140725618466243 140725618466269 140725618466269 1407256
+18466785 0
+bash: free: command not found
+[2]+  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/high.py > /app/work/high.log 2>&1 &
+root@627da822ee8d:/app#
+
+
+#### step 25 01:06:23
+MSG: Analysis: The high-order tracer test has reached order 60, with diffusion and thermal diffusion close to their limiting values. Its memory use is comfortably below the limit, but repeated tensor-bracket assembly is unnecessarily expensive.
+Plan: Exploit the already observed rapid viscosity convergence by keeping the tensor system at a modest order while increasing only the vector system for difficult diffusion cases. Add reusable matrix-based convergence tests and run isolated high-order tracer benchmarks.
+CMD: cat > /app/work/fastmix.py <<'PY'
+from brackets import *
+from scatter import *
+import sys
+A,R,X,T=map(float,sys.argv[1:5]); ng=int(sys.argv[5]); N=int(sys.argv[6])
+ec=critical(A)[1]/T
+bounds=sorted(set([0,min(ec,70),.05,.15,.4,1,2,4,8,16,32,55,90,150,max(200,2.8*N)]))
+u,w=gauss(ng); ee=[]; ww=[]
+for lo,hi in zip(bounds[:-1],bounds[1:]):
+ e=lo+(hi-lo)*u; ee.extend(e); ww.extend(w*(hi-lo)*e*np.exp(-e))
+e=np.array(ee); we=np.array(ww)
+st=time.time(); Q=np.array([cross_sections(A,T*z,2*N+2,90,180) for z in e]); print('scatter',len(e),time.time()-st,flush=True)
+st=time.time(); B2,n2=matrix(2,16,R,X,T,e,we,Q); print('tensor',time.time()-st,flush=True)
+st=time.time(); B1,n1=matrix(1,N,R,X,T,e,we,Q); print('vector',time.time()-st,flush=True)
+# pad small tensor matrix only to reuse the transport normalization routine
+ix=np.r_[np.arange(17),N+1+np.arange(17)]
+BB=np.eye(2*(N+1)); NN=np.ones(2*(N+1)); BB[np.ix_(ix,ix)]=B2; NN[ix]=n2
+for n in [8,12,16,20,24,30,36,44,50,60,70,80,95,N]:
+ if n>N: continue
+ print(n,transport_matrices(n,R,X,T,BB,NN,B1,n1),flush=True)
+np.savez('/app/work/lastmix.npz',B1=B1,n1=n1,B2=BB,n2=NN,R=R,X=X,T=T)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/fastmix.py .8 100 .001 .2 28 65 > /app/work/fast.log 2>&1 &
+
+OBS: nt('scatter',len(e),time.time()-st,flush=True)
+> st=time.time(); B2,n2=matrix(2,16,R,X,T,e,we,Q); print('tensor',time.time()-st,flush=True)
+> st=time.time(); B1,n1=matrix(1,N,R,X,T,e,we,Q); print('vector',time.time()-st,flush=True)
+> # pad small tensor matrix only to reuse the transport normalization routine
+> ix=np.r_[np.arange(17),N+1+np.arange(17)]
+> BB=np.eye(2*(N+1)); NN=np.ones(2*(N+1)); BB[np.ix_(ix,ix)]=B2; NN[ix]=n2
+> for n in [8,12,16,20,24,30,36,44,50,60,70,80,95,N]:
+>  if n>N: continue
+>  print(n,transport_matrices(n,R,X,T,BB,NN,B1,n1),flush=True)
+> np.savez('/app/work/lastmix.npz',B1=B1,n1=n1,B2=BB,n2=NN,R=R,X=X,T=T)
+> PY
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/fastmix.py .8 100 .001 .2 28 65 > /app/work/fast.log 2>&1 &
+[3] 666
+root@627da822ee8d:/app#
+
+
+#### step 26 01:07:02
+MSG: Analysis: The optimized tracer test is running with a small tensor system and a larger vector system. This avoids spending most of the runtime on viscosity terms that are already converged.
+Plan: Inspect its nested-order results, along with the hard-sphere high-order stability test. If the vector tail converges reliably by order 65, use that order only for the most difficult mass-ratio/composition region.
+CMD: cat /app/work/fast.log; cat /app/work/high.log; jobs
+
+CMD: 
+CMD: cat /app/work/fast.log; cat /app/work/high.log
+
+OBS: 959325 -0.49576094] 110.59266209602356
+[2]-  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/high.py > /app/work/high.log 2>&1 &
+[3]+  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/fastmix.py .8 100 .001 .2 28 65 > /app/work/fast.log 2>&1 &
+root@627da822ee8d:/app# cat /app/work/fast.log; cat /app/work/high.log
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 392 6.978591203689575
+tensor 1.643172025680542
+50 [ 1.79108185  0.0680901   0.16959086 -0.49573253] 26.304927110671997
+60 [ 1.79108186  0.06809011  0.16959325 -0.49576094] 110.59266209602356
+root@627da822ee8d:/app#
+
+
+#### step 27 01:07:51
+MSG: Analysis: The scattering and tensor portions of the optimized test finish quickly. The remaining high-order vector calculation is the main runtime cost, so it is important to measure it independently and inspect numerical stability before finalizing the driver.
+Plan: Stop the redundant hard-sphere high-order job after recording its completed results, leaving the actual Kihara tracer benchmark alone. Then inspect the finished vector-system convergence.
+CMD: cat /app/work/high.log; kill 460; cat /app/work/fast.log; cat /proc/666/status | head -24
+
+CMD: 
+CMD: cat /app/work/fast.log
+
+OBS:     666
+PPid:   57
+TracerPid:      0
+Uid:    0       0       0       0
+Gid:    0       0       0       0
+FDSize: 256
+Groups: 0
+NStgid: 666
+NSpid:  666
+NSpgid: 666
+NSsid:  56
+Kthread:        0
+VmPeak:   550084 kB
+VmSize:   406332 kB
+VmLck:         0 kB
+VmPin:         0 kB
+VmHWM:    358384 kB
+VmRSS:    199372 kB
+RssAnon:          164100 kB
+root@627da822ee8d:/app# cat /app/work/fast.log
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 392 6.978591203689575
+tensor 1.643172025680542
+[2]-  Terminated              OPENBLAS_NUM_THREADS=1 python3 /app/work/high.py > /app/work/high.log 2>&1
+root@627da822ee8d:/app#
+
+
+#### step 28 01:08:16
+MSG: Analysis: The high-order vector calculation is still running and uses far less than the memory limit. The current implementation computes all high-order tensor and vector correlations with broad angular arrays; reducing the working-array size may improve speed substantially.
+Plan: Benchmark smaller energy batches and inspect where matrix assembly spends its time. The final solver will use modest-order viscosity and high-order vector brackets only when the convergence checks demand them.
+CMD: cat /app/work/fast.log; cat /proc/666/stat
+cat > /app/work/bench.py <<'PY'
+from brackets import *
+import sys
+N=int(sys.argv[1]); ne=int(sys.argv[2])
+e,we=roots_genlaguerre(ne,1); Q=np.full((len(e),2*N+3),np.pi)
+st=time.time(); B,n=matrix(1,N,100,.001,1,e,we,Q); print('time',time.time()-st,flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/bench.py 45 16
+
+OBS: 92 6.978591203689575
+tensor 1.643172025680542
+666 (python3) R 57 666 56 34817 749 4194560 7323667 0 0 0 3135 8023 0 0 20 0 1 0 201210682 562171904 88144 18446744073709551615 98965405827072 98965405827409 14
+0735981597632 0 0 0 0 16781312 2 0 0 0 17 30 0 0 0 0 0 98965405838768 98965405839384 98966455021568 140735981600171 140735981600221 140735981600221 140735981600
+737 0
+root@627da822ee8d:/app# cat > /app/work/bench.py <<'PY'
+> from brackets import *
+> import sys
+> N=int(sys.argv[1]); ne=int(sys.argv[2])
+> e,we=roots_genlaguerre(ne,1); Q=np.full((len(e),2*N+3),np.pi)
+> st=time.time(); B,n=matrix(1,N,100,.001,1,e,we,Q); print('time',time.time()-st,flush=True)
+> PY
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/bench.py 45 16
+time 0.6746773719787598
+root@627da822ee8d:/app#
+
+
+#### step 29 01:08:24
+MSG: Analysis: The benchmark indicates that high-order assembly is spending a large fraction of time allocating and paging large arrays rather than performing arithmetic. Smaller energy batches should reduce that overhead.
+Plan: Create a smaller-batch implementation and benchmark it at order 65. Once the current tracer calculation finishes, compare its nested-order results and use the faster batching strategy in the production program.
+CMD: cp /app/work/brackets.py /app/work/brackets_batch16.py; sed -i 's/range(0,len(e),16)/range(0,len(e),4)/; s/slice(start,start+16)/slice(start,start+4)/' /app/work/brackets.py
+OPENBLAS_NUM_THREADS=1 python3 /app/work/bench.py 65 16
+cat /app/work/fast.log
+
+OBS: New Terminal Output:
+
+root@627da822ee8d:/app# cp /app/work/brackets.py /app/work/brackets_batch16.py; sed -i 's/range(0,len(e),16)/range(0,len(e),4)/; s/slice(start,start+16)/slice(s
+tart,start+4)/' /app/work/brackets.py
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/bench.py 65 16
+
+
+
+#### step 30 01:08:43
+MSG: Analysis: A smaller-batch version is now being benchmarked. The core numerical formulation is validated, and the remaining work is runtime optimization, high-order convergence verification, and assembling the standalone program.
+Plan: Inspect the benchmark and tracer results. Use small batches for high orders, then run the same difficult case with the optimized implementation to verify both numerical agreement and runtime.
+CMD: 
+CMD: cat /app/work/fast.log; jobs; cat /sys/fs/cgroup/memory.max; cat /sys/fs/cgroup/memory.current; cat /proc/666/stat
+
+OBS: [ 0.58919844  0.02233396  0.057908   -0.39542235]
+12 [ 0.58919845  0.02233413  0.05793963 -0.39667574]
+16 [ 0.58919845  0.02233418  0.05795051 -0.39709569]
+20 [ 0.58919845  0.02233421  0.05795527 -0.39727675]
+24 [ 0.58919845  0.02233422  0.05795768 -0.3973675 ]
+30 [ 0.58919845  0.02233423  0.05795947 -0.39743459]
+36 [ 0.58919845  0.02233423  0.05796033 -0.39746661]
+44 [ 0.58919845  0.02233423  0.0579609  -0.39748741]
+50 [ 0.58919845  0.02233423  0.05796112 -0.39749559]
+60 [ 0.58919845  0.02233424  0.05796133 -0.3975031 ]
+65 [ 0.58919845  0.02233424  0.05796138 -0.39750515]
+[3]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/work/fastmix.py .8 100 .001 .2 28 65 > /app/work/fast.log 2>&1
+4294967296
+39657472
+cat: /proc/666/stat: No such file or directory
+root@627da822ee8d:/app#
+
+
+#### step 31 01:09:00
+MSG: Analysis: The difficult high-core tracer case converges smoothly through order 65, and the full calculation finishes in about two minutes. Its remaining thermal-diffusion tail is small but should be reduced further for a safe accuracy margin.
+Plan: Run order-90 vector calculations for two extreme tracer cases, using the smaller-batch implementation. Check whether the high-order tail is still numerically stable and compare energy and scattering refinements before assembling the final standalone file.
+CMD: OPENBLAS_NUM_THREADS=1 python3 /app/work/fastmix.py .8 100 .001 .2 32 90 > /app/work/fast90.log 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/work/fastmix.py 0 100 .001 50 32 80 > /app/work/fast80.log 2>&1 &
+
+OBS: New Terminal Output:
+
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/fastmix.py .8 100 .001 .2 32 90 > /app/work/fast90.log 2>&1 &
+[1] 821
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/fastmix.py 0 100 .001 50 32 80 > /app/work/fast80.log 2>&1 &
+[2] 822
+root@627da822ee8d:/app#
+
+
+#### step 32 01:09:39
+MSG: Analysis: The two extreme tracer tests are running at still higher vector orders. Meanwhile, the production implementation can be assembled from the validated scattering and collision-bracket modules.
+Plan: Create the standalone transport.py with controlled numerical-library threading, explicit energy quadrature, separate tensor/vector orders, and nested-order convergence checks. Keep diagnostics on stderr and emit only the required four-number JSON object.
+CMD: cat > /app/work/assemble.py <<'PY'
+from pathlib import Path
+header='''#!/usr/bin/env python3
+"""Classical dilute binary Kihara-gas transport.
+
+Units: sigma = epsilon = k_B = lighter molecular mass = 1.
+Collision brackets are evaluated with Maxwellian generating functions for
+vector and traceless-tensor Laguerre (Sonine) polynomials.  Scattering is
+integrated on the physically accessible turning-radius branches, separating
+orbiting trajectories. Nested Galerkin spaces control the integral-equation
+solution error; no tabulated transport correlations are used.
+"""
+import os
+os.environ['OPENBLAS_NUM_THREADS']='1'
+os.environ['OMP_NUM_THREADS']='1'
+os.environ['MKL_NUM_THREADS']='1'
+import sys, json, warnings
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+'''
+b=Path('/app/work/brackets.py').read_text().split("if __name__=='__main__':")[0]
+s=Path('/app/work/scatter.py').read_text().split("if __name__=='__main__':")[0]
+driver='''
+def energy_grid(A,T,order,ng=32):
+    ec=critical(A)[1]/T
+    bounds=sorted(set([0,min(ec,70),.05,.15,.4,1,2,4,8,16,32,55,90,150,max(200,2.8*order)]))
+    u,w=gauss(ng)
+    e=np.concatenate([lo+(hi-lo)*u for lo,hi in zip(bounds[:-1],bounds[1:])])
+    we=np.concatenate([(hi-lo)*w for lo,hi in zip(bounds[:-1],bounds[1:])])*e*np.exp(-e)
+    return e,we
+
+def calculate(A,R,X,T):
+    if R>50 and X<.08: N=84
+    elif R>25 and X<.2: N=64
+    elif R>10: N=44
+    else: N=32
+    e,we=energy_grid(A,T,N)
+    Q=np.array([cross_sections(A,T*z,2*N+2,100,200) for z in e])
+    B2,n2=matrix(2,20,R,X,T,e,we,Q)
+    B1,n1=matrix(1,N,R,X,T,e,we,Q)
+    def evaluate(n,B1,n1):
+        big=len(n1)//2-1
+        ix=np.r_[np.arange(21),big+1+np.arange(21)]
+        BB=np.eye(2*(big+1)); NN=np.ones(2*(big+1))
+        BB[np.ix_(ix,ix)]=B2; NN[ix]=n2
+        return transport_matrices(n,R,X,T,BB,NN,B1,n1)
+    vals=evaluate(N,B1,n1)
+    prev=evaluate(max(21,N-12),B1,n1)
+    tol=np.maximum(np.abs(vals)*3e-6,np.array([0,0,0,1.5e-7]))
+    if np.any(np.abs(vals-prev)>tol) and N<100:
+        M=min(104,N+24)
+        e,we=energy_grid(A,T,M)
+        Q=np.array([cross_sections(A,T*z,2*M+2,100,200) for z in e])
+        B1,n1=matrix(1,M,R,X,T,e,we,Q)
+        vals=evaluate(M,B1,n1)
+    if R==1: vals[3]=0.
+    return vals
+
+def main():
+    A,R,X,T=map(float,sys.argv[1:5])
+    vals=calculate(A,R,X,T)
+    print(json.dumps(dict(zip(['viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'],map(float,vals))),allow_nan=False,separators=(',',':')))
+
+if __name__=='__main__':
+    main()
+'''
+Path('/app/output/transport.py').write_text(header+b+s+driver)
+PY
+python3 /app/work/assemble.py
+wc -c /app/output/transport.py
+cat /app/work/fast90.log; cat /app/work/fast80.log
+
+OBS: 7da822ee8d:/app# python3 /app/work/assemble.py
+root@627da822ee8d:/app# wc -c /app/output/transport.py
+10720 /app/output/transport.py
+root@627da822ee8d:/app# cat /app/work/fast90.log; cat /app/work/fast80.log
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 6.717379570007324
+tensor 4.674175500869751
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 2.861008644104004
+tensor 4.780616283416748
+root@627da822ee8d:/app#
+
+
+#### step 33 01:10:20
+MSG: Analysis: A standalone program now exists in /app/output. Its output contract is correct, but I am still validating the highest-order cases before considering it finished.
+Plan: Inspect the extreme-case benchmarks and run the standalone program on a moderate mixture. If high-order rounding errors appear, cap or stabilize the affected blocks rather than trusting an ill-conditioned matrix.
+CMD: cat /app/work/fast90.log; cat /app/work/fast80.log
+python3 /app/output/transport.py .35 10 .3 1 > /app/work/finaltest.log 2> /app/work/finaltest.err &
+
+CMD: 
+CMD: cat /app/work/finaltest.log; cat /app/work/finaltest.err; cat /app/work/fast90.log; cat /app/work/fast80.log
+
+OBS: .35 10 .3 1 > /app/work/finaltest.log 2> /app/work/finaltest.err &
+[3] 866
+root@627da822ee8d:/app# cat /app/work/finaltest.log; cat /app/work/finaltest.err; cat /app/work/fast90.log; cat /app/work/fast80.log
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 6.717379570007324
+tensor 4.674175500869751
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 2.861008644104004
+tensor 4.780616283416748
+root@627da822ee8d:/app#
+
+
+#### step 34 01:11:05
+MSG: Analysis: The standalone test is running alongside the two high-order benchmarks. The matrix formulation has the correct momentum constraint and heat-flux convention; the remaining concern is numerical conditioning at very high polynomial orders.
+Plan: Collect the pending results and inspect high-order matrix eigenvalues. This will distinguish genuine convergence from roundoff contamination in weakly coupled polynomial blocks.
+CMD: cat /app/work/finaltest.log; cat /app/work/finaltest.err; tail -20 /app/work/fast90.log; tail -20 /app/work/fast80.log; jobs
+
+CMD: 
+OBS:  in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 6.717379570007324
+tensor 4.674175500869751
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 2.861008644104004
+tensor 4.780616283416748
+[1]   Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/fastmix.py .8 100 .001 .2 32 90 > /app/work/fast90.log 2>&1 &
+[2]-  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/fastmix.py 0 100 .001 50 32 80 > /app/work/fast80.log 2>&1 &
+[3]+  Running                 python3 /app/output/transport.py .35 10 .3 1 > /app/work/finaltest.log 2> /app/work/finaltest.err &
+root@627da822ee8d:/app#
+
+
+#### step 35 01:11:46
+MSG: Analysis: The pending jobs are still computing large vector systems. A moderate standalone run should finish much sooner than the extreme tracer cases, and its result will verify the final entry point.
+Plan: Wait briefly, inspect process resource usage, and avoid launching more CPU-heavy jobs until these tests finish.
+CMD: for p in 821 822 866; do echo PROCESS $p; test ! -f /proc/$p/stat || cat /proc/$p/stat; done; cat /sys/fs/cgroup/memory.current; cat /app/work/finaltest.log; tail -15 /app/work/fast90.log; tail -15 /app/work/fast80.log
+
+CMD: 
+OBS: 94717 1407244
+61195233 0
+PROCESS 866
+289001472
+{"viscosity":0.342328674106349,"thermal_conductivity":0.2003455726295605,"binary_diffusion":0.11957199413055832,"thermal_diffusion_factor":-0.17252940660088517}
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 6.717379570007324
+tensor 4.674175500869751
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 2.861008644104004
+tensor 4.780616283416748
+root@627da822ee8d:/app#
+
+
+#### step 36 01:12:41
+MSG: Analysis: The standalone moderate-mixture test completed successfully and emitted exactly the required JSON object. The extreme tracer calculations are still running, with memory use well below the checker limit.
+Plan: Collect their high-order convergence results. Then reduce the heavy-species polynomial order in tracer mixtures, since its distribution converges much faster; this will avoid unnecessary high-order blocks and leave more runtime margin for the light-species diffusion tail.
+CMD: tail -25 /app/work/fast90.log; tail -25 /app/work/fast80.log; jobs
+
+CMD: 
+OBS: ncountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 6.717379570007324
+tensor 4.674175500869751
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 2.861008644104004
+tensor 4.780616283416748
+[1]-  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/fastmix.py .8 100 .001 .2 32 90 > /app/work/fast90.log 2>&1 &
+[2]+  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/fastmix.py 0 100 .001 50 32 80 > /app/work/fast80.log 2>&1 &
+root@627da822ee8d:/app#
+
+
+#### step 37 01:13:01
+MSG: Analysis: The remaining extreme tests are still running. The solver is correct at moderate orders, but a rectangular light/heavy polynomial basis should greatly reduce high-order work in tracer mixtures without changing the low-order solution.
+Plan: Generalize the generating-function recurrence to rectangular polynomial orders and assemble only the needed blocks. Test a high light-species order with a moderate heavy-species order against the full-square benchmark.
+CMD: cp /app/work/brackets.py /app/work/brackets_square.py
+python3 - <<'PY'
+p='/app/work/brackets.py';s=open(p).read()
+s=s.replace('B=b*b; C=q*q; E=1-a*a-p*p;', 'M=N if isinstance(N,int) else N[1]\n    N=N if isinstance(N,int) else N[0]\n    B=b*b; C=q*q; E=1-a*a-p*p;')
+s=s.replace('out=np.zeros((N+1,N+1)+shape)','out=np.zeros((N+1,M+1)+shape)').replace('for m in range(N+1):','for m in range(M+1):')
+s=s.replace('N=dst.shape[0]-1','N=dst.shape[0]-1; M=dst.shape[1]-1').replace('if i<=N and j<=N:', 'if i<=N and j<=M:').replace('src[:N+1-i,:N+1-j]', 'src[:N+1-i,:M+1-j]')
+# matrix integrate local sizes
+s=s.replace('def integrate(a,b,p,q,mu):\n        vals=np.zeros((N+1,N+1))','def integrate(a,b,p,q,mu,orders=None):\n        orders=(N,N) if orders is None else orders\n        vals=np.zeros((orders[0]+1,orders[1]+1))')
+s=s.replace('C=correlation(l,N,e[sl,None]', 'C=correlation(l,orders,e[sl,None]')
+s=s.replace('return (vals+vals.T)/2 if a==p and b==q else vals', 'return (vals+vals.T)/2 if a==p and b==q and orders[0]==orders[1] else vals')
+# permit independent heavy order, padding to old full size for solve compatibility
+s=s.replace('def matrix(l,N,R,X,T,e,we,Q):','def matrix(l,N,R,X,T,e,we,Q,H=None):\n    H=N if H is None else min(H,N)')
+s=s.replace('self2=self1/np.sqrt(R)', 'self2=self1[:H+1,:H+1]/np.sqrt(R)')
+s=s.replace('bb=integrate(b,-a,b,-a,mu)', 'bb=integrate(b,-a,b,-a,mu,(H,H))')
+s=s.replace('ab=integrate(a,b,b,-a,mu)', 'ab=integrate(a,b,b,-a,mu,(N,H))')
+s=s.replace('B=np.block([[x*x*self1+x*y*aa,x*y*ab],[x*y*ab.T,y*y*self2+x*y*bb]])', '''small=np.block([[x*x*self1+x*y*aa,x*y*ab],[x*y*ab.T,y*y*self2+x*y*bb]])
+    ix=np.r_[np.arange(N+1),N+1+np.arange(H+1)]
+    B=np.eye(2*(N+1)); B[np.ix_(ix,ix)]=small''')
+open(p,'w').write(s)
+PY
+sed 's/matrix(1,N,R,X,T,e,we,Q)/matrix(1,N,R,X,T,e,we,Q,H=20)/' /app/work/fastmix.py > /app/work/rectmix.py
+OPENBLAS_NUM_THREADS=1 python3 /app/work/rectmix.py .8 100 .001 .2 32 90 > /app/work/rect90.log 2>&1 &
+
+OBS: elf2=self1/np.sqrt(R)', 'self2=self1[:H+1,:H+1]/np.sqrt(R)')
+> s=s.replace('bb=integrate(b,-a,b,-a,mu)', 'bb=integrate(b,-a,b,-a,mu,(H,H))')
+> s=s.replace('ab=integrate(a,b,b,-a,mu)', 'ab=integrate(a,b,b,-a,mu,(N,H))')
+> s=s.replace('B=np.block([[x*x*self1+x*y*aa,x*y*ab],[x*y*ab.T,y*y*self2+x*y*bb]])', '''small=np.block([[x*x*self1+x*y*aa,x*y*ab],[x*y*ab.T,y*y*self2+x*y*bb]])
+>     ix=np.r_[np.arange(N+1),N+1+np.arange(H+1)]
+>     B=np.eye(2*(N+1)); B[np.ix_(ix,ix)]=small''')
+> open(p,'w').write(s)
+> PY
+root@627da822ee8d:/app# sed 's/matrix(1,N,R,X,T,e,we,Q)/matrix(1,N,R,X,T,e,we,Q,H=20)/' /app/work/fastmix.py > /app/work/rectmix.py
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/rectmix.py .8 100 .001 .2 32 90 > /app/work/rect90.log 2>&1 &
+[3] 988
+root@627da822ee8d:/app#
+
+
+#### step 38 01:13:47
+MSG: Analysis: The rectangular-basis implementation is now being tested. It keeps the high light-species order needed for tracer diffusion while limiting the heavy-species basis to order 20.
+Plan: Compare the rectangular and square high-order results and inspect their convergence tails. Then use the faster formulation in the final program and run stricter quadrature comparisons on cases where thermal diffusion is close to zero.
+CMD: tail -25 /app/work/fast90.log; tail -25 /app/work/fast80.log; cat /app/work/rect90.log; jobs
+
+CMD: 
+OBS: e by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 2.861008644104004
+tensor 4.780616283416748
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 12.925332069396973
+[1]   Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/fastmix.py .8 100 .001 .2 32 90 > /app/work/fast90.log 2>&1 &
+[2]-  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/fastmix.py 0 100 .001 50 32 80 > /app/work/fast80.log 2>&1 &
+[3]+  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/rectmix.py .8 100 .001 .2 32 90 > /app/work/rect90.log 2>&1 &
+root@627da822ee8d:/app#
+
+
+#### step 39 01:13:54
+MSG: Analysis: The square order-80 and order-90 benchmarks are taking longer than desirable. The rectangular implementation should reduce that cost, but the self-collision block still uses the full light-species order.
+Plan: Measure per-block runtime at high order and adjust the batch size if needed. I will also inspect the high-order matrix for numerical conditioning once the first benchmark finishes.
+CMD: for p in 821 822 988; do echo $p; test ! -f /proc/$p/stat || cat /proc/$p/stat; done; tail -25 /app/work/fast90.log; tail -25 /app/work/fast80.log; cat /app/work/rect90.log
+
+OBS: 
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 6.717379570007324
+tensor 4.674175500869751
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 2.861008644104004
+tensor 4.780616283416748
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 12.925332069396973
+tensor 8.683464527130127
+root@627da822ee8d:/app#
+
+
+#### step 40 01:14:38
+MSG: Analysis: The high-order square calculations are dominated by memory allocation overhead. Their low-order results are already validated, so the next improvement is reducing temporary-array sizes rather than changing the physical model.
+Plan: Benchmark single-energy batches and compare them with the current four-energy batches. Also retain the rectangular heavy-species basis, which is sufficient for tracer mixtures and avoids irrelevant high-order heavy-species work.
+CMD: cp /app/work/brackets.py /app/work/brackets_b4.py; sed -i 's/range(0,len(e),4)/range(0,len(e),1)/; s/slice(start,start+4)/slice(start,start+1)/' /app/work/brackets.py
+OPENBLAS_NUM_THREADS=1 python3 /app/work/bench.py 85 4 > /app/work/bench1.log 2>&1 &
+
+CMD: 
+CMD: cat /app/work/bench1.log; tail -20 /app/work/fast90.log; tail -20 /app/work/fast80.log; tail -20 /app/work/rect90.log
+
+OBS:  -0.34098641]
+24 [19.33378049  0.73224636  1.95341821 -0.34101723]
+30 [19.33378049  0.73224642  1.95343054 -0.34103207]
+36 [19.33378049  0.73224644  1.95343323 -0.34103539]
+44 [19.33378049  0.73224644  1.95343362 -0.34103593]
+50 [19.33378049  0.73224644  1.95343364 -0.34103594]
+60 [19.33378049  0.73224644  1.95343394 -0.34103621]
+70 [19.33378049  0.73224645  1.95343445 -0.34103673]
+80 [19.33378049  0.73224645  1.95343494 -0.34103724]
+80 [19.33378049  0.73224645  1.95343494 -0.34103724]
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 12.925332069396973
+tensor 8.683464527130127
+root@627da822ee8d:/app#
+
+
+#### step 41 01:14:56
+MSG: Analysis: The order-80 high-temperature tracer calculation finished. Its transport values are already converged by roughly order 45, while later orders show tiny numerical drift. This suggests that very high orders should be reserved for genuinely slow-converging cases rather than used uniformly.
+Plan: Inspect the saved vector matrix and the remaining low-temperature tracer benchmark. Use nested-order convergence to select the lowest reliably converged solution and avoid unnecessary high-order numerical drift.
+CMD: cp /app/work/lastmix.npz /app/work/highT.npz
+OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+import sys;sys.path.insert(0,'/app/work')
+from brackets import *
+f=np.load('/app/work/highT.npz'); B=f['B1']; n=f['n1']; N=len(n)//2-1
+for start in [0,30,50,70]:
+ ix=np.r_[np.arange(start,N+1),N+1+np.arange(start,N+1)]
+ print(start,np.diag(B)[ix].min(),np.diag(B)[ix].max(),np.linalg.eigvalsh(B[np.ix_(ix,ix)])[:5])
+PY
+cat /app/work/rect90.log; tail -25 /app/work/fast90.log
+
+OBS: New Terminal Output:
+
+root@627da822ee8d:/app# cp /app/work/lastmix.npz /app/work/highT.npz
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 - <<'PY'
+> import sys;sys.path.insert(0,'/app/work')
+> from brackets import *
+> f=np.load('/app/work/highT.npz'); B=f['B1']; n=f['n1']; N=len(n)//2-1
+> for start in [0,30,50,70]:
+>  ix=np.r_[np.arange(start,N+1),N+1+np.arange(start,N+1)]
+>  print(start,np.diag(B)[ix].min(),np.diag(B)[ix].max(),np.linalg.eigvalsh(B[np.ix_(ix,ix)])[:5])
+> PY
+
+
+
+#### step 42 01:15:10
+MSG: Analysis: The high-temperature tracer result is stable well within the requested tolerance by moderate-high order. I am checking the matrix conditioning and the remaining low-temperature benchmark before setting the final convergence policy.
+Plan: Collect the outstanding results and use the rectangular basis for difficult tracer cases. Then perform isolated runtime tests and stricter numerical-resolution comparisons.
+CMD: 
+CMD: tail -25 /app/work/rect90.log; tail -25 /app/work/fast90.log; jobs
+
+OBS: ountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 12.925332069396973
+tensor 8.683464527130127
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 6.717379570007324
+tensor 4.674175500869751
+[1]-  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/fastmix.py .8 100 .001 .2 32 90 > /app/work/fast90.log 2>&1 &
+[3]+  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/rectmix.py .8 100 .001 .2 32 90 > /app/work/rect90.log 2>&1 &
+root@627da822ee8d:/app#
+
+
+#### step 43 01:15:35
+MSG: Analysis: The high-order matrix has only a tiny spurious momentum-mode eigenvalue, but that can be eliminated exactly using collision momentum conservation. This also reduces numerical drift in thermal diffusion at large mass ratios.
+Plan: Enforce the known momentum null mode algebraically in the vector collision matrix, and restore the faster four-energy batching. After the remaining benchmarks finish, compare the conservation-corrected results against them.
+CMD: python3 - <<'PY'
+p='/app/work/brackets.py';s=open(p).read().replace('range(0,len(e),1)','range(0,len(e),4)').replace('slice(start,start+1)','slice(start,start+4)')
+s=s.replace('B/=norm[:,None]*norm[None,:]', '''if l==1:
+        # The total pair momentum is exactly invariant.  Determine the
+        # species-2 constant-vector row from that identity, avoiding loss
+        # of significance in small angular transport differences.
+        j=N+1
+        B[j,:]=-B[0,:]/np.sqrt(R)
+        B[:,j]=B[j,:]
+        B[j,j]=B[0,0]/R
+    B/=norm[:,None]*norm[None,:]''')
+open(p,'w').write(s)
+PY
+cat /app/work/rect90.log; tail -25 /app/work/fast90.log
+
+OBS: p.sqrt(R)
+>         B[:,j]=B[j,:]
+>         B[j,j]=B[0,0]/R
+>     B/=norm[:,None]*norm[None,:]''')
+> open(p,'w').write(s)
+> PY
+root@627da822ee8d:/app# cat /app/work/rect90.log; tail -25 /app/work/fast90.log
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 12.925332069396973
+tensor 8.683464527130127
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 6.717379570007324
+tensor 4.674175500869751
+root@627da822ee8d:/app#
+
+
+#### step 44 01:16:22
+MSG: Analysis: Exact momentum conservation is now enforced in the vector matrix, removing a small roundoff-generated null-mode error. The rectangular and square low-temperature tracer benchmarks are still running.
+Plan: Inspect their results and improve energy quadrature efficiency by using fewer nodes in intervals where the integrand is smooth. Preserve fine quadrature near the orbiting threshold and verify the change against the existing reference runs.
+CMD: tail -25 /app/work/rect90.log; tail -25 /app/work/fast90.log; for p in 821 988; do echo $p; test ! -f /proc/$p/stat || cat /proc/$p/stat; done
+
+CMD: 
+OBS: ncountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 6.717379570007324
+tensor 4.674175500869751
+821
+821 (python3) R 57 821 56 34817 1165 4194560 13893793 0 0 0 15308 21692 0 0 20 0 1 0 201226359 414789632 52945 18446744073709551615 94386420330496 9438642033083
+3 140724869390864 0 0 0 0 16781312 2 0 0 0 17 10 0 0 0 0 0 94386420342192 94386420342808 94386842537984 140724869393835 140724869393885 140724869393885 14072486
+9394401 0
+988
+988 (python3) R 57 988 56 34817 1166 4194560 5917351 0 0 0 5817 8433 0 0 20 0 1 0 201250487 461975552 57568 18446744073709551615 97516715073536 97516715073873 1
+40733106117344 0 0 0 0 16781312 2 0 0 0 17 36 0 0 0 0 0 97516715085232 97516715085848 97517505654784 140733106122155 140733106122205 140733106122205 14073310612
+2721 0
+root@627da822ee8d:/app#
+
+
+#### step 45 01:17:12
+MSG: Analysis: The high-order tests confirm that runtime grows sharply above order 65, mainly from temporary-array traffic. The final driver should therefore begin at moderate order and increase only when the measured convergence tail requires it.
+Plan: Collect the low-temperature order-90 results, then use a moderate initial order with a rectangular-basis fallback. This should retain accuracy while staying comfortably within the runtime budget.
+CMD: tail -25 /app/work/rect90.log; tail -25 /app/work/fast90.log
+
+CMD: 
+CMD: tail -25 /app/work/rect90.log; tail -25 /app/work/fast90.log
+
+OBS: t-A*t))
+scatter 448 6.717379570007324
+tensor 4.674175500869751
+vector 446.2942545413971
+8 [ 0.58919844  0.02233396  0.057908   -0.39542235]
+12 [ 0.58919845  0.02233413  0.05793963 -0.39667574]
+16 [ 0.58919845  0.02233418  0.05795051 -0.39709569]
+20 [ 0.58919845  0.02233421  0.05795527 -0.39727675]
+24 [ 0.58919845  0.02233422  0.05795768 -0.3973675 ]
+30 [ 0.58919845  0.02233423  0.05795947 -0.39743459]
+36 [ 0.58919845  0.02233423  0.05796033 -0.39746661]
+44 [ 0.58919845  0.02233423  0.0579609  -0.39748741]
+50 [ 0.58919845  0.02233423  0.05796112 -0.39749557]
+60 [ 0.58919845  0.02233424  0.05796132 -0.39750287]
+70 [ 0.58919845  0.02233424  0.05796142 -0.39750653]
+80 [ 0.58919845  0.02233424  0.05796148 -0.39750845]
+90 [ 0.58919845  0.02233424  0.0579615  -0.39750952]
+root@627da822ee8d:/app#
+
+
+#### step 46 01:17:49
+MSG: Analysis: The full order-90 low-temperature tracer calculation finished and shows a smooth, small remaining tail. Its runtime is close enough to the limit that further optimization is worthwhile. The main inefficiency is storing entire generating-function coefficient arrays even though only their weighted integrals are needed.
+Plan: Implement a streaming recurrence that keeps only three polynomial rows in memory and integrates each row immediately. This preserves the same collision brackets while greatly reducing allocation traffic. Compare it against the existing implementation at moderate and high orders.
+CMD: cat > /app/work/stream.py <<'PY'
+from brackets import *
+
+def series_integrated(nu,orders,e,h,a,b,p,q,polys,base):
+    N,M=orders; B=b*b; C=q*q; E=1-a*a-p*p; F=B*C+a*p*b*q*h
+    shape=np.broadcast_shapes(e.shape,h.shape)
+    W=np.array([np.broadcast_to(v,shape)*base for v in polys.values()])
+    keys=list(polys)
+    out=np.zeros((N+1,M+1))
+    curr=np.empty((M+1,)+shape); prev=np.zeros_like(curr); nxt=np.zeros_like(curr)
+    for m in range(M+1): curr[m]=C**m*eval_genlaguerre(m,nu-1,e)
+    for n in range(N+1):
+        ints=np.einsum('muv,kuv->km',curr,W,optimize=True)
+        for k,(i,j) in enumerate(keys):
+            if n+i<=N and j<=M: out[n+i,j:]+=ints[k,:M+1-j]
+        if n==N: break
+        v0=B*(nu-e+2*n)
+        v1=-(nu+2*n)*(E+B*C)+2*e*F
+        v2=(nu+2*n)*C*E-e*(2*F*C-C*E)
+        w0=-(nu+n-1)*B*B
+        w1=2*(nu+n-1)*B*E
+        w2=-(nu+n-1)*E*E
+        for m in range(M+1):
+            val=v0*curr[m]+w0*prev[m]
+            if m>=1: val=val+v1*curr[m-1]+(n+1)*2*C*nxt[m-1]+w1*prev[m-1]
+            if m>=2: val=val+v2*curr[m-2]-(n+1)*C*C*nxt[m-2]+w2*prev[m-2]
+            nxt[m]=val/(n+1)
+        prev,curr,nxt=curr,nxt,prev
+    return out
+
+def integrated_correlation(l,orders,e,h,a,b,p,q,base):
+    ap=a*p; bq=b*q; B=b*b; C=q*q
+    H={(0,0):bq*h,(1,0):-bq*B*h-ap*B,(0,1):-bq*C*h-ap*C,(1,1):bq*(B*C+ap*ap)*h+2*ap*B*C}
+    if l==1:
+        out=series_integrated(2.5,orders,e,h,a,b,p,q,{(0,0):1.5*ap},base)
+        out+=series_integrated(3.5,orders,e,h,a,b,p,q,{k:e*v for k,v in H.items()},base)
+    else:
+        out=series_integrated(3.5,orders,e,h,a,b,p,q,{(0,0):2.5*ap*ap},base)
+        out+=series_integrated(4.5,orders,e,h,a,b,p,q,{k:(10/3)*ap*e*v for k,v in H.items()},base)
+        Hc={(0,0):B,(0,1):-2*B*C-2*ap*bq*h,(0,2):B*C*C+ap*ap*C+2*ap*bq*C*h}
+        Hd={(0,0):C,(1,0):-2*B*C-2*ap*bq*h,(2,0):C*B*B+ap*ap*B+2*ap*bq*B*h}
+        HH=polymul(H,H); CD=polymul(Hc,Hd)
+        for k,v in CD.items(): HH[k]=HH.get(k,0)-v/3
+        out+=series_integrated(5.5,orders,e,h,a,b,p,q,{k:e*e*v for k,v in HH.items()},base)
+    return out
+
+if __name__=='__main__':
+ e,we=roots_genlaguerre(24,1); h,wh=roots_legendre(27); base=we[:,None]*wh[None,:]
+ for N in [5,12,20]:
+  for l in [1,2]:
+   a=.1;b=np.sqrt(.99);p=np.sqrt(.99);q=-.1
+   st=time.time(); C=correlation(l,(N,N),e[:,None],h[None,:],a,b,p,q)
+   ref=np.einsum('ijuv,uv->ij',C,base,optimize=True)
+   val=integrated_correlation(l,(N,N),e[:,None],h[None,:],a,b,p,q,base)
+   print(l,N,np.max(abs(val-ref)),time.time()-st)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/stream.py
+
+OBS: genlaguerre(24,1); h,wh=roots_legendre(27); base=we[:,None]*wh[None,:]
+>  for N in [5,12,20]:
+>   for l in [1,2]:
+>    a=.1;b=np.sqrt(.99);p=np.sqrt(.99);q=-.1
+>    st=time.time(); C=correlation(l,(N,N),e[:,None],h[None,:],a,b,p,q)
+>    ref=np.einsum('ijuv,uv->ij',C,base,optimize=True)
+>    val=integrated_correlation(l,(N,N),e[:,None],h[None,:],a,b,p,q,base)
+>    print(l,N,np.max(abs(val-ref)),time.time()-st)
+> PY
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/stream.py
+1 5 1.1102230246251565e-16 0.007086992263793945
+2 5 1.3877787807814457e-16 0.0052490234375
+1 12 1.1102230246251565e-16 0.01740550994873047
+2 12 1.942890293094024e-16 0.018364429473876953
+1 20 1.1102230246251565e-16 0.043146371841430664
+2 20 4.562322741819003e-16 0.05079817771911621
+root@627da822ee8d:/app#
+
+
+#### step 47 01:18:10
+MSG: Analysis: The streaming collision-bracket recurrence agrees with the original implementation to machine precision. It avoids storing the full two-dimensional polynomial coefficient array and should substantially improve high-order runtime.
+Plan: Vectorize the remaining within-row recurrence using a second-order linear filter, then integrate the streaming implementation into matrix assembly. Compare its outputs against the existing benchmarks and measure an isolated difficult-case runtime.
+CMD: cp /app/work/stream.py /app/work/stream_loop.py
+python3 - <<'PY'
+p='/app/work/stream.py';s=open(p).read().replace('from brackets import *','from brackets import *\nfrom scipy.signal import lfilter')
+lo=s.index('        for m in range(M+1):\n            val='); hi=s.index('        prev,curr,nxt=',lo)
+s=s[:lo]+'''        nxt[:]=(v0*curr+w0*prev)/(n+1)
+        nxt[1:]+=(v1*curr[:-1]+w1*prev[:-1])/(n+1)
+        nxt[2:]+=(v2*curr[:-2]+w2*prev[:-2])/(n+1)
+        nxt=lfilter([1.],[1.,-2*C,C*C],nxt,axis=0)
+'''+s[hi:]
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/stream.py
+cat /app/work/rect90.log
+
+OBS: @627da822ee8d:/app# python3 - <<'PY'
+> p='/app/work/stream.py';s=open(p).read().replace('from brackets import *','from brackets import *\nfrom scipy.signal import lfilter')
+> lo=s.index('        for m in range(M+1):\n            val='); hi=s.index('        prev,curr,nxt=',lo)
+> s=s[:lo]+'''        nxt[:]=(v0*curr+w0*prev)/(n+1)
+>         nxt[1:]+=(v1*curr[:-1]+w1*prev[:-1])/(n+1)
+>         nxt[2:]+=(v2*curr[:-2]+w2*prev[:-2])/(n+1)
+>         nxt=lfilter([1.],[1.,-2*C,C*C],nxt,axis=0)
+> '''+s[hi:]
+> open(p,'w').write(s)
+> PY
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/stream.py
+1 5 1.1102230246251565e-16 0.003520965576171875
+2 5 1.3877787807814457e-16 0.0048847198486328125
+1 12 1.1102230246251565e-16 0.011922359466552734
+2 12 1.942890293094024e-16 0.020589351654052734
+
+
+
+#### step 48 01:18:26
+MSG: Analysis: The vectorized streaming recurrence matches the original at the tested orders and removes the slow Python loop over the second polynomial index. The rectangular low-temperature benchmark is also nearing completion.
+Plan: Replace full-array bracket assembly with the streaming version, test high-order agreement, and benchmark the complete difficult tracer calculation. Then finalize the convergence policy using the measured nested-order tails.
+CMD: cp /app/work/brackets.py /app/work/brackets_full.py
+python3 - <<'PY'
+p='/app/work/brackets.py';s=open(p).read()
+f=open('/app/work/stream.py').read().split("if __name__=='__main__':")[0].replace('from brackets import *','')
+s=f+'\n'+s
+s=s.replace('range(0,len(e),4)','range(0,len(e),16)').replace('slice(start,start+4)','slice(start,start+16)')
+s=s.replace("C=correlation(l,orders,e[sl,None],h[None,:],a,b,p,q)\n            vals+=np.einsum('ijuv,uv->ij',C,base[sl],optimize=True)","vals+=integrated_correlation(l,orders,e[sl,None],h[None,:],a,b,p,q,base[sl])")
+open(p,'w').write(s)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/bench.py 85 32
+OPENBLAS_NUM_THREADS=1 python3 /app/work/rectmix.py .8 100 .001 .2 32 90 > /app/work/stream90.log 2>&1 &
+cat /app/work/rect90.log
+
+OBS: brackets_full.py
+[3]+  Done                    OPENBLAS_NUM_THREADS=1 python3 /app/work/rectmix.py .8 100 .001 .2 32 90 > /app/work/rect90.log 2>&1
+root@627da822ee8d:/app# python3 - <<'PY'
+> p='/app/work/brackets.py';s=open(p).read()
+> f=open('/app/work/stream.py').read().split("if __name__=='__main__':")[0].replace('from brackets import *','')
+> s=f+'\n'+s
+> s=s.replace('range(0,len(e),4)','range(0,len(e),16)').replace('slice(start,start+4)','slice(start,start+16)')
+> s=s.replace("C=correlation(l,orders,e[sl,None],h[None,:],a,b,p,q)\n            vals+=np.einsum('ijuv,uv->ij',C,base[sl],optimize=True)","vals+=integrated_corr
+elation(l,orders,e[sl,None],h[None,:],a,b,p,q,base[sl])")
+> open(p,'w').write(s)
+> PY
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/bench.py 85 32
+
+
+
+#### step 49 01:18:50
+MSG: Analysis: The rectangular benchmark completed, and the new streaming implementation is now being benchmarked. It keeps the same quadrature and generating-function mathematics but uses much smaller temporary arrays.
+Plan: Inspect the benchmark runtime and compare streaming results against the completed square and rectangular calculations. If they agree, rebuild transport.py with the streaming solver and run resolution-refinement tests.
+CMD: 
+CMD: tail -25 /app/work/rect90.log; cat /app/work/stream90.log; jobs
+
+OBS:   0.02233423  0.05796033 -0.39746661]
+44 [ 0.58919845  0.02233423  0.0579609  -0.39748741]
+50 [ 0.58919845  0.02233423  0.05796112 -0.39749557]
+60 [ 0.58919845  0.02233424  0.05796132 -0.39750287]
+70 [ 0.58919845  0.02233424  0.05796142 -0.39750653]
+80 [ 0.58919845  0.02233424  0.05796148 -0.39750845]
+90 [ 0.58919845  0.02233424  0.0579615  -0.39750952]
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 7.722468376159668
+tensor 1.6064658164978027
+[1]+  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/rectmix.py .8 100 .001 .2 32 90 > /app/work/stream90.log 2>&1 &
+root@627da822ee8d:/app#
+
+
+#### step 50 01:19:16
+MSG: Analysis: The rectangular and square order-90 results agree at all displayed digits, validating the reduced heavy-species basis. The streaming implementation has already shortened the tensor portion; its vector benchmark is still running.
+Plan: Test stricter scattering and energy quadrature at low and moderate polynomial orders, including the low-temperature Lennard-Jones tracer case and a case with nearly vanishing thermal diffusion. These tests will isolate quadrature errors from polynomial-truncation errors.
+CMD: cat > /app/work/resolution.py <<'PY'
+from brackets import *
+from scatter import *
+import sys
+A,R,X,T=map(float,sys.argv[1:5]); N=int(sys.argv[5])
+for ng,ns,nd in [(24,70,140),(40,110,220),(64,180,360)]:
+ ec=critical(A)[1]/T; bounds=sorted(set([0,min(ec,70),.05,.15,.4,1,2,4,8,16,32,55,90,150,max(200,2.8*N)]));u,w=gauss(ng)
+ e=np.concatenate([lo+(hi-lo)*u for lo,hi in zip(bounds[:-1],bounds[1:])]);we=np.concatenate([(hi-lo)*w for lo,hi in zip(bounds[:-1],bounds[1:])])*e*np.exp(-e)
+ st=time.time(); Q=np.array([cross_sections(A,T*z,2*N+2,ns,nd) for z in e]); v=transport(N,R,X,T,e,we,Q)
+ print(ng,ns,nd,v,time.time()-st,flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/resolution.py 0 10 .3 1 24 > /app/work/res0.log 2>&1 &
+OPENBLAS_NUM_THREADS=1 python3 /app/work/resolution.py 0 100 .001 .2 24 > /app/work/rescold.log 2>&1 &
+
+OBS: gv[5])
+> for ng,ns,nd in [(24,70,140),(40,110,220),(64,180,360)]:
+>  ec=critical(A)[1]/T; bounds=sorted(set([0,min(ec,70),.05,.15,.4,1,2,4,8,16,32,55,90,150,max(200,2.8*N)]));u,w=gauss(ng)
+>  e=np.concatenate([lo+(hi-lo)*u for lo,hi in zip(bounds[:-1],bounds[1:])]);we=np.concatenate([(hi-lo)*w for lo,hi in zip(bounds[:-1],bounds[1:])])*e*np.exp(-e
+)
+>  st=time.time(); Q=np.array([cross_sections(A,T*z,2*N+2,ns,nd) for z in e]); v=transport(N,R,X,T,e,we,Q)
+>  print(ng,ns,nd,v,time.time()-st,flush=True)
+> PY
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/resolution.py 0 10 .3 1 24 > /app/work/res0.log 2>&1 &
+[2] 1308
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/resolution.py 0 100 .001 .2 24 > /app/work/rescold.log 2>&1 &
+[3] 1309
+root@627da822ee8d:/app#
+
+
+#### step 51 01:20:04
+MSG: Analysis: The resolution-refinement tests are running. The remaining numerical risks are concentrated in low-temperature orbiting scattering and the slow light-tracer diffusion tail; both are being tested explicitly.
+Plan: Inspect those tests and the streaming order-90 benchmark. Then choose production quadrature sizes with a safety margin and verify the final program under a minimal environment and read-only working directory.
+CMD: cat /app/work/res0.log; cat /app/work/rescold.log; tail -25 /app/work/stream90.log
+
+CMD: 
+CMD: cat /app/work/res0.log; cat /app/work/rescold.log; tail -25 /app/work/stream90.log
+
+OBS: 59] 10.505842685699463
+40 110 220 [ 0.31073539  0.18355007  0.10907961 -0.00785662] 26.234994649887085
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+24 70 140 [ 0.24179622  0.00912858  0.02167754 -0.12333797] 10.851956129074097
+40 110 220 [ 0.24179586  0.00912857  0.02167755 -0.12333702] 27.276260137557983
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 7.722468376159668
+tensor 1.6064658164978027
+root@627da822ee8d:/app#
+
+
+#### step 52 01:20:44
+MSG: Analysis: The moderate-mixture resolution tests agree closely. In the low-temperature Lennard-Jones tracer case, the first refinement changes thermal diffusion by about 8 parts per million, so a somewhat finer production scattering quadrature is warranted.
+Plan: Collect the finest-resolution results and the streaming high-order benchmark. Increase the production quadrature conservatively, while retaining the rectangular basis and nested polynomial-order checks.
+CMD: cat /app/work/res0.log; cat /app/work/rescold.log; tail -25 /app/work/stream90.log; jobs
+
+CMD: 
+OBS: .851956129074097
+40 110 220 [ 0.24179586  0.00912857  0.02167755 -0.12333702] 27.276260137557983
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 7.722468376159668
+tensor 1.6064658164978027
+[1]   Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/rectmix.py .8 100 .001 .2 32 90 > /app/work/stream90.log 2>&1 &
+[2]-  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/resolution.py 0 10 .3 1 24 > /app/work/res0.log 2>&1 &
+[3]+  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/resolution.py 0 100 .001 .2 24 > /app/work/rescold.log 2>&1 &
+root@627da822ee8d:/app#
+
+
+#### step 53 01:21:05
+MSG: Analysis: The remaining high-order cost can be reduced further: the angular degree of a correlation between two Sonine basis functions is at most the smaller polynomial index plus the tensor rank, not the sum of both indices. The current angular quadrature is therefore larger than necessary.
+Plan: Reduce the angular cross-section and bracket quadrature orders to their exact polynomial degree, verify agreement against the existing implementation, and use the resulting speedup to allow finer energy/scattering quadrature in the production program.
+CMD: cp /app/work/brackets.py /app/work/brackets_angularold.py; sed -i 's/L=2\*N+l/L=N+l/' /app/work/brackets.py
+cat > /app/work/angcheck.py <<'PY'
+import brackets as new
+import brackets_angularold as old
+import numpy as np
+from scipy.special import roots_genlaguerre
+import time
+e,we=roots_genlaguerre(45,1); Q=np.full((len(e),70),np.pi)
+for l in [1,2]:
+ for R in [1,10,100]:
+  a,n=new.matrix(l,20,R,.03,1,e,we,Q)
+  b,n=old.matrix(l,20,R,.03,1,e,we,Q)
+  print(l,R,np.max(abs(a-b)),np.max(abs(a-b))/np.max(abs(b)),flush=True)
+PY
+OPENBLAS_NUM_THREADS=1 python3 /app/work/angcheck.py
+cat /app/work/rescold.log; cat /app/work/res0.log; tail -25 /app/work/stream90.log
+
+OBS: New Terminal Output:
+
+root@627da822ee8d:/app# cp /app/work/brackets.py /app/work/brackets_angularold.py; sed -i 's/L=2\*N+l/L=N+l/' /app/work/brackets.py
+root@627da822ee8d:/app# cat > /app/work/angcheck.py <<'PY'
+> import brackets as new
+> import brackets_angularold as old
+> import numpy as np
+> from scipy.special import roots_genlaguerre
+> import time
+> e,we=roots_genlaguerre(45,1); Q=np.full((len(e),70),np.pi)
+> for l in [1,2]:
+>  for R in [1,10,100]:
+>   a,n=new.matrix(l,20,R,.03,1,e,we,Q)
+>   b,n=old.matrix(l,20,R,.03,1,e,we,Q)
+>   print(l,R,np.max(abs(a-b)),np.max(abs(a-b))/np.max(abs(b)),flush=True)
+> PY
+root@627da822ee8d:/app# OPENBLAS_NUM_THREADS=1 python3 /app/work/angcheck.py
+
+
+
+#### step 54 01:21:30
+MSG: Analysis: The exact angular-degree reduction is being checked against the original larger quadrature. If confirmed, it will approximately halve the angular working-array size without introducing an approximation.
+Plan: Collect the angular comparison and finest-resolution tests, then rebuild the standalone program with the optimized solver. Run isolated extreme-case tests to verify runtime and final numerical stability.
+CMD: 
+CMD: cat /app/work/rescold.log; cat /app/work/res0.log; tail -25 /app/work/stream90.log; jobs
+
+OBS: :,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+24 70 140 [ 0.31073538  0.18355006  0.10907961 -0.00785659] 10.505842685699463
+40 110 220 [ 0.31073539  0.18355007  0.10907961 -0.00785662] 26.234994649887085
+64 180 360 [ 0.31073539  0.18355006  0.10907961 -0.00785662] 78.0792076587677
+/app/work/scatter.py:65: RuntimeWarning: divide by zero encountered in divide
+  uu=lo+span*u; t=1-uu*uu; r=rt[:,None]/t
+/app/work/scatter.py:42: RuntimeWarning: divide by zero encountered in log1p
+  ld=np.log1p(-rt*u*u/(rt-A*t))
+scatter 448 7.722468376159668
+tensor 1.6064658164978027
+[1]+  Running                 OPENBLAS_NUM_THREADS=1 python3 /app/work/rectmix.py .8 100 .001 .2 32 90 > /app/work/stream90.log 2>&1 &
+root@627da822ee8d:/app#
+
+
+#### step 55 01:22:03
+MSG: Analysis: The angular-degree reduction agrees with the larger quadrature to about 1e-13 relative error. The finest energy/scattering refinements also agree well within the acceptance tolerance, including the low-temperature tracer case.
+Plan: Rebuild the production program with streaming brackets, exact angular degree, and a rectangular heavy-species basis. Use a conservative high-order fallback only when nested-order convergence requires it, then benchmark the final program in isolation.
+CMD: python3 - <<'PY'
+p='/app/work/assemble.py';s=open(p).read()
+s=s.replace('ng=32','ng=40').replace('N=84','N=76').replace('N=64','N=56').replace('N=44','N=40')
+s=s.replace('2*N+2,100,200','N+2,130,260').replace('2*M+2,100,200','M+2,130,260')
+s=s.replace('matrix(1,N,R,X,T,e,we,Q)','matrix(1,N,R,X,T,e,we,Q,H=24 if R>25 else N)').replace('matrix(1,M,R,X,T,e,we,Q)','matrix(1,M,R,X,T,e,we,Q,H=24 if R>25 else M)')
+s=s.replace('M=min(104,N+24)','M=min(104,N+24)')
+open(p,'w').write(s)
+PY
+python3 /app/work/assemble.py
+python3 -m py_compile /app/output/transport.py
+cat /app/work/stream90.log
+python3 - <<'PY' > /app/work/prodextreme.log 2>&1 &
+import subprocess,time
+st=time.time(); p=subprocess.run(['python3','/app/output/transport.py','.8','100','.001','.2'],capture_output=True,text=True)
+print(p.returncode,p.stdout,p.stderr,'TIME',time.time()-st,flush=True)
+PY
+
+OBS: 0.02233422  0.05795768 -0.3973675 ]
+30 [ 0.58919845  0.02233423  0.05795947 -0.39743459]
+36 [ 0.58919845  0.02233423  0.05796033 -0.39746661]
+44 [ 0.58919845  0.02233423  0.0579609  -0.39748741]
+50 [ 0.58919845  0.02233423  0.05796112 -0.39749557]
+60 [ 0.58919845  0.02233424  0.05796132 -0.39750287]
+70 [ 0.58919845  0.02233424  0.05796142 -0.39750653]
+80 [ 0.58919845  0.02233424  0.05796148 -0.39750845]
+90 [ 0.58919845  0.02233424  0.0579615  -0.39750952]
+root@627da822ee8d:/app# python3 - <<'PY' > /app/work/prodextreme.log 2>&1 &
+> import subprocess,time
+> st=time.time(); p=subprocess.run(['python3','/app/output/transport.py','.8','100','.001','.2'],capture_output=True,text=True)
+> print(p.returncode,p.stdout,p.stderr,'TIME',time.time()-st,flush=True)
+> PY
+[1] 1441
+root@627da822ee8d:/app#
+
+
+#### step 56 01:22:52
+MSG: Analysis: The optimized streaming benchmark reproduces the previous order-90 tracer results exactly at the displayed precision and cuts vector assembly time substantially. The rebuilt standalone program is now undergoing an isolated extreme-case runtime test.
+Plan: Inspect that runtime test, then test the low-temperature Lennard-Jones tracer case and a mass ratio close to one. These cover the slowest convergence regime and the cancellation-sensitive thermal-diffusion limit.
+CMD: cat /app/work/prodextreme.log; tail -80 /app/output/transport.py; ls -l /app/output
+
+CMD: 
+CMD: cat /app/work/prodextreme.log
+
+OBS: [0,0,0,1.5e-7]))
+    if np.any(np.abs(vals-prev)>tol) and N<100:
+        M=min(104,N+24)
+        e,we=energy_grid(A,T,M)
+        Q=np.array([cross_sections(A,T*z,M+2,130,260) for z in e])
+        B1,n1=matrix(1,M,R,X,T,e,we,Q,H=24 if R>25 else M)
+        vals=evaluate(M,B1,n1)
+    if R==1: vals[3]=0.
+    return vals
+
+def main():
+    A,R,X,T=map(float,sys.argv[1:5])
+    vals=calculate(A,R,X,T)
+    print(json.dumps(dict(zip(['viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'],map(float,vals))),allow_nan=False,separators=('
+,',':')))
+
+if __name__=='__main__':
+    main()
+total 20
+drwxr-xr-x 2 root root  4096 Nov  3 01:22 __pycache__
+-rw-r--r-- 1 root root 13385 Nov  3 01:22 transport.py
+root@627da822ee8d:/app# cat /app/work/prodextreme.log
+root@627da822ee8d:/app#
+
+
+#### step 57 01:23:41
+MSG: Analysis: The rebuilt program has the required standalone entry point and output format. Its extreme-case test is still running; the final convergence fallback may be exercised in that case.
+Plan: Collect the isolated runtime result, remove generated cache files from the output directory, and prepare minimal-environment tests for additional difficult and cancellation-sensitive inputs.
+CMD: cat /app/work/prodextreme.log; jobs; rm -rf /app/output/__pycache__
+cat > /app/work/prodtests.py <<'PY'
+import subprocess,time,os
+for args in [('0','100','.001','.2'),('0','1.00001','.001','1'),('.8','100','.95','50'),('.35','50','.05','2')]:
+ st=time.time()
+ p=subprocess.run(['python3','/app/output/transport.py',*args],capture_output=True,text=True,env={'HOME':'/tmp','TMPDIR':'/tmp','PATH':os.environ['PATH'],'LANG':'C.UTF-8'},cwd='/tmp')
+ print(args,p.returncode,p.stdout,p.stderr,'TIME',time.time()-st,flush=True)
+PY
+
+CMD: 
+CMD: cat /app/work/prodextreme.log
+
+OBS: >&1
+import subprocess,time
+st=time.time(); p=subprocess.run(['python3','/app/output/transport.py','.8','100','.001','.2'],capture_output=True,text=True)
+print(p.returncode,p.stdout,p.stderr,'TIME',time.time()-st,flush=True)
+PY
+ &
+root@627da822ee8d:/app# cat > /app/work/prodtests.py <<'PY'
+> import subprocess,time,os
+> for args in [('0','100','.001','.2'),('0','1.00001','.001','1'),('.8','100','.95','50'),('.35','50','.05','2')]:
+>  st=time.time()
+>  p=subprocess.run(['python3','/app/output/transport.py',*args],capture_output=True,text=True,env={'HOME':'/tmp','TMPDIR':'/tmp','PATH':os.environ['PATH'],'LAN
+G':'C.UTF-8'},cwd='/tmp')
+>  print(args,p.returncode,p.stdout,p.stderr,'TIME',time.time()-st,flush=True)
+> PY
+root@627da822ee8d:/app# cat /app/work/prodextreme.log
+root@627da822ee8d:/app#
+
+
+#### step 58 01:24:29
+MSG: Analysis: The isolated extreme-case run is still computing. The implementation does not rely on writable files or inherited numerical-library settings, and the output directory has been cleaned to contain only transport.py.
+Plan: Inspect the running process and its elapsed CPU usage, then collect the final result. Afterward, run the minimal-environment test suite sequentially so runtime measurements are representative.
+CMD: cat /app/work/prodextreme.log; for p in /proc/[0-9]*/cmdline; do c=$(tr '\0' ' ' < "$p"); case "$c" in *transport.py*) echo "$p $c"; cat "${p%cmdline}stat";; esac; done
+
+CMD: 
+CMD: cat /app/work/prodextreme.log
+
+OBS:  18446744073709551615 108847375306752 1088473753
+07089 140728095808816 0 0 0 0 16781312 2 0 0 0 17 5 0 0 0 0 0 108847375318448 108847375319064 108847643750400 140728095813060 140728095813108 140728095813108 14
+0728095813601 0
+root@627da822ee8d:/app# cat /app/work/prodextreme.log
+0 {"viscosity":0.5891984495310418,"thermal_conductivity":0.0223342365901882,"binary_diffusion":0.057961522206266124,"thermal_diffusion_factor":-0.39751013920865
+674}
+  TIME 140.02411460876465
+[1]+  Done                    python3 - <<'PY' > /app/work/prodextreme.log 2>&1
+import subprocess,time
+st=time.time(); p=subprocess.run(['python3','/app/output/transport.py','.8','100','.001','.2'],capture_output=True,text=True)
+print(p.returncode,p.stdout,p.stderr,'TIME',time.time()-st,flush=True)
+PY
+
+root@627da822ee8d:/app#
+
+
+#### step 59 01:25:11
+MSG: Analysis: The isolated extreme high-core tracer run completed successfully in 140 seconds, well below the 600-second limit. Its result agrees with the independent order-90 benchmark, with the higher-order fallback reducing the remaining diffusion tail.
+Plan: Run the sequential minimal-environment tests next. These include the low-temperature Lennard-Jones tracer case, nearly equal masses, a high-light-fraction extreme, and an intermediate-core mixture.
+CMD: python3 /app/work/prodtests.py > /app/work/prodtests.log 2>&1 &
+
+CMD: 
+CMD: cat /app/work/prodtests.log
+
+OBS: New Terminal Output:
+
+root@627da822ee8d:/app# python3 /app/work/prodtests.py > /app/work/prodtests.log 2>&1 &
+[1] 1588
+root@627da822ee8d:/app# cat /app/work/prodtests.log
+root@627da822ee8d:/app#
+
+
+#### step 60 01:26:03
+MSG: Analysis: The minimal-environment tests are still running. The isolated extreme-case runtime leaves substantial margin, and the program has no filesystem dependencies beyond the supplied numerical libraries.
+Plan: Collect the test results and compare the low-temperature tracer output with a higher-resolution, higher-order calculation. This final comparison will check the most demanding combination of orbiting scattering and slow Sonine convergence.
+CMD: cat /app/work/prodtests.log; jobs
+
+CMD: 
+CMD: cat /app/work/prodtests.log
+
+OBS:  python3 /app/work/prodtests.py > /app/work/prodtests.log 2>&1 &
+root@627da822ee8d:/app# cat /app/work/prodtests.log
+('0', '100', '.001', '.2') 0 {"viscosity":0.24179585558141745,"thermal_conductivity":0.00912857154489918,"binary_diffusion":0.021677708410606514,"thermal_diffus
+ion_factor":-0.12334437296684968}
+  TIME 45.855586767196655
+('0', '1.00001', '.001', '1') 0 {"viscosity":0.11067126568338474,"thermal_conductivity":0.4150332278991862,"binary_diffusion":0.14695288426733466,"thermal_diffu
+sion_factor":-7.726437911297853e-08}
+  TIME 18.702611446380615
+('.8', '100', '.95', '50') 0 {"viscosity":3.832395418396933,"thermal_conductivity":4.697023721246822,"binary_diffusion":1.1836577971591205,"thermal_diffusion_fa
+ctor":-0.8024091654355038}
+  TIME 17.019508361816406
+root@627da822ee8d:/app#
+
+
+#### step 61 01:26:27
+MSG: Analysis: The minimal-environment runs completed successfully for the low-temperature Lennard-Jones tracer, nearly equal masses, and the high-light-fraction extreme. Their runtimes range from 17 to 46 seconds. The intermediate-core test is still finishing.
+Plan: Run a stricter independent calculation for the low-temperature tracer case, increasing both quadrature resolution and vector polynomial order. Compare it with the production result, then perform a final output-contract and file cleanup check.
+CMD: cat /app/work/prodtests.log
+cat > /app/work/strict.py <<'PY'
+import sys,time
+sys.path.insert(0,'/app/output')
+import transport as t
+import numpy as np
+A,R,X,T=map(float,sys.argv[1:5]);N=int(sys.argv[5])
+st=time.time();e,we=t.energy_grid(A,T,N,64)
+Q=np.array([t.cross_sections(A,T*z,N+2,180,360) for z in e])
+B2,n2=t.matrix(2,24,R,X,T,e,we,Q)
+B1,n1=t.matrix(1,N,R,X,T,e,we,Q,H=30 if R>25 else N)
+ix=np.r_[np.arange(25),N+1+np.arange(25)]
+BB=np.eye(2*(N+1)); NN=np.ones(2*(N+1));BB[np.ix_(ix,ix)]=B2;NN[ix]=n2
+for n in [24,36,50,64,76,90,N]:
+ if n>N:continue
+ print(n,t.transport_matrices(n,R,X,T,BB,NN,B1,n1),flush=True)
+print('TIME',time.time()-st,flush=True)
+PY
+python3 /app/work/strict.py 0 100 .001 .2 104 > /app/work/strictcold.log 2>&1 &
+
+OBS: > /app/work/strict.py <<'PY'
+> import sys,time
+> sys.path.insert(0,'/app/output')
+> import transport as t
+> import numpy as np
+> A,R,X,T=map(float,sys.argv[1:5]);N=int(sys.argv[5])
+> st=time.time();e,we=t.energy_grid(A,T,N,64)
+> Q=np.array([t.cross_sections(A,T*z,N+2,180,360) for z in e])
+> B2,n2=t.matrix(2,24,R,X,T,e,we,Q)
+> B1,n1=t.matrix(1,N,R,X,T,e,we,Q,H=30 if R>25 else N)
+> ix=np.r_[np.arange(25),N+1+np.arange(25)]
+> BB=np.eye(2*(N+1)); NN=np.ones(2*(N+1));BB[np.ix_(ix,ix)]=B2;NN[ix]=n2
+> for n in [24,36,50,64,76,90,N]:
+>  if n>N:continue
+>  print(n,t.transport_matrices(n,R,X,T,BB,NN,B1,n1),flush=True)
+> print('TIME',time.time()-st,flush=True)
+> PY
+root@627da822ee8d:/app# python3 /app/work/strict.py 0 100 .001 .2 104 > /app/work/strictcold.log 2>&1 &
+[2] 1658
+root@627da822ee8d:/app#
+
+
+#### step 62 01:27:22
+MSG: Analysis: The production program passes the minimal-environment tests so far, including cancellation-sensitive nearly equal masses. A stricter low-temperature tracer calculation is running to quantify the remaining numerical error.
+Plan: Collect the last minimal-environment result and the strict-reference comparison. If their differences remain below the required tolerance, finish by checking the standalone file and removing generated cache files.
+CMD: cat /app/work/prodtests.log; cat /app/work/strictcold.log; jobs
+
+CMD: 
+OBS: 00912857154489918,"binary_diffusion":0.021677708410606514,"thermal_diffus
+ion_factor":-0.12334437296684968}
+  TIME 45.855586767196655
+('0', '1.00001', '.001', '1') 0 {"viscosity":0.11067126568338474,"thermal_conductivity":0.4150332278991862,"binary_diffusion":0.14695288426733466,"thermal_diffu
+sion_factor":-7.726437911297853e-08}
+  TIME 18.702611446380615
+('.8', '100', '.95', '50') 0 {"viscosity":3.832395418396933,"thermal_conductivity":4.697023721246822,"binary_diffusion":1.1836577971591205,"thermal_diffusion_fa
+ctor":-0.8024091654355038}
+  TIME 17.019508361816406
+[1]-  Running                 python3 /app/work/prodtests.py > /app/work/prodtests.log 2>&1 &
+[2]+  Running                 python3 /app/work/strict.py 0 100 .001 .2 104 > /app/work/strictcold.log 2>&1 &
+root@627da822ee8d:/app#
+
+
+#### step 63 01:28:05
+MSG: Analysis: The final intermediate-core production test and stricter tracer reference are still computing. No output-format or environment issues have appeared in the completed runs.
+Plan: Wait for these two calculations and inspect their convergence. I will then compare a few additional representative production outputs with higher-resolution solutions, focusing on any case whose nested-order tail is unusually slow.
+CMD: cat /app/work/prodtests.log; cat /app/work/strictcold.log
+
+CMD: 
+CMD: cat /app/work/prodtests.log; cat /app/work/strictcold.log
+
+OBS: 54489918,"binary_diffusion":0.021677708410606514,"thermal_diffus
+ion_factor":-0.12334437296684968}
+  TIME 45.855586767196655
+('0', '1.00001', '.001', '1') 0 {"viscosity":0.11067126568338474,"thermal_conductivity":0.4150332278991862,"binary_diffusion":0.14695288426733466,"thermal_diffu
+sion_factor":-7.726437911297853e-08}
+  TIME 18.702611446380615
+('.8', '100', '.95', '50') 0 {"viscosity":3.832395418396933,"thermal_conductivity":4.697023721246822,"binary_diffusion":1.1836577971591205,"thermal_diffusion_fa
+ctor":-0.8024091654355038}
+  TIME 17.019508361816406
+('.35', '50', '.05', '2') 0 {"viscosity":1.51237394520845,"thermal_conductivity":0.1337392919321866,"binary_diffusion":0.20244512063945752,"thermal_diffusion_fa
+ctor":-0.22992197712527374}
+  TIME 76.1686487197876
+root@627da822ee8d:/app#
+
+
+#### step 64 01:29:05
+MSG: Analysis: All four minimal-environment production tests completed successfully, with runtimes from 17 to 76 seconds. The intermediate-core case shows that the adaptive higher-order vector solve is useful: its thermal diffusion changes noticeably beyond order 30.
+Plan: Finish the strict low-temperature reference calculation and test a near-hard-sphere high-core, high-temperature tracer mixture. That latter case is expected to have the slowest polynomial-convergence tail.
+CMD: cat /app/work/strictcold.log
+python3 - <<'PY' > /app/work/prodhotcore.log 2>&1 &
+import subprocess,time
+st=time.time();p=subprocess.run(['python3','/app/output/transport.py','.8','100','.001','50'],capture_output=True,text=True)
+print(p.returncode,p.stdout,p.stderr,'TIME',time.time()-st,flush=True)
+PY
+
+CMD: 
+CMD: cat /app/work/strictcold.log; cat /app/work/prodhotcore.log
+
+OBS: New Terminal Output:
+
+root@627da822ee8d:/app# cat /app/work/strictcold.log
+root@627da822ee8d:/app# python3 - <<'PY' > /app/work/prodhotcore.log 2>&1 &
+> import subprocess,time
+> st=time.time();p=subprocess.run(['python3','/app/output/transport.py','.8','100','.001','50'],capture_output=True,text=True)
+> print(p.returncode,p.stdout,p.stderr,'TIME',time.time()-st,flush=True)
+> PY
+[3] 1737
+root@627da822ee8d:/app# cat /app/work/strictcold.log; cat /app/work/prodhotcore.log
+root@627da822ee8d:/app#
+
+
+#### step 65 01:29:57
+MSG: Analysis: The final high-core/high-temperature tracer test and strict low-temperature reference are running. These cover the hardest polynomial tail and the strongest orbiting-scattering regime, respectively.
+Plan: Collect both results and inspect their nested-order convergence. If necessary, increase the maximum vector order for the small-light-fraction, large-mass-ratio corner while keeping the runtime below 600 seconds.
+CMD: cat /app/work/strictcold.log; cat /app/work/prodhotcore.log; jobs
+
+CMD: 
+OBS: 2167755 -0.12333708]
+36 [ 0.2417958   0.00912857  0.02167767 -0.12334281]
+50 [ 0.2417958   0.00912857  0.02167769 -0.12334406]
+64 [ 0.2417958   0.00912857  0.0216777  -0.12334437]
+76 [ 0.2417958   0.00912857  0.02167771 -0.12334443]
+90 [ 0.2417958   0.00912857  0.02167771 -0.12334448]
+104 [ 0.2417958   0.00912857  0.02167771 -0.12334448]
+TIME 161.0803873538971
+[2]-  Done                    python3 /app/work/strict.py 0 100 .001 .2 104 > /app/work/strictcold.log 2>&1
+[3]+  Running                 python3 - <<'PY' > /app/work/prodhotcore.log 2>&1
+import subprocess,time
+st=time.time();p=subprocess.run(['python3','/app/output/transport.py','.8','100','.001','50'],capture_output=True,text=True)
+print(p.returncode,p.stdout,p.stderr,'TIME',time.time()-st,flush=True)
+PY
+ &
+root@627da822ee8d:/app#
+
+
+#### step 66 01:30:44
+MSG: Analysis: The strict low-temperature Lennard-Jones tracer reference has finished. It agrees with the production result by substantially less than the acceptance tolerance for all four quantities, including thermal diffusion. The high-core/high-temperature tracer production test is still running.
+Plan: Inspect that final extreme-case result and compare it with a higher-order reference. This will verify that the maximum polynomial order is sufficient in the nearly hard-sphere tracer corner.
+CMD: cat /app/work/prodhotcore.log
+sed "s/t.energy_grid(A,T,N,64)/t.energy_grid(A,T,N,48)/; s/N+2,180,360/N+2,150,300/" /app/work/strict.py > /app/work/stricthot.py
+python3 /app/work/stricthot.py .8 100 .001 50 140 > /app/work/stricthot.log 2>&1 &
+
+CMD: 
+CMD: cat /app/work/prodhotcore.log; cat /app/work/stricthot.log
+
+OBS: d(A,T,N,48)/; s/N+2,180,360/N+2,150,300/" /app/work/strict.py > /app/work/stricthot.py
+root@627da822ee8d:/app# python3 /app/work/stricthot.py .8 100 .001 50 140 > /app/work/stricthot.log 2>&1 &
+[4] 1798
+root@627da822ee8d:/app# cat /app/work/prodhotcore.log; cat /app/work/stricthot.log
+0 {"viscosity":13.632021937698957,"thermal_conductivity":0.517803002396806,"binary_diffusion":1.3061017792763039,"thermal_diffusion_factor":-0.4665053581246056}
+  TIME 115.77661967277527
+[3]-  Done                    python3 - <<'PY' > /app/work/prodhotcore.log 2>&1
+import subprocess,time
+st=time.time();p=subprocess.run(['python3','/app/output/transport.py','.8','100','.001','50'],capture_output=True,text=True)
+print(p.returncode,p.stdout,p.stderr,'TIME',time.time()-st,flush=True)
+PY
+
+root@627da822ee8d:/app#
+
+
+#### step 67 01:31:33
+MSG: Analysis: The high-core/high-temperature tracer production run completed successfully in 116 seconds. A still-higher-order reference calculation is running to check the residual diffusion and thermal-diffusion tail in this slow-converging corner.
+Plan: Collect the order-140 reference and compare it with the production output. If the discrepancy approaches the required tolerance, raise the fallback order for extreme tracer mixtures; otherwise retain the current faster configuration.
+CMD: cat /app/work/stricthot.log; jobs; ls -l /app/output/transport.py
+
+CMD: 
+OBS: New Terminal Output:
+
+root@627da822ee8d:/app# cat /app/work/stricthot.log; jobs; ls -l /app/output/transport.py
+[4]+  Running                 python3 /app/work/stricthot.py .8 100 .001 50 140 > /app/work/stricthot.log 2>&1 &
+-rw-r--r-- 1 root root 13385 Nov  3 01:22 /app/output/transport.py
+root@627da822ee8d:/app#
+
+
+#### step 68 01:32:19
+MSG: Analysis: The remaining order-140 reference test is still running. The production program is already within the runtime and output limits on all tested extreme cases; this last test checks the residual high-order tail rather than basic functionality.
+Plan: Wait for the reference result, then compare the production values numerically. I will also perform a final source and directory cleanup once the convergence check is complete.
+CMD: cat /app/work/stricthot.log
+
+CMD: 
+CMD: cat /app/work/stricthot.log
+
+OBS: New Terminal Output:
+
+root@627da822ee8d:/app# cat /app/work/stricthot.log
+root@627da822ee8d:/app# cat /app/work/stricthot.log
+root@627da822ee8d:/app#
+
+
+#### step 69 01:33:06
+MSG: Analysis: The order-140 reference is still computing. The physical normalization and sign conventions have been independently checked against hard-sphere transport limits, and the existing strict low-temperature comparison passed.
+Plan: Inspect the reference process and wait for its result. Afterward, test the intermediate-core mixture at higher order, since its diffusion tail converges less uniformly than the simple limiting cases.
+CMD: cat /app/work/stricthot.log; for p in /proc/[0-9]*/cmdline; do c=$(tr '\0' ' ' < "$p"); case "$c" in *stricthot.py*) echo "$p $c"; cat "${p%cmdline}stat";; esac; done
+
+CMD: 
+OBS: New Terminal Output:
+
+root@627da822ee8d:/app# cat /app/work/stricthot.log; for p in /proc/[0-9]*/cmdline; do c=$(tr '\0' ' ' < "$p"); case "$c" in *stricthot.py*) echo "$p $c"; cat "
+${p%cmdline}stat";; esac; done
+/proc/1798/cmdline python3 /app/work/stricthot.py .8 100 .001 50 140
+1798 (python3) R 57 1798 56 34817 1893 4194560 4493373 0 0 0 13478 679 0 0 20 0 1 0 201353759 313298944 27582 18446744073709551615 97045832953856 97045832954193
+ 140725293841408 0 0 0 0 16781312 2 0 0 0 17 42 0 0 0 0 0 97045832965552 97045832966168 97045924143104 140725293850050 140725293850100 140725293850100 140725293
+850593 0
+root@627da822ee8d:/app#
+
+
+#### step 70 01:33:30
+MSG: Analysis: The high-order reference is progressing with modest memory usage. The production solver's runtime remains well below the limit, so there is room to increase the extreme-tracer fallback order if the reference comparison indicates a significant residual tail.
+Plan: Collect the high-order result and run an independent Gaussian-quadrature check of the tensor generating-function normalization. This checks the viscosity bracket algebra separately from the transport convergence tests.
+CMD: cat /app/work/stricthot.log
+cat > /app/work/corrcheck.py <<'PY'
+import sys;sys.path.insert(0,'/app/output')
+from transport import *
+from scipy.special import roots_hermite
+v,w=roots_hermite(18); w=w/np.sqrt(np.pi)
+z=np.stack(np.meshgrid(v,v,v,indexing='ij'),axis=-1).reshape(-1,3)
+ww=np.einsum('i,j,k->ijk',w,w,w).ravel()
+a=.3;b=np.sqrt(1-a*a);p=.8;q=-.6;e=1.7;h=.37
+u=np.array([0,0,np.sqrt(e)]);vv=np.array([np.sqrt(e)*np.sqrt(1-h*h),0,np.sqrt(e)*h])
+x=a*z+b*u;y=p*z+q*vv
+s=.05;t=-.09
+ex=np.exp(-s/(1-s)*np.sum(x*x,axis=1)-t/(1-t)*np.sum(y*y,axis=1))
+for l in [1,2]:
+ xy=np.sum(x*y,axis=1)
+ val=xy if l==1 else xy*xy-np.sum(x*x,axis=1)*np.sum(y*y,axis=1)/3
+ direct=np.dot(ww,ex*val)*(1-s)**(-l-1.5)*(1-t)**(-l-1.5)
+ C=correlation(l,18,np.array([[e]]),np.array([[h]]),a,b,p,q)[:,:,0,0]
+ generated=np.sum(C*s**np.arange(19)[:,None]*t**np.arange(19)[None,:])
+ print(l,direct,generated,direct-generated)
+PY
+python3 /app/work/corrcheck.py
+
+OBS: =.3;b=np.sqrt(1-a*a);p=.8;q=-.6;e=1.7;h=.37
+> u=np.array([0,0,np.sqrt(e)]);vv=np.array([np.sqrt(e)*np.sqrt(1-h*h),0,np.sqrt(e)*h])
+> x=a*z+b*u;y=p*z+q*vv
+> s=.05;t=-.09
+> ex=np.exp(-s/(1-s)*np.sum(x*x,axis=1)-t/(1-t)*np.sum(y*y,axis=1))
+> for l in [1,2]:
+>  xy=np.sum(x*y,axis=1)
+>  val=xy if l==1 else xy*xy-np.sum(x*x,axis=1)*np.sum(y*y,axis=1)/3
+>  direct=np.dot(ww,ex*val)*(1-s)**(-l-1.5)*(1-t)**(-l-1.5)
+>  C=correlation(l,18,np.array([[e]]),np.array([[h]]),a,b,p,q)[:,:,0,0]
+>  generated=np.sum(C*s**np.arange(19)[:,None]*t**np.arange(19)[None,:])
+>  print(l,direct,generated,direct-generated)
+> PY
+root@627da822ee8d:/app# python3 /app/work/corrcheck.py
+1 -0.006529667321158011 -0.006529667321157803 -2.0816681711721685e-16
+2 -0.3399470645826603 -0.3399470645826603 0.0
+root@627da822ee8d:/app#
+
+
+#### step 71 01:34:08
+MSG: Analysis: An independent Gaussian velocity quadrature confirms the vector and tensor generating-function correlations to machine precision. This validates the bracket algebra independently of the transport-system tests. The order-140 tracer reference is still running.
+Plan: Collect the reference result and compare it with the production output. Then finish by checking one intermediate-core high-order case and cleaning the output directory.
+CMD: cat /app/work/stricthot.log; jobs
+
+CMD: 
+CMD: cat /app/work/stricthot.log
+
+OBS: New Terminal Output:
+
+root@627da822ee8d:/app# cat /app/work/stricthot.log; jobs
+[4]+  Running                 python3 /app/work/stricthot.py .8 100 .001 50 140 > /app/work/stricthot.log 2>&1 &
+root@627da822ee8d:/app# cat /app/work/stricthot.log
+24 [13.63202194  0.51780231  1.30594274 -0.46625116]
+36 [13.63202194  0.51780278  1.30605    -0.46642374]
+50 [13.63202194  0.51780292  1.30608226 -0.46647494]
+64 [13.63202194  0.51780297  1.30609339 -0.46649237]
+76 [13.63202194  0.51780299  1.30609782 -0.46649925]
+90 [13.63202194  0.517803    1.30610057 -0.4665035 ]
+140 [13.63202194  0.51780301  1.30610355 -0.46650808]
+TIME 223.99486351013184
+[4]+  Done                    python3 /app/work/stricthot.py .8 100 .001 50 140 > /app/work/stricthot.log 2>&1
+root@627da822ee8d:/app#
+
+
+#### step 72 01:34:30
+MSG: Analysis: The order-140 near-hard-sphere tracer reference finished. The production diffusion and thermal-diffusion values differ from it by only a few parts per million, comfortably inside the required tolerance. The independent velocity-quadrature check also validated the vector and tensor bracket algebra.
+Plan: Perform one final higher-resolution comparison for the intermediate-core mixture, where convergence is less uniform. Then verify the standalone file's output contract and clean generated cache files.
+CMD: python3 /app/work/strict.py .35 50 .05 2 100 > /app/work/strictmid.log 2>&1 &
+rm -rf /app/output/__pycache__
+python3 - <<'PY'
+from pathlib import Path
+p=Path('/app/output/transport.py')
+print('regular file:',p.is_file(),'symlink:',p.is_symlink(),'bytes:',p.stat().st_size)
+compile(p.read_text(),str(p),'exec')
+print('syntax OK')
+PY
+
+OBS: New Terminal Output:
+
+root@627da822ee8d:/app# python3 /app/work/strict.py .35 50 .05 2 100 > /app/work/strictmid.log 2>&1 &
+[1] 1991
+root@627da822ee8d:/app# rm -rf /app/output/__pycache__
+root@627da822ee8d:/app# python3 - <<'PY'
+> from pathlib import Path
+> p=Path('/app/output/transport.py')
+> print('regular file:',p.is_file(),'symlink:',p.is_symlink(),'bytes:',p.stat().st_size)
+> compile(p.read_text(),str(p),'exec')
+> print('syntax OK')
+> PY
+regular file: True symlink: False bytes: 13385
+syntax OK
+root@627da822ee8d:/app#
+
+
+#### step 73 01:35:36
+MSG: Analysis: The final file is a regular standalone Python file of 13,385 bytes and compiles successfully. Strict references for both low-temperature orbiting scattering and the nearly hard-sphere tracer limit agree with production outputs within the requested tolerance.
+Plan: Wait for the final intermediate-core reference comparison, then run a JSON-contract check on an equal-mass case and remove any generated cache directory.
+CMD: cat /app/work/strictmid.log
+python3 - <<'PY' > /app/work/contract.log 2>&1 &
+import subprocess,json,time
+st=time.time();p=subprocess.run(['python3','/app/output/transport.py','0.8','1','0.001','0.2'],capture_output=True,text=True)
+v=json.loads(p.stdout)
+assert p.returncode==0
+assert set(v)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+assert all(isinstance(x,(int,float)) for x in v.values())
+assert v['thermal_diffusion_factor']==0
+print('contract OK',v,'TIME',time.time()-st,flush=True)
+PY
+
+CMD: 
+CMD: cat /app/work/strictmid.log; cat /app/work/contract.log
+
+OBS: t /app/work/strictmid.log; cat /app/work/contract.log
+[2]+  Done                    python3 - <<'PY' > /app/work/contract.log 2>&1
+import subprocess,json,time
+st=time.time();p=subprocess.run(['python3','/app/output/transport.py','0.8','1','0.001','0.2'],capture_output=True,text=True)
+v=json.loads(p.stdout)
+assert p.returncode==0
+assert set(v)=={'viscosity','thermal_conductivity','binary_diffusion','thermal_diffusion_factor'}
+assert all(isinstance(x,(int,float)) for x in v.values())
+assert v['thermal_diffusion_factor']==0
+print('contract OK',v,'TIME',time.time()-st,flush=True)
+PY
+
+contract OK {'viscosity': 0.0589280192102457, 'thermal_conductivity': 0.22223044665522126, 'binary_diffusion': 0.07643652434236999, 'thermal_diffusion_factor':
+0.0} TIME 27.199127435684204
+root@627da822ee8d:/app#
+
+
+#### step 74 01:36:22
+MSG: Analysis: The equal-mass contract test passed: the program exits successfully, emits exactly the required four JSON-number members, and gives exactly zero thermal diffusion for mechanically identical species. The final intermediate-core high-order reference is still running.
+Plan: Collect that last convergence comparison and clean the output directory. No further implementation changes are planned unless the reference reveals a discrepancy near the tolerance.
+CMD: cat /app/work/strictmid.log; jobs
+
+CMD: 
+CMD: cat /app/work/strictmid.log
+
+OBS: New Terminal Output:
+
+root@627da822ee8d:/app# cat /app/work/strictmid.log; jobs
+[1]+  Running                 python3 /app/work/strict.py .35 50 .05 2 100 > /app/work/strictmid.log 2>&1 &
+root@627da822ee8d:/app# cat /app/work/strictmid.log
+root@627da822ee8d:/app#
+
+
+#### step 75 01:37:07
+MSG: Analysis: All completed checks pass, including the standalone output contract, minimal environment, extreme-case runtime limits, hard-sphere normalization, independent Gaussian bracket validation, and stricter low-temperature and high-core tracer references. Only the final intermediate-core reference remains in progress.
+Plan: Wait briefly for the remaining reference calculation, compare its limiting values with the production output, and then leave only transport.py in the output directory.
+CMD: 
+CMD: cat /app/work/strictmid.log; ls -la /app/output
+
+OBS: thermal_diffusion_factor']==0
+print('contract OK',v,'TIME',time.time()-st,flush=True)
+PY
+
+contract OK {'viscosity': 0.0589280192102457, 'thermal_conductivity': 0.22223044665522126, 'binary_diffusion': 0.07643652434236999, 'thermal_diffusion_factor':
+0.0} TIME 27.199127435684204
+root@627da822ee8d:/app# cat /app/work/strictmid.log; jobs
+[1]+  Running                 python3 /app/work/strict.py .35 50 .05 2 100 > /app/work/strictmid.log 2>&1 &
+root@627da822ee8d:/app# cat /app/work/strictmid.log
+root@627da822ee8d:/app# cat /app/work/strictmid.log; ls -la /app/output
+total 32
+drwxr-xr-x 1 root root  4096 Nov  3 01:34 .
+drwxr-xr-x 1 root root  4096 Nov  3 00:55 ..
+drwxr-xr-x 2 root root  4096 Nov  3 01:34 __pycache__
+-rw-r--r-- 1 root root 13385 Nov  3 01:22 transport.py
+root@627da822ee8d:/app#
+
+
+#### step 76 01:37:46
+MSG: Analysis: The final reference calculation is still running, and importing transport.py during testing regenerated a cache directory. The submitted program itself remains unchanged and valid.
+Plan: Wait for the intermediate-core reference result, then remove the cache directory and verify that the output archive will contain only the required regular Python file.
+CMD: 
+CMD: cat /app/work/strictmid.log; test ! -f /proc/1991/stat || cat /proc/1991/stat
+
+OBS: New Terminal Output:
+y
+root@627da822ee8d:/app# cat /app/work/strictmid.log; test ! -f /proc/1991/stat || cat /proc/1991/stat
+24 [ 1.51237396  0.13373916  0.2024444  -0.22991622]
+36 [ 1.51237396  0.1337392   0.20244445 -0.22991629]
+50 [ 1.51237396  0.13373927  0.20244499 -0.2299209 ]
+64 [ 1.51237396  0.13373929  0.20244512 -0.22992197]
+76 [ 1.51237396  0.13373929  0.20244512 -0.22992198]
+90 [ 1.51237396  0.13373929  0.20244512 -0.22992198]
+100 [ 1.51237396  0.13373929  0.20244512 -0.22992201]
+TIME 180.8840217590332
+[1]+  Done                    python3 /app/work/strict.py .35 50 .05 2 100 > /app/work/strictmid.log 2>&1
+root@627da822ee8d:/app#
+
+
+#### step 77 01:38:00
+MSG: Analysis: The final intermediate-core reference completed and agrees with the production result well within the required tolerance for all four quantities. The program has also passed output-contract, minimal-environment, extreme-case runtime, and independent numerical-normalization checks.
+Plan: Remove generated cache files and verify that /app/output contains only the required regular transport.py file. The implementation is complete.
+CMD: rm -rf /app/output/__pycache__ && ls -la /app/output && test -f /app/output/transport.py && test ! -L /app/output/transport.py
+
+CMD: 
+OBS: Current terminal state:
+New Terminal Output:
+1
+root@627da822ee8d:/app# rm -rf /app/output/__pycache__ && ls -la /app/output && test -f /app/output/transport.py && test ! -L /app/output/transport.py
+total 28
+drwxr-xr-x 1 root root  4096 Nov  3 01:38 .
+drwxr-xr-x 1 root root  4096 Nov  3 00:55 ..
+-rw-r--r-- 1 root root 13385 Nov  3 01:22 transport.py
+root@627da822ee8d:/app#
+
+
+Are you sure you want to mark the task as complete? This will trigger your solution to be graded and you won't be able to make any further corrections. If so, include "task_complete": true in your JSON response again.
+
+#### step 78 01:38:04
+MSG: Analysis: The required regular file /app/output/transport.py exists, and /app/output contains no other files. Numerical convergence, runtime, minimal-environment execution, and the exact JSON output contract have been tested successfully.
+Plan: No further changes are needed. Submit the completed program.
+CMD: 
+OBS: New Terminal Output:
+y
+root@627da822ee8d:/app#
+
+
