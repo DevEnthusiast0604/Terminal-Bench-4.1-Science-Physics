@@ -69,6 +69,9 @@ where the evidence lives. All times are UTC (the platform shows UTC; this PC is 
 - **2026-11-13 14:59**: v14 pass@3 on Sol 6.1 still running (status at 14:58: "running, 0 of 3 ended", 0 unseen cards). The poller started at 13:45 stopped with exit 2 at 14:31: status calls timed out (170 s) at 14:19, 14:25 and 14:31, and a manual call then timed out in `connect_over_cdp` (180 s). Cause and fix under Pitfalls. Status took 32 s at 14:58; poller restarted.
 - **2026-11-13 17:53**: the poller for T-1383 (running since 14:59) stopped at the user's request ("please stop background"). Its polls, every 180 s, found the page unchanged throughout: v14 pass@3 on Sol 6.1 running, 0 of 3 ended, 0 unseen cards. Nothing watches T-1383 now; restart the poller only when the user resumes the work.
 - **2026-11-13 18:55**: work resumed at the user's request. At 18:37 no Chrome was running; it was started again on port 9224 and was signed in. From about 18:41 the user moved the workspace from `Documents\Tango-arunufo` to `OneDrive\Documents\Tango-arunufo` (the folder root is now there; the old folder is empty). The debug Chrome was closed while the profile moved and started again at 18:52 on `OneDrive\Documents\Tango-arunufo\.supertasker-profile`, still signed in. The platform restarted v14's pass@3 at 18:44 after a fault on its side (card above).
+- **2026-11-13 19:17**: the user asked why checks keep timing out. Measured: status 13 s, connect 4 s; the tabs kept open for the user hold 10 and 6 utility worlds after 24 min (BRIEFING point of this time). Poller restarted at 600 s instead of 180 s. v14 pass@3 still running (restarted by the platform at 18:44).
+- **2026-11-13 19:18**: v14 pass@3 on Sol 6.1 QUALIFIED at 19:16 (1 of 3 solved; the run the platform restarted at 18:44). P3 ID **P3-B911-F9F1-EDFA** (this revision only), for the user to paste into DAS 4011092. The full review runs as v15 (= v14's files), queued 19:16; pass@8 on Astra 6 comes with it (1-6 of 8 qualifies). No uploads until the review decides. Next: analyse the pass@3 bundle, mark the card seen, watch the review.
+- **2026-11-13 19:20**: the v14 pass@3 card is reviewed and marked seen; analysis under pass@3 analyses (a1 exact; a2 missed the hidden 1081.40 keV line; a3 missed the weak 1092.00 keV line). The full review (v15) is queued; poller at 600 s.
 
 ## Current design (v1, 2026-11-06)
 
@@ -198,6 +201,8 @@ trap's evidence.
 | 2026-11-13 13:39 | the same card, reviewed | Marked seen 13:44 (`mark-seen` printed NOT CONFIRMED on the slow page; `updates` then listed the card as seen). Job 24365: 35 criteria 31 pass, 0 fail, 3 N/A (`verifier_execution_isolation`, `do_not_modify_enforced`, `artifact_efficiency`), `novel` NOT_PROVIDED (deferred to the full review); 5 extra pass. Reports in `work/gamma-decay-scheme/v14/criteria-35.md` and `criteria-extra.md`. Poller restarted for pass@3. | yes |
 | 2026-11-13 18:44 | pass@3 is running again (not your task) (T-1383 v14) | "pass@3 is running again on the platform's side: its last run had a fault there, and nothing in your task caused it. Nothing to do: you get an update when it ends." The v14 pass@3 started 13:39 had shown "running, 0 of 3 ended" at every poll until then. | no |
 | 2026-11-13 18:44 | pass@3 is running again (not your task) (T-1383 v14) | "pass@3 is running again on the platform's side: its last run had a fault there, and nothing in your task caused it. Nothing to do: you get an update when it ends." The v14 pass@3 started 13:39 had shown "running, 0 of 3 ended" at every poll until then. Marked seen 18:56. | yes |
+| 2026-11-13 19:16 | in review (T-1383 v14 pass@3 OK, 2 of 3 failed) | "IN REVIEW / the full review is running. Submit the task in DAS now if you haven't yet, but don't upload a new version ... pass@3 is OK: 2 of 3 attempts failed. The full review has started on these exact files ... P3 ID P3-B911-F9F1-EDFA / this revision only". Status: Queued; 15 versions; newest row v15 19:16 "Full review queued" (with a Cancel control: not to be pressed). Poller exit 0 at 19:17. | no |
+| 2026-11-13 19:16 | the same card, reviewed | Marked seen 19:20 (`mark-seen` printed NOT CONFIRMED on the slow page; `updates` then listed the card as seen). pass@3 bundle `gate/full/24365.zip` in `work/gamma-decay-scheme/v14/pass3/` (x/ untrusted); analysis under pass@3 analyses. | yes |
 
 ## pass@3 analyses
 ### v3 (T-1383 v3, job 19128, pass@3 ended 2026-11-09 14:37): 3 of 3 solved, TOO EASY
@@ -391,6 +396,25 @@ trap's evidence.
   isolated the weak line, which v13 removed.
 - v14 plan: make 557.1 keV a regular line (more beta feeding to 1399.8 keV), so the level stands from the start, and
   the hidden line somewhat stronger, so a plain two-Gaussian fit lands nearer the band; still no gate isolates it.
+### v14 (T-1383 v14, job 24365, pass@3 on Sol 6.1 ended 2026-11-13 19:16): 1 of 3 solved, QUALIFIED
+
+- P3 ID **P3-B911-F9F1-EDFA** (this revision only), given to the user for DAS 4011092. The full review runs as v15
+  (= v14's files), queued 19:16. The run started 13:39 had a fault on the platform's side and was restarted at 18:44;
+  the attempts' agents started 18:49 and took 15 to 18 min, the verifier 4.5 to 10.6 min.
+- Rewards [1, 0, 0] (`work/gamma-decay-scheme/v14/pass3/summary.md`; outputs in `pass3/outputs/`, compared with
+  `work/gamma-decay-scheme/v13/explore/compare13.py`). All three found 17 levels, the 1399.8 keV level and its
+  557.1 keV line (I 2.90 to 3.00 for 2.98): the stronger feeding of v14 made that level easy to place.
+- a1 is exact: 33 of 33 transitions; the hidden 1081.41 keV line at I 2.10 (-13.8%); worst other errors 647.8 keV
+  +13.1%, 646.9 keV -7.4%; parent 4.380 s, isomer 1963.1 keV 170.5 ns.
+- a2 leaves out the hidden 1081.40 keV line (the v13 failure) and keeps the whole 1082 keV peak as 1925.0 -> 842.7
+  (+16.1%); 708.0 keV at -24.9% sits at the band's edge.
+- a3 finds the hidden line (1081.38 keV, I 2.96, +21.6%) but never detects the weak 1092.00 keV line (2581.6 ->
+  1489.6 keV, I 1.25; the reference measures 1.20 in `tests/checks.txt`): its trajectory digest
+  (`attempts/attempt-3.txt`) never mentions 1092 keV. 511.0 keV at -23.4% is near the edge too.
+- So two independent ways to fail: the hidden line (found by 2 of 3; their intensities 2.10 and 2.96 for 2.44, both
+  inside 25%) and a missed weak line. The v12 pass@8 on Astra 6 solved 7 of 8 with a weaker hidden line (I 1.22); if
+  this pass@8 comes back TOO EASY, the next hardening has to hide something Astra 6's level-difference check does not
+  reach (BRIEFING 2026-11-12 21:45).
 
 ## Pitfalls
 

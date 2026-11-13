@@ -278,6 +278,7 @@ never edited (user rule, 2026-10-29). Times are UTC.
 - 2026-11-13 07:32: v13 pass@3 analysed: all three missed only the hidden 1081.40 keV line (the 1399.8 keV level came late, by its weak 557.1 keV line). v14: stronger 557.1 keV and hidden line.
 - **2026-11-13 07:50**: v14 uploaded (upload 1 of 5 today), digest `eba494d8…0722`. v14: more beta feeding to the 1399.8 keV level (1.9 to 3.6, branches 55/45), so its 557.1 keV line is a regular line (I 2.98) and the level stands from the start; the hidden 1081.4 keV line is now I 2.44, a fifth of 1082.3 keV, and still no gate isolates it. solve.py: the hidden member's share comes from the 318.4/524.3 keV gates (the shape fit's share moves with the energy scale); a partner with more than 1.15 of a one-cascade doublet's gamma rays per gamma ray of its own sees both members (no false 17-level schemes); generate.py names what falls outside a tolerance; README from the v14 checks
 - 2026-11-13 13:39: v14 quick check passed (36 of 40); pass@3 on Sol 6.1 running.
+- **2026-11-13 19:18**: v14 pass@3 1/3 on Sol 6.1 (19:16, after a platform restart at 18:44): QUALIFIED, P3 ID P3-B911-F9F1-EDFA (to the user for DAS 4011092). Full review queued as v15 (= v14's files).
 
 # rv-planet-census
 
