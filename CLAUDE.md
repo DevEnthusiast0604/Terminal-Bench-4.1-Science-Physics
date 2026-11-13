@@ -23,7 +23,9 @@ Two things to know up front:
   2026-11-08 the platform became the TB4.1 Queue and seemed to drop every earlier task, so the task went up again on
   11-09 as T-0020. Later that day the platform restored T-1383 and folded that upload into it as v3 (T-0020 is gone;
   local and platform versions match again). v3 came back 3 of 3; v4 went up at 18:02 UTC. Check the newest rows of
-  `logs/STATUS.md`.
+  `logs/STATUS.md`. Since 2026-11-13 the active tasks are gamma-decay-scheme (T-1383, DAS 4011092),
+  dhva-fermi-surface (T-1563, DAS 4034278) and rv-planet-census (T-1519, DAS 4040198), all handled by one session
+  (see "One session" under Standing rules).
 - TB 4.1 (kit 3.8.7 at `~/tb4/tb4-starter-pack` since 2026-11-13; 3.8.2, 3.7.0 and 3.3.0 kept as
   `~/tb4/tb4-starter-pack-3.8.2`, `-3.7.0` and `-3.3.0`; always the newest, see "Toolkit" under Standing rules): every Python dependency comes from a committed uv lock (`environment/locks/pyproject.toml` plus
   `uv.lock`), never a `pip install` in a Dockerfile; since 3.8.2 lint fails a task without one. Make the lock with uv 0.10.8, the version the template's Docker build uses:
@@ -166,6 +168,10 @@ From the user. `logs/BRIEFING.md` has the dates and the rest; these are the ones
 
 - **Single agent.** No sub-agents, forks or workflows. Work in the foreground; only the poller and the generator of
   `expected.json` answers may run in the background, during platform waits.
+- **One session** (user, 2026-11-13): "From now on, I want to use only this chat session. just one session. You should
+  watch the every tasks pipelines. When failed, work one-by-one and upload." One poller watches every active task:
+  `python -X utf8 -I -B tools/poll_pipeline.py T-1383,T-1563,T-1519 43200 600`. When a check fails, fix that task and
+  release it, then the next failure, one at a time; the five uploads a day are shared by all tasks.
 - **While a task is active,** watch the pipeline. When a check fails, fix the task and resubmit until the whole pipeline
   passes. A hardening round should take 30 min to at most 2 h of work.
 - **Uploads.** No note, at most five per UTC day, Upload the fix included (`log_release.py` counts them from the logs).

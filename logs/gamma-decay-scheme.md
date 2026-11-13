@@ -72,6 +72,7 @@ where the evidence lives. All times are UTC (the platform shows UTC; this PC is 
 - **2026-11-13 19:17**: the user asked why checks keep timing out. Measured: status 13 s, connect 4 s; the tabs kept open for the user hold 10 and 6 utility worlds after 24 min (BRIEFING point of this time). Poller restarted at 600 s instead of 180 s. v14 pass@3 still running (restarted by the platform at 18:44).
 - **2026-11-13 19:18**: v14 pass@3 on Sol 6.1 QUALIFIED at 19:16 (1 of 3 solved; the run the platform restarted at 18:44). P3 ID **P3-B911-F9F1-EDFA** (this revision only), for the user to paste into DAS 4011092. The full review runs as v15 (= v14's files), queued 19:16; pass@8 on Astra 6 comes with it (1-6 of 8 qualifies). No uploads until the review decides. Next: analyse the pass@3 bundle, mark the card seen, watch the review.
 - **2026-11-13 19:20**: the v14 pass@3 card is reviewed and marked seen; analysis under pass@3 analyses (a1 exact; a2 missed the hidden 1081.40 keV line; a3 missed the weak 1092.00 keV line). The full review (v15) is queued; poller at 600 s.
+- **2026-11-13 19:37**: one session now watches every task (BRIEFING point of this time); T-1383 is polled by the combined poller `T-1383,T-1563,T-1519` at 600 s. Kit 3.8.7 installed (19:32); v14 lints PASS under it.
 
 ## Current design (v1, 2026-11-06)
 
