@@ -213,6 +213,9 @@ where the evidence lives. All times are UTC (the platform shows UTC; this PC is 
   that restarts the poller 10 minutes after it stops on three timeouts, restarts it at its 12-hour limit, and
   stops on an unseen card or on misses that are not all timeouts (a sign-in page would be one). T-1519 last read
   19:31: IN REVIEW, unchanged.
+- **2026-11-13 17:53**: background watch stopped at the user's request ("please stop background"): the wrapper and its
+  `poll_pipeline.py T-1519` ended; no poller runs for T-1519 now. Read `supertasker.py status T-1519` by hand, or
+  restart a poller when asked. T-1519 was last read IN REVIEW (pass@8 TOO EASY), no decision yet.
 
 ## Current design (v1, 2026-11-10)
 
