@@ -7,7 +7,14 @@ platform itself is down, as on 2026-11-05 from 14:53, flapping until after 16:00
 line when the outage starts and one when it ends. Any other page without the task view (a sign-in page, or the
 app's shell while its backend fails) counts as a miss.
 
+With a fourth argument `wait-sign-in`, a sign-in page before the first good status of the run is not a miss either:
+the session is known to be signed out (the user has been asked to sign in again in the debug Chrome), so it prints
+one line, keeps polling and prints "signed in again" when a status answers. A sign-in page after a good status of
+the run still counts as a miss, so a new sign-out ends the watch (exit 2). Added 2026-11-14, when the platform came
+back from a ten-hour outage with every session signed out.
+
     python -X utf8 -I -B tools/poll_pipeline.py T-0851 43200 180      (Bash run_in_background, folder root)
+    python -X utf8 -I -B tools/poll_pipeline.py T-1383,T-1563 43200 600 wait-sign-in
 
 Several tasks, comma-separated (T-1383,T-0123), are polled in turn in one process, so two watches never drive the
 browser page at once. Each line names its task, and the exit is on the first task with an unseen card.
@@ -23,11 +30,14 @@ last_sig = {t: None for t in tasks}
 misses = {t: 0 for t in tasks}
 outage = False
 out = ""
+wait_sign_in = sys.argv[4:] == ["wait-sign-in"]
+answered = signed_out = False
 GATEWAY = re.compile(r"page title: .*\b(50[234]|52[0-7]|530)\b|Bad gateway|Gateway time-?out|Service unavailable"
                      r"|Tunnel error|Origin is unreachable|Web server is down", re.I)
+SIGN_IN = re.compile(r"page title: Sign in\b")
 def poll(task):
     """One status call for TASK; exits the process on an unseen card or three misses in a row."""
-    global outage, out
+    global outage, out, answered, signed_out
     stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
     tag = "%s UTC [%s]" % (stamp, task) if len(tasks) > 1 else "%s UTC" % stamp
     try:
@@ -42,6 +52,11 @@ def poll(task):
             print("%s: platform down (gateway error), still polling: %s" % (
                 tag, " | ".join(out.strip().splitlines()[-2:])), flush=True)
         outage, misses[task] = True, 0
+    elif m is None and wait_sign_in and not answered and SIGN_IN.search(out):
+        if not signed_out:
+            print("%s: signed out, waiting for the user to sign in again in the debug Chrome, still polling: %s" % (
+                tag, " | ".join(out.strip().splitlines()[-2:])), flush=True)
+        signed_out, misses[task] = True, 0
     elif m is None:
         misses[task] += 1
         print("%s: no status (%d in a row): %s" % (tag, misses[task], " | ".join(out.strip().splitlines()[-4:])),
@@ -52,7 +67,9 @@ def poll(task):
     else:
         if outage:
             print("%s: platform answering again" % tag, flush=True)
-        misses[task], outage = 0, False
+        if signed_out:
+            print("%s: signed in again" % tag, flush=True)
+        misses[task], outage, signed_out, answered = 0, False, False, True
         lines = [ln.strip() for ln in out.splitlines() if ln.strip() and not ln.startswith("Your note:")]
         sig = " | ".join(lines)
         if sig != last_sig[task]:
