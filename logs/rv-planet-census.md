@@ -217,6 +217,7 @@ where the evidence lives. All times are UTC (the platform shows UTC; this PC is 
   `poll_pipeline.py T-1519` ended; no poller runs for T-1519 now. Read `supertasker.py status T-1519` by hand, or
   restart a poller when asked. T-1519 was last read IN REVIEW (pass@8 TOO EASY), no decision yet.
 - **2026-11-13 19:37**: from now on one session watches every task (user: "From now on, I want to use only this chat session. just one session. You should watch the every tasks pipelines. When failed, work one-by-one and upload."). This task's poller is the combined one, `tools/poll_pipeline.py T-1383,T-1563,T-1519 43200 600`, started 19:37. status 19:36: IN REVIEW, "pass@8 TOO EASY" (Astra 6, 4 of 4 solved, the other 4 not run, Nov 11), the reviewer has not decided whether it comes back; last change Nov 11, 0 unseen.
+- **2026-11-14 09:09**: the combined poller (`bdq9mh8vy`, started 2026-11-13 21:17:55) reached its 12 h limit at 09:07:56 with no new card on T-1383, T-1563 or T-1519 (exit 1; the only changes it printed, at 00:04, were "last change" turning into a date at midnight). Kit 3.8.8 installed (BRIEFING point of this time); the combined poller restarted (`b6a0li6cv`, T-1383,T-1563,T-1519 at 600 s).
 
 ## Current design (v1, 2026-11-10)
 

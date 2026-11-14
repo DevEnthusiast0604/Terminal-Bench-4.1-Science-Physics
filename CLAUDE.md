@@ -26,8 +26,8 @@ Two things to know up front:
   `logs/STATUS.md`. Since 2026-11-13 the active tasks are gamma-decay-scheme (T-1383, DAS 4011092),
   dhva-fermi-surface (T-1563, DAS 4034278) and rv-planet-census (T-1519, DAS 4040198), all handled by one session
   (see "One session" under Standing rules).
-- TB 4.1 (kit 3.8.7 at `~/tb4/tb4-starter-pack` since 2026-11-13; 3.8.2, 3.7.0 and 3.3.0 kept as
-  `~/tb4/tb4-starter-pack-3.8.2`, `-3.7.0` and `-3.3.0`; always the newest, see "Toolkit" under Standing rules): every Python dependency comes from a committed uv lock (`environment/locks/pyproject.toml` plus
+- TB 4.1 (kit 3.8.8 at `~/tb4/tb4-starter-pack` since 2026-11-14; 3.8.7, 3.8.2, 3.7.0 and 3.3.0 kept as
+  `~/tb4/tb4-starter-pack-3.8.7`, `-3.8.2`, `-3.7.0` and `-3.3.0`; always the newest, see "Toolkit" under Standing rules): every Python dependency comes from a committed uv lock (`environment/locks/pyproject.toml` plus
   `uv.lock`), never a `pip install` in a Dockerfile; since 3.8.2 lint fails a task without one. Make the lock with uv 0.10.8, the version the template's Docker build uses:
   `"$APPDATA/Python/Python312/Scripts/uv.exe" lock --directory tasks/active/<slug>/environment/locks`. Copy
   `tests/locks/judge/`, `tests/test.sh` and `tests/Dockerfile` from the template unchanged.
@@ -149,7 +149,8 @@ These must agree across files (names as in chapman):
   name the older unsuffixed files (October 22, toolkit 3.0.0). `TB4-study-reference (2).md` lists the 35 criteria and the
   5 project checks. All of `docs/` predates TB 4.1 (kit 3.7.0 and later, from 2026-11-08): where they differ, the
   kit's README and `tb4 lint` win. The 3.7.0 download and the platform's Workflow tab text are in
-  `work/toolkit/20261109/`, the 3.8.2 download in `work/toolkit/20261109-382/`.
+  `work/toolkit/20261109/`, the 3.8.2 download in `work/toolkit/20261109-382/`, 3.8.7 in `work/toolkit/20261113-387/`
+  and 3.8.8 in `work/toolkit/20261114-388/`.
 
 ### Logs
 
