@@ -11,7 +11,8 @@ With a fourth argument `wait-sign-in`, a sign-in page before the first good stat
 the session is known to be signed out (the user has been asked to sign in again in the debug Chrome), so it prints
 one line, keeps polling and prints "signed in again" when a status answers. A sign-in page after a good status of
 the run still counts as a miss, so a new sign-out ends the watch (exit 2). Added 2026-11-14, when the platform came
-back from a ten-hour outage with every session signed out.
+back from a ten-hour outage with every session signed out. While it waits, each round makes one status call (the
+first task's) instead of one per task: every call leaves a utility world in the tabs the user keeps open.
 
     python -X utf8 -I -B tools/poll_pipeline.py T-0851 43200 180      (Bash run_in_background, folder root)
     python -X utf8 -I -B tools/poll_pipeline.py T-1383,T-1563 43200 600 wait-sign-in
@@ -84,6 +85,8 @@ def poll(task):
 while True:
     for t in tasks:
         poll(t)
+        if signed_out:
+            break  # the other tasks would show the same sign-in page: one status call per round while signed out
     if time.time() + interval > end:
         print("%s UTC: limit reached, no new card" % time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()), flush=True)
         print(out, flush=True)
